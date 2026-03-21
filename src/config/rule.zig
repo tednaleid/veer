@@ -103,6 +103,11 @@ pub fn validate(rules: []const Rule) ValidationError!void {
     }
 }
 
+/// Public wrapper for hasAnyMatch, used by validate_cmd.
+pub fn hasAnyMatchPub(m: MatchConfig) bool {
+    return hasAnyMatch(m);
+}
+
 fn hasAnyMatch(m: MatchConfig) bool {
     return m.command != null or
         m.command_any != null or

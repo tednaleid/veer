@@ -13,6 +13,8 @@ jobs:
         run: zig build test
       - name: Lint
         run: zig fmt --check src/
+      - name: Fuzz (20s smoke test)
+        run: timeout 20 zig build test --fuzz; test $? -eq 124
 
   bench:
     runs-on: ubuntu-latest

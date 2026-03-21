@@ -21,6 +21,8 @@ comptime {
     _ = @import("cli/remove.zig");
     _ = @import("cli/stats.zig");
     _ = @import("cli/scan.zig");
+    _ = @import("cli/test_cmd.zig");
+    _ = @import("cli/validate_cmd.zig");
     _ = @import("claude/transcript.zig");
     _ = @import("claude/settings.zig");
 }

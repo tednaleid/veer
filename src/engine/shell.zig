@@ -281,3 +281,13 @@ test "parse command with flag" {
     try std.testing.expectEqual(@as(usize, 1), info.commands.items.len);
     try std.testing.expect(info.commands.items[0].hasFlag("-rf"));
 }
+
+test "fuzz shell parser never panics" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, input: []const u8) anyerror!void {
+            // Feed arbitrary bytes to the parser -- must not panic.
+            var info = parse(std.testing.allocator, input) catch return;
+            info.deinit(std.testing.allocator);
+        }
+    }.run, .{});
+}

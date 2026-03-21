@@ -39,6 +39,24 @@ list-rules:
 help:
     zig build run -- help || true
 
+# Run fuzz tests interactively (Ctrl-C to stop).
+fuzz:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! zig build test --fuzz; then
+        if [[ "$(uname)" == "Darwin" ]]; then
+            echo ""
+            echo "Note: Zig 0.15 fuzzer has known issues on macOS (InvalidElfMagic)."
+            echo "Fuzz tests run correctly on Linux. Try: just fuzz-ci on a Linux host or CI."
+        else
+            exit 1
+        fi
+    fi
+
+# Run fuzz tests for a fixed duration (CI). Exit 0 if no crash found, non-zero if crash.
+fuzz-ci duration="20":
+    timeout {{duration}} zig build test --fuzz; test $? -eq 124
+
 # Run benchmarks (ReleaseFast for accurate timing)
 bench:
     zig build bench -Doptimize=ReleaseFast

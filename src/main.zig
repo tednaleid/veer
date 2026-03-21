@@ -13,6 +13,8 @@ const add_cmd = @import("cli/add.zig");
 const remove_cmd = @import("cli/remove.zig");
 const stats_cmd = @import("cli/stats.zig");
 const scan_cmd = @import("cli/scan.zig");
+const test_cmd = @import("cli/test_cmd.zig");
+const validate_cmd = @import("cli/validate_cmd.zig");
 const settings_mod = @import("claude/settings.zig");
 
 pub fn main() !void {
@@ -45,6 +47,10 @@ pub fn main() !void {
         try runStats(allocator);
     } else if (std.mem.eql(u8, command, "scan")) {
         try runScan(allocator, &args);
+    } else if (std.mem.eql(u8, command, "test")) {
+        try runTest(allocator, &args);
+    } else if (std.mem.eql(u8, command, "validate")) {
+        try runValidate(allocator, &args);
     } else {
         printUsage();
         std.process.exit(1);
@@ -266,6 +272,60 @@ fn runScan(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !void {
     std.process.exit(exit_code);
 }
 
+fn runTest(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !void {
+    var opts = test_cmd.TestOptions{};
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--config")) {
+            opts.config_path = args.next() orelse ".veer/config.toml";
+        } else if (arg.len > 0 and arg[0] != '-') {
+            opts.command = arg;
+        }
+    }
+
+    var rules: []const config_mod.Rule = &.{};
+    var parsed_config: ?@import("toml").Parsed(config_mod.Config) = null;
+    defer if (parsed_config) |*pc| pc.deinit();
+
+    if (config_mod.loadFile(allocator, opts.config_path)) |result| {
+        parsed_config = result;
+        rules = result.value.rule;
+    } else |_| {
+        std.debug.print("veer: failed to load config: {s}\n", .{opts.config_path});
+        std.process.exit(1);
+    }
+
+    var buf: [4096]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    const exit_code = test_cmd.run(allocator, rules, opts, stream.writer()) catch {
+        std.debug.print("veer test: internal error\n", .{});
+        std.process.exit(1);
+    };
+
+    const output = stream.getWritten();
+    if (output.len > 0) _ = std.fs.File.stdout().write(output) catch {};
+    std.process.exit(exit_code);
+}
+
+fn runValidate(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !void {
+    var opts = validate_cmd.ValidateOptions{};
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--config")) {
+            opts.config_path = args.next() orelse ".veer/config.toml";
+        }
+    }
+
+    var buf: [4096]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    const exit_code = validate_cmd.run(allocator, opts, stream.writer()) catch {
+        std.debug.print("veer validate: internal error\n", .{});
+        std.process.exit(1);
+    };
+
+    const output = stream.getWritten();
+    if (output.len > 0) _ = std.fs.File.stdout().write(output) catch {};
+    std.process.exit(exit_code);
+}
+
 fn printUsage() void {
     std.debug.print(
         \\Usage: veer <command>
@@ -278,14 +338,18 @@ fn printUsage() void {
         \\  remove     Remove a rule by ID
         \\  stats      Display usage statistics
         \\  scan       Mine transcripts to discover command patterns
+        \\  test       Test a command against rules
+        \\  validate   Validate config file
         \\
         \\Options:
-        \\  check   --config <path>     Use a specific config file
-        \\  install --global --force --uninstall
-        \\  list    --config <path>
-        \\  add     --action <action> --command <cmd> [--message <msg>] [--rewrite-to <cmd>]
-        \\  remove  <rule-id> [--config <path>]
-        \\  scan    --transcript <path> [--min-count <n>] [--output toml] [--permissions --settings <path>]
+        \\  check    --config <path>     Use a specific config file
+        \\  install  --global --force --uninstall
+        \\  list     --config <path>
+        \\  add      --action <action> --command <cmd> [--message <msg>] [--rewrite-to <cmd>]
+        \\  remove   <rule-id> [--config <path>]
+        \\  scan     --transcript <path> [--min-count <n>] [--output toml] [--permissions --settings <path>]
+        \\  test     "<command>" [--config <path>]
+        \\  validate [--config <path>]
         \\
     , .{});
 }

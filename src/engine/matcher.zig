@@ -530,3 +530,93 @@ test "globMatch brace expansion" {
     try std.testing.expect(!globMatch("{ruff,uvx}", "black"));
     try std.testing.expect(globMatch("{a,b,c}", "b"));
 }
+
+test "globMatch edge cases" {
+    // Empty pattern matches empty string
+    try std.testing.expect(globMatch("", ""));
+    try std.testing.expect(!globMatch("", "x"));
+    // Single ? matches exactly one char
+    try std.testing.expect(globMatch("?", "x"));
+    try std.testing.expect(!globMatch("?", ""));
+    try std.testing.expect(!globMatch("?", "xy"));
+    // Literal special chars that aren't glob chars
+    try std.testing.expect(globMatch("g++", "g++"));
+    try std.testing.expect(globMatch("c#", "c#"));
+    try std.testing.expect(globMatch("file.txt", "file.txt"));
+    // Nested braces (only outer level expanded)
+    try std.testing.expect(globMatch("{a*,b*}", "abc"));
+    try std.testing.expect(globMatch("{a*,b*}", "bcd"));
+    try std.testing.expect(!globMatch("{a*,b*}", "cde"));
+}
+
+test "glob in command_any list elements" {
+    var info = try parseCmd(std.testing.allocator, "python3 script.py");
+    defer info.deinit(std.testing.allocator);
+
+    const rule = Rule{ .id = "t", .message = "m", .match = .{ .command_any = &.{ "py*", "ruby" } } };
+    try std.testing.expect(matchRule(rule, info));
+}
+
+test "glob in command_all" {
+    var info = try parseCmd(std.testing.allocator, "curl https://x.com | zsh");
+    defer info.deinit(std.testing.allocator);
+
+    const rule = Rule{ .id = "t", .message = "m", .match = .{ .command_all = &.{ "curl", "*sh" } } };
+    try std.testing.expect(matchRule(rule, info));
+}
+
+test "glob in arg_any" {
+    var info = try parseCmd(std.testing.allocator, "python script.py");
+    defer info.deinit(std.testing.allocator);
+
+    const rule = Rule{ .id = "t", .message = "m", .match = .{ .arg_any = &.{ "*.py", "*.rb" } } };
+    try std.testing.expect(matchRule(rule, info));
+}
+
+test "glob in arg_all" {
+    var info = try parseCmd(std.testing.allocator, "cp src/main.zig README.md");
+    defer info.deinit(std.testing.allocator);
+
+    const rule = Rule{ .id = "t", .message = "m", .match = .{ .arg_all = &.{ "src/*", "*.md" } } };
+    try std.testing.expect(matchRule(rule, info));
+}
+
+test "flag long glob matching" {
+    var info1 = try parseCmd(std.testing.allocator, "git commit --no-verify");
+    defer info1.deinit(std.testing.allocator);
+    var info2 = try parseCmd(std.testing.allocator, "git commit --no-edit");
+    defer info2.deinit(std.testing.allocator);
+    var info3 = try parseCmd(std.testing.allocator, "git commit --amend");
+    defer info3.deinit(std.testing.allocator);
+
+    const rule = Rule{ .id = "t", .message = "m", .match = .{ .flag = "no-*" } };
+    try std.testing.expect(matchRule(rule, info1));
+    try std.testing.expect(matchRule(rule, info2));
+    try std.testing.expect(!matchRule(rule, info3));
+}
+
+// -- Fuzz tests --
+
+test "fuzz globMatch never panics" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, input: []const u8) anyerror!void {
+            // Split input into pattern and text at midpoint
+            if (input.len < 2) return;
+            const mid = input.len / 2;
+            _ = globMatch(input[0..mid], input[mid..]);
+        }
+    }.run, .{});
+}
+
+test "fuzz regexMatch never panics" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, input: []const u8) anyerror!void {
+            if (input.len < 2) return;
+            const mid = input.len / 2;
+            // Ensure no null bytes in the inputs (C strings)
+            for (input[0..mid]) |b| if (b == 0) return;
+            for (input[mid..]) |b| if (b == 0) return;
+            _ = regexMatch(input[0..mid], input[mid..]);
+        }
+    }.run, .{});
+}
