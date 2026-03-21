@@ -184,82 +184,23 @@ fn globMatchSimple(pattern: []const u8, text: []const u8) bool {
     return true;
 }
 
-/// Simple regex matching supporting ^, $, [], ?, and literal chars.
-/// Not full POSIX regex -- covers the common command_regex patterns like "^python[23]?$".
+const c = @cImport({
+    @cInclude("veer_regex.h");
+});
+
+/// POSIX extended regex matching via vendored C wrapper.
+/// The C wrapper handles regex_t allocation, which is opaque in glibc's @cImport.
 fn regexMatch(pattern: []const u8, text: []const u8) bool {
-    var pi: usize = 0;
-    var ti: usize = 0;
+    var pat_buf: [256]u8 = undefined;
+    var txt_buf: [1024]u8 = undefined;
+    if (pattern.len >= pat_buf.len or text.len >= txt_buf.len) return false;
 
-    // Handle ^ anchor
-    const anchored_start = pi < pattern.len and pattern[pi] == '^';
-    if (anchored_start) pi += 1;
+    @memcpy(pat_buf[0..pattern.len], pattern);
+    pat_buf[pattern.len] = 0;
+    @memcpy(txt_buf[0..text.len], text);
+    txt_buf[text.len] = 0;
 
-    // Check for $ anchor at end
-    const anchored_end = pattern.len > 0 and pattern[pattern.len - 1] == '$';
-    const pat_end = if (anchored_end) pattern.len - 1 else pattern.len;
-
-    if (!anchored_start) {
-        // Without ^, try matching at every position
-        while (ti <= text.len) : (ti += 1) {
-            if (regexMatchAt(pattern[pi..pat_end], text, ti)) |end_pos| {
-                if (!anchored_end or end_pos == text.len) return true;
-            }
-            if (ti == text.len) break;
-        }
-        return false;
-    }
-
-    // Anchored at start
-    if (regexMatchAt(pattern[pi..pat_end], text, 0)) |end_pos| {
-        return !anchored_end or end_pos == text.len;
-    }
-    return false;
-}
-
-/// Try matching pattern at a specific position in text. Returns end position if matched.
-fn regexMatchAt(pattern: []const u8, text: []const u8, start: usize) ?usize {
-    var pi: usize = 0;
-    var ti: usize = start;
-
-    while (pi < pattern.len) {
-        // Character class [...]
-        if (pattern[pi] == '[') {
-            pi += 1;
-            var matched = false;
-            while (pi < pattern.len and pattern[pi] != ']') {
-                if (ti < text.len and pattern[pi] == text[ti]) matched = true;
-                pi += 1;
-            }
-            if (pi < pattern.len) pi += 1; // skip ]
-            // Check for ? quantifier after class
-            if (pi < pattern.len and pattern[pi] == '?') {
-                pi += 1;
-                if (matched) ti += 1;
-                // If not matched, ? makes it optional -- don't advance ti
-            } else if (!matched) {
-                return null;
-            } else {
-                ti += 1;
-            }
-            continue;
-        }
-
-        // Literal character with optional ?
-        if (pi + 1 < pattern.len and pattern[pi + 1] == '?') {
-            if (ti < text.len and pattern[pi] == text[ti]) {
-                ti += 1;
-            }
-            pi += 2;
-            continue;
-        }
-
-        // Literal character
-        if (ti >= text.len or pattern[pi] != text[ti]) return null;
-        pi += 1;
-        ti += 1;
-    }
-
-    return ti;
+    return c.veer_regex_match(&pat_buf, &txt_buf) == 1;
 }
 
 // -- Tests --
