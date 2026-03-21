@@ -6,11 +6,17 @@
 
 ## Technical Approach
 
+**Target: Zig 0.15.2**
+
 This stage sets up the Zig project foundation and validates the riskiest technical dependency: tree-sitter-bash integration in Zig. By the end of this stage, we can parse arbitrary shell commands into structured CommandInfo objects with comprehensive test coverage.
 
 The build system compiles vendored C code (SQLite amalgamation, tree-sitter-bash grammar) alongside Zig source. SQLite compilation is included now even though it's not used until Stage 4 -- this validates that the entire vendored C build pipeline works up front.
 
+**tree-sitter integration strategy**: Try the official `tree-sitter/zig-tree-sitter` package first. If it doesn't support Zig 0.15.2, fall back to vendoring tree-sitter core C code and using `@cImport` directly -- veer only needs ~11 of tree-sitter's 160+ C API functions, so writing our own thin Zig wrapper (~100 lines) is straightforward. Either way, tree-sitter-bash grammar C files (parser.c, scanner.c) are vendored.
+
 tree-sitter-bash is the core of veer's advantage over regex-based matching. It produces a full AST from which we extract base commands, flags, arguments, pipeline structure, subshells, command substitutions, and other structural properties. This stage must prove that the Zig-to-C interop works reliably.
+
+**Note**: Code examples in this spec are illustrative. The actual tree-sitter API may differ (e.g., `Parser.create()` vs `Parser.init()`). Adapt to the actual package or C API as needed.
 
 ## Feedback Strategy
 
@@ -36,6 +42,8 @@ tree-sitter-bash is the core of veer's advantage over regex-based matching. It p
 | `vendor/tree-sitter-bash/src/tree_sitter/parser.h` | tree-sitter grammar header |
 | `CLAUDE.md` | Project instructions for Claude Code sessions |
 | `Justfile` | Convenience recipes wrapping zig build commands |
+| `.gitignore` | Ignore zig-out/, zig-cache/, .zig-cache/, .veer/, .llm/ |
+| `.llm/` | Project-local scratch directory for working files (gitignored) |
 
 ### Vendoring C Sources
 
@@ -43,7 +51,7 @@ tree-sitter-bash is the core of veer's advantage over regex-based matching. It p
 
 **tree-sitter-bash**: Clone https://github.com/tree-sitter/tree-sitter-bash (latest release tag). Copy `src/parser.c`, `src/scanner.c`, and `src/tree_sitter/parser.h` into `vendor/tree-sitter-bash/src/`. These are generated files -- do not modify them.
 
-**tree-sitter core**: This is a Zig package dependency declared in `build.zig.zon`, not vendored. Find a Zig-compatible tree-sitter package (e.g., from the Zig package index or a tree-sitter fork with Zig build support). The package should expose a `tree-sitter` module importable from Zig.
+**tree-sitter core**: First choice: use the official `tree-sitter/zig-tree-sitter` package (https://github.com/tree-sitter/zig-tree-sitter) as a Zig package dependency in `build.zig.zon`. Second choice (if package doesn't support Zig 0.15.2): vendor tree-sitter core C code from https://github.com/tree-sitter/tree-sitter (`lib/src/*.c` + `lib/include/tree_sitter/api.h`) into `vendor/tree-sitter/` and compile it in build.zig alongside SQLite. Write thin Zig wrappers via `@cImport(@cInclude("tree_sitter/api.h"))` for the ~11 functions veer needs.
 
 ## Implementation Details
 
@@ -53,7 +61,7 @@ Follow the pattern from `docs/spec/veer-spec.md` lines 276-421.
 
 **Structure:**
 1. Standard target/optimize options
-2. Declare package dependencies (clap, zig-toml, tree-sitter)
+2. Declare package dependencies (tree-sitter only for Stage 1; zig-clap and zig-toml added in their respective stages)
 3. Main executable `veer` with:
    - `linkLibC()`
    - SQLite amalgamation C source with compile flags
@@ -88,20 +96,17 @@ Each test module needs the same C sources and Zig package imports as the main ex
 
 ### build.zig.zon
 
-Declare all package dependencies upfront (even ones used in later stages):
-- **zig-clap**: https://github.com/Hejsil/zig-clap (CLI argument parser, used in Stage 3+)
-- **zig-toml**: https://github.com/sam701/zig-toml (TOML parser, used in Stage 2+)
-- **tree-sitter**: Zig bindings for tree-sitter core (used in this stage)
+Only declare dependencies needed for this stage. Later stages add their own dependencies (zig-toml in Stage 2, zig-clap in Stage 3).
 
-Look up current package URLs and hashes. The build.zig.zon format is:
+- **tree-sitter**: `tree-sitter/zig-tree-sitter` from GitHub (if using the package approach)
+
+If using the `@cImport` fallback approach, no Zig package dependencies are needed -- tree-sitter core C code is vendored instead.
 
 ```zig
 .{
     .name = "veer",
     .version = "0.1.0",
     .dependencies = .{
-        .clap = .{ .url = "...", .hash = "..." },
-        .@"zig-toml" = .{ .url = "...", .hash = "..." },
         .@"tree-sitter" = .{ .url = "...", .hash = "..." },
     },
     .paths = .{"."},
@@ -111,6 +116,8 @@ Look up current package URLs and hashes. The build.zig.zon format is:
 ### CommandInfo (src/engine/command_info.zig)
 
 The core data structure that rules match against. Defined in `docs/spec/veer-prd.md` lines 471-495.
+
+**Memory ownership**: All string slices in CommandInfo and SingleCommand (name, args, flags, positional, logical_operators) are **borrowed** from the original command string via tree-sitter byte offsets. CommandInfo does NOT own these strings. It is valid only while the source command string (`raw`) lives. For veer's use case (parse, match rules, return result, free everything), this zero-copy approach is ideal.
 
 ```zig
 const std = @import("std");
@@ -210,7 +217,7 @@ pub fn parse(allocator: std.mem.Allocator, command: []const u8) !CommandInfo {
 
 | Node Type | Action |
 |-----------|--------|
-| `"pipeline"` | Count pipe stages, populate `pipeline_stages` |
+| `"pipeline"` | Count pipe stages, populate `pipeline_stages`. For compound commands like `a | b && c | d`, collect pipeline commands from ALL pipelines into `pipeline_stages`. `pipeline_length` tracks the max single pipeline length. |
 | `"command"` | Extract via `extractCommand()`, add to `commands` |
 | `"command_substitution"` | Set `has_command_subst = true` |
 | `"subshell"` | Set `has_subshell = true` |
@@ -343,7 +350,7 @@ zig build run
 
 ## Open Items
 
-- [ ] Exact tree-sitter Zig package URL for build.zig.zon (find current version)
+- [ ] Confirm `tree-sitter/zig-tree-sitter` works with Zig 0.15.2 -- if not, fall back to `@cImport` approach (vendor tree-sitter core C code)
 - [ ] Exact SQLite amalgamation URL (find latest from sqlite.org)
 - [ ] tree-sitter-bash version to vendor (use latest release tag)
-- [ ] Confirm tree-sitter Zig API matches patterns in this spec (Parser.init, parseString, etc.) -- adapt if API differs
+- [ ] Adapt API calls to match actual tree-sitter Zig API (examples in this spec are illustrative)
