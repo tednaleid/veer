@@ -8,10 +8,6 @@ const AstMatch = @import("../config/rule.zig").AstMatch;
 const CommandInfo = @import("command_info.zig").CommandInfo;
 const SingleCommand = @import("command_info.zig").SingleCommand;
 
-const c = @cImport({
-    @cInclude("regex.h");
-});
-
 /// Returns true if the rule matches the given command info.
 /// All specified match fields must match (AND logic).
 /// Checks every command in the parsed AST.
@@ -188,24 +184,82 @@ fn globMatchSimple(pattern: []const u8, text: []const u8) bool {
     return true;
 }
 
-/// POSIX regex matching via libc.
+/// Simple regex matching supporting ^, $, [], ?, and literal chars.
+/// Not full POSIX regex -- covers the common command_regex patterns like "^python[23]?$".
 fn regexMatch(pattern: []const u8, text: []const u8) bool {
-    // Need null-terminated strings for C regex API
-    var pat_buf: [256]u8 = undefined;
-    var txt_buf: [1024]u8 = undefined;
-    if (pattern.len >= pat_buf.len or text.len >= txt_buf.len) return false;
-    @memcpy(pat_buf[0..pattern.len], pattern);
-    pat_buf[pattern.len] = 0;
-    @memcpy(txt_buf[0..text.len], text);
-    txt_buf[text.len] = 0;
+    var pi: usize = 0;
+    var ti: usize = 0;
 
-    var regex: c.regex_t = undefined;
-    const comp_result = c.regcomp(&regex, &pat_buf, c.REG_EXTENDED | c.REG_NOSUB);
-    if (comp_result != 0) return false;
-    defer c.regfree(&regex);
+    // Handle ^ anchor
+    const anchored_start = pi < pattern.len and pattern[pi] == '^';
+    if (anchored_start) pi += 1;
 
-    const exec_result = c.regexec(&regex, &txt_buf, 0, null, 0);
-    return exec_result == 0;
+    // Check for $ anchor at end
+    const anchored_end = pattern.len > 0 and pattern[pattern.len - 1] == '$';
+    const pat_end = if (anchored_end) pattern.len - 1 else pattern.len;
+
+    if (!anchored_start) {
+        // Without ^, try matching at every position
+        while (ti <= text.len) : (ti += 1) {
+            if (regexMatchAt(pattern[pi..pat_end], text, ti)) |end_pos| {
+                if (!anchored_end or end_pos == text.len) return true;
+            }
+            if (ti == text.len) break;
+        }
+        return false;
+    }
+
+    // Anchored at start
+    if (regexMatchAt(pattern[pi..pat_end], text, 0)) |end_pos| {
+        return !anchored_end or end_pos == text.len;
+    }
+    return false;
+}
+
+/// Try matching pattern at a specific position in text. Returns end position if matched.
+fn regexMatchAt(pattern: []const u8, text: []const u8, start: usize) ?usize {
+    var pi: usize = 0;
+    var ti: usize = start;
+
+    while (pi < pattern.len) {
+        // Character class [...]
+        if (pattern[pi] == '[') {
+            pi += 1;
+            var matched = false;
+            while (pi < pattern.len and pattern[pi] != ']') {
+                if (ti < text.len and pattern[pi] == text[ti]) matched = true;
+                pi += 1;
+            }
+            if (pi < pattern.len) pi += 1; // skip ]
+            // Check for ? quantifier after class
+            if (pi < pattern.len and pattern[pi] == '?') {
+                pi += 1;
+                if (matched) ti += 1;
+                // If not matched, ? makes it optional -- don't advance ti
+            } else if (!matched) {
+                return null;
+            } else {
+                ti += 1;
+            }
+            continue;
+        }
+
+        // Literal character with optional ?
+        if (pi + 1 < pattern.len and pattern[pi + 1] == '?') {
+            if (ti < text.len and pattern[pi] == text[ti]) {
+                ti += 1;
+            }
+            pi += 2;
+            continue;
+        }
+
+        // Literal character
+        if (ti >= text.len or pattern[pi] != text[ti]) return null;
+        pi += 1;
+        ti += 1;
+    }
+
+    return ti;
 }
 
 // -- Tests --
