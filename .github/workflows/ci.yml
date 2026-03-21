@@ -13,9 +13,9 @@ jobs:
         run: zig build test
       - name: Lint
         run: zig fmt --check src/
-      - name: Fuzz (20s smoke test)
-        continue-on-error: true  # Zig 0.15 fuzzer has stdlib bugs -- re-evaluate on 0.16
-        run: timeout 20 zig build test --fuzz; test $? -eq 124
+      # Fuzz: disabled until Zig fixes stdlib fuzzer bug (Build/Fuzz.zig:429).
+      # Fuzz test functions still run as regular tests above.
+      # Re-evaluate on Zig 0.16: timeout 20 zig build test --fuzz; test $? -eq 124
 
   bench:
     runs-on: ubuntu-latest
