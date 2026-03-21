@@ -375,18 +375,29 @@ Shell commands are parsed into ASTs using tree-sitter-bash, giving structural un
 | Binary size (ReleaseSmall) | < 2MB |
 | JSONL parse rate | > 50,000 lines/sec |
 
+## Testing
+
+```bash
+just test     # Run all tests (135 tests)
+just check    # Test + lint
+just bench    # Benchmarks (ReleaseFast)
+```
+
+Fuzz test targets exist for the shell parser, glob matcher, and regex matcher.
+The Zig 0.15.x built-in fuzzer has [known bugs](https://github.com/ziglang/zig/issues/25470)
+that prevent `--fuzz` mode from running. Fuzz functions still execute as regular tests.
+See [docs/fuzzing.md](docs/fuzzing.md) for details and status.
+
 ## Building
 
 Requires Zig 0.15+.
 
 ```bash
-zig build                        # Debug build
+zig build                          # Debug build
 zig build -Doptimize=ReleaseSmall  # Optimized release build
-zig build test                   # Run tests
-zig build bench                  # Run benchmarks
 ```
 
-See the `Justfile` for convenience recipes: `just check` (test + lint), `just bench`, `just fmt`.
+See the `Justfile` for all recipes: `just check`, `just bench`, `just fmt`, `just fuzz`.
 
 ## License
 
