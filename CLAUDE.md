@@ -5,9 +5,11 @@ agent tool calls toward safer alternatives.
 
 ## Build & Test
 
-- Build: `zig build`
-- Test: `zig build test`
-- Run: `zig build run -- <subcommand>`
+See `Justfile` for all build, test, and smoke test recipes. Key commands:
+
+- `just test` -- run all tests
+- `just test-summary` -- run all tests with summary
+- `just build` -- build debug binary
 
 Requires Zig 0.15.2. The stdlib source is the best API reference:
 `/opt/homebrew/Cellar/zig/0.15.2/lib/zig/std/`
@@ -33,6 +35,8 @@ earlier versions. Key differences:
 ## Key Conventions
 
 - Tests live alongside source code in `test` blocks at bottom of each file.
+- `src/test_all.zig` is the unified test root -- add new test modules there.
+  Cross-directory imports don't work from individual test files in Zig 0.15.
 - Use `std.testing.allocator` in all tests (detects leaks).
 - Table-driven tests via `inline for` over anonymous struct tuples.
 - The `Store` interface in `src/store/store.zig` is the ONLY way to access storage.
@@ -41,3 +45,5 @@ earlier versions. Key differences:
   a `Store` interface at init time.
 - All C interop is isolated: SQLite in `src/store/sqlite_store.zig`,
   tree-sitter in `src/engine/shell.zig`.
+- Smoke test recipes in the Justfile (check-allow, check-rewrite, check-deny)
+  exercise the hook protocol end-to-end.
