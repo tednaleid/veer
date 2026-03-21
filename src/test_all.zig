@@ -10,4 +10,7 @@ comptime {
     _ = @import("config/config.zig");
     _ = @import("claude/hook.zig");
     _ = @import("cli/check.zig");
+    _ = @import("store/store.zig");
+    _ = @import("store/memory_store.zig");
+    _ = @import("store/sqlite_store.zig");
 }

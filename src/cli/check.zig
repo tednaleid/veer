@@ -24,8 +24,8 @@ pub fn run(
     };
     defer hook.freeInput(allocator, &input);
 
-    // Run engine
-    const result = engine.check(allocator, rules, input.tool_name, input.command);
+    // Run engine (store wiring happens in Stage 5 when config paths are resolved)
+    const result = engine.check(allocator, rules, input.tool_name, input.command, null);
 
     // Output based on action
     if (result.action) |action| {

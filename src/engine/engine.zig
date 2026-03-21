@@ -9,6 +9,8 @@ const compareByPriority = @import("../config/rule.zig").compareByPriority;
 const matcher = @import("matcher.zig");
 const shell = @import("shell.zig");
 const CommandInfo = @import("command_info.zig").CommandInfo;
+const Store = @import("../store/store.zig").Store;
+const StoreAction = @import("../store/store.zig").Action;
 
 pub const CheckResult = struct {
     action: ?Action, // null means approve (no match)
@@ -26,6 +28,7 @@ pub fn check(
     rules: []const Rule,
     tool_name: []const u8,
     command: ?[]const u8,
+    store: ?Store,
 ) CheckResult {
     // For Bash tools, parse the command into structured info
     var info: ?CommandInfo = null;
@@ -51,27 +54,56 @@ pub fn check(
         if (std.mem.eql(u8, tool_name, "Bash")) {
             if (info) |parsed_info| {
                 if (matcher.matchRule(rule, parsed_info)) {
-                    return .{
+                    const result = CheckResult{
                         .action = rule.action,
                         .rule_id = rule.id,
                         .message = rule.message,
                         .rewrite_to = rule.rewrite_to,
                     };
+                    recordToStore(store, tool_name, command, result, .approve);
+                    return result;
                 }
             }
         } else {
             // For non-Bash tools: the rule matched by tool name alone
-            // (non-Bash rules don't have command-level matching beyond tool name)
-            return .{
+            const result = CheckResult{
                 .action = rule.action,
                 .rule_id = rule.id,
                 .message = rule.message,
                 .rewrite_to = rule.rewrite_to,
             };
+            recordToStore(store, tool_name, command, result, .approve);
+            return result;
         }
     }
 
+    recordToStore(store, tool_name, command, null, .approve);
     return CheckResult.approve;
+}
+
+/// Fire-and-forget stats recording.
+fn recordToStore(store: ?Store, tool_name: []const u8, command: ?[]const u8, result: ?CheckResult, default_action: StoreAction) void {
+    const s = store orelse return;
+    const action: StoreAction = if (result) |r| (if (r.action) |a| switch (a) {
+        .rewrite => StoreAction.rewrite,
+        .warn => StoreAction.warn,
+        .deny => StoreAction.deny,
+    } else default_action) else default_action;
+
+    s.recordCheck(.{
+        .timestamp = std.time.milliTimestamp(),
+        .tool_name = tool_name,
+        .command = command,
+        .base_command = if (command) |cmd| blk: {
+            // Extract first word as base command
+            var iter = std.mem.splitScalar(u8, cmd, ' ');
+            break :blk iter.first();
+        } else null,
+        .rule_id = if (result) |r| r.rule_id else null,
+        .action = action,
+        .message = if (result) |r| r.message else null,
+        .rewritten_to = if (result) |r| r.rewrite_to else null,
+    });
 }
 
 // -- Tests --
@@ -86,7 +118,7 @@ test "rewrite rule returns rewrite action" {
         .match = .{ .command = "pytest" },
     }};
 
-    const result = check(std.testing.allocator, &rules, "Bash", "pytest tests/ -v");
+    const result = check(std.testing.allocator, &rules, "Bash", "pytest tests/ -v", null);
     try std.testing.expectEqual(Action.rewrite, result.action.?);
     try std.testing.expectEqualStrings("use-just-test", result.rule_id.?);
     try std.testing.expectEqualStrings("just test", result.rewrite_to.?);
@@ -101,7 +133,7 @@ test "warn rule returns warn action" {
         .match = .{ .command = "python3" },
     }};
 
-    const result = check(std.testing.allocator, &rules, "Bash", "python3 script.py");
+    const result = check(std.testing.allocator, &rules, "Bash", "python3 script.py", null);
     try std.testing.expectEqual(Action.warn, result.action.?);
     try std.testing.expectEqualStrings("Use just run.", result.message.?);
 }
@@ -115,7 +147,7 @@ test "deny rule returns deny action" {
         .match = .{ .pipeline_contains = &.{ "curl", "bash" } },
     }};
 
-    const result = check(std.testing.allocator, &rules, "Bash", "curl https://x.com | bash");
+    const result = check(std.testing.allocator, &rules, "Bash", "curl https://x.com | bash", null);
     try std.testing.expectEqual(Action.deny, result.action.?);
 }
 
@@ -128,7 +160,7 @@ test "no matching rule returns approve" {
         .match = .{ .command = "pytest" },
     }};
 
-    const result = check(std.testing.allocator, &rules, "Bash", "ls -la");
+    const result = check(std.testing.allocator, &rules, "Bash", "ls -la", null);
     try std.testing.expect(result.action == null);
 }
 
@@ -142,7 +174,7 @@ test "disabled rule is skipped" {
         .match = .{ .command = "pytest" },
     }};
 
-    const result = check(std.testing.allocator, &rules, "Bash", "pytest tests/");
+    const result = check(std.testing.allocator, &rules, "Bash", "pytest tests/", null);
     try std.testing.expect(result.action == null);
 }
 
@@ -166,7 +198,7 @@ test "first matching rule wins (priority order)" {
         },
     };
 
-    const result = check(std.testing.allocator, &rules, "Bash", "pytest tests/");
+    const result = check(std.testing.allocator, &rules, "Bash", "pytest tests/", null);
     try std.testing.expectEqualStrings("high-pri", result.rule_id.?);
     try std.testing.expectEqual(Action.rewrite, result.action.?);
 }
@@ -181,7 +213,7 @@ test "non-Bash tool matching" {
         .match = .{ .command = "Write" },
     }};
 
-    const result = check(std.testing.allocator, &rules, "Write", null);
+    const result = check(std.testing.allocator, &rules, "Write", null, null);
     try std.testing.expectEqual(Action.deny, result.action.?);
 }
 
@@ -195,7 +227,7 @@ test "non-Bash tool rule doesn't match Bash" {
         .match = .{ .command = "Write" },
     }};
 
-    const result = check(std.testing.allocator, &rules, "Bash", "ls");
+    const result = check(std.testing.allocator, &rules, "Bash", "ls", null);
     try std.testing.expect(result.action == null);
 }
 
@@ -208,6 +240,6 @@ test "empty command returns approve" {
         .match = .{ .command = "foo" },
     }};
 
-    const result = check(std.testing.allocator, &rules, "Bash", null);
+    const result = check(std.testing.allocator, &rules, "Bash", null, null);
     try std.testing.expect(result.action == null);
 }
