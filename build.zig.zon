@@ -7,6 +7,10 @@
             .url = "git+https://github.com/tree-sitter/zig-tree-sitter#5373b8395bcf6cf17e6a02be1a9996bedb34abf6",
             .hash = "tree_sitter-0.25.0-8heIf7iZAQDu5oiKLKffYhdvWpEuxc5OhsySDlkFLxFT",
         },
+        .toml = .{
+            .url = "git+https://github.com/sam701/zig-toml#a73c9423d88ed413204b39638fab7e9bccdb83fd",
+            .hash = "toml-0.3.0-bV14Be6EAQDr0fkyURz4jYFyTAMPcwlNN0FEPVjDnXTR",
+        },
     },
     .paths = .{
         "build.zig",

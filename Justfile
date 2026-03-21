@@ -4,6 +4,10 @@ default: test
 test:
     zig build test
 
+# Run all tests with summary
+test-summary:
+    zig build test --summary all
+
 # Build debug binary
 build:
     zig build

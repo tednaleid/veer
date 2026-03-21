@@ -1,0 +1,3 @@
+[settings]
+stats = false
+log_level = "debug"

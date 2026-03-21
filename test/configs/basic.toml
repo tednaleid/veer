@@ -1,0 +1,20 @@
+[settings]
+stats = true
+
+[[rule]]
+id = "use-just-test"
+name = "Redirect pytest to just test"
+action = "rewrite"
+rewrite_to = "just test"
+message = "Use just test."
+[rule.match]
+command = "pytest"
+
+[[rule]]
+id = "no-curl-pipe-bash"
+name = "Block curl piped to bash"
+action = "deny"
+priority = 1
+message = "Don't pipe curl to bash."
+[rule.match]
+pipeline_contains = ["curl", "bash"]

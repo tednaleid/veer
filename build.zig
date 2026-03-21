@@ -10,6 +10,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const toml_dep = b.dependency("toml", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
     // -- Main executable --
 
@@ -20,6 +24,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     exe_mod.addImport("tree_sitter", ts_dep.module("tree_sitter"));
+    exe_mod.addImport("toml", toml_dep.module("toml"));
 
     const exe = b.addExecutable(.{
         .name = "veer",
@@ -65,6 +70,8 @@ pub fn build(b: *std.Build) void {
     const test_modules = [_][]const u8{
         "src/engine/shell.zig",
         "src/engine/command_info.zig",
+        "src/config/rule.zig",
+        "src/config/config.zig",
     };
 
     const test_step = b.step("test", "Run all tests");
@@ -76,6 +83,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         });
         test_mod.addImport("tree_sitter", ts_dep.module("tree_sitter"));
+        test_mod.addImport("toml", toml_dep.module("toml"));
 
         const t = b.addTest(.{ .root_module = test_mod });
 
