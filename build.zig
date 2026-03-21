@@ -67,41 +67,30 @@ pub fn build(b: *std.Build) void {
 
     // -- Tests --
 
-    const test_modules = [_][]const u8{
-        "src/engine/shell.zig",
-        "src/engine/command_info.zig",
-        "src/config/rule.zig",
-        "src/config/config.zig",
-    };
+    const test_mod = b.createModule(.{
+        .root_source_file = b.path("src/test_all.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    test_mod.addImport("tree_sitter", ts_dep.module("tree_sitter"));
+    test_mod.addImport("toml", toml_dep.module("toml"));
+
+    const t = b.addTest(.{ .root_module = test_mod });
+
+    t.addCSourceFile(.{
+        .file = b.path("vendor/sqlite3/sqlite3.c"),
+        .flags = &.{ "-DSQLITE_DQS=0", "-DSQLITE_THREADSAFE=1" },
+    });
+    t.addIncludePath(b.path("vendor/sqlite3"));
+
+    t.addCSourceFiles(.{
+        .root = b.path("vendor/tree-sitter-bash/src"),
+        .files = &.{ "parser.c", "scanner.c" },
+        .flags = &.{"-std=c11"},
+    });
+    t.addIncludePath(b.path("vendor/tree-sitter-bash/src"));
 
     const test_step = b.step("test", "Run all tests");
-    for (test_modules) |path| {
-        const test_mod = b.createModule(.{
-            .root_source_file = b.path(path),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        });
-        test_mod.addImport("tree_sitter", ts_dep.module("tree_sitter"));
-        test_mod.addImport("toml", toml_dep.module("toml"));
-
-        const t = b.addTest(.{ .root_module = test_mod });
-
-        // Vendored C sources (same as exe)
-        t.addCSourceFile(.{
-            .file = b.path("vendor/sqlite3/sqlite3.c"),
-            .flags = &.{ "-DSQLITE_DQS=0", "-DSQLITE_THREADSAFE=1" },
-        });
-        t.addIncludePath(b.path("vendor/sqlite3"));
-
-        t.addCSourceFiles(.{
-            .root = b.path("vendor/tree-sitter-bash/src"),
-            .files = &.{ "parser.c", "scanner.c" },
-            .flags = &.{"-std=c11"},
-        });
-        t.addIncludePath(b.path("vendor/tree-sitter-bash/src"));
-
-        const run_t = b.addRunArtifact(t);
-        test_step.dependOn(&run_t.step);
-    }
+    test_step.dependOn(&b.addRunArtifact(t).step);
 }
