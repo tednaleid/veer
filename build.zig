@@ -93,4 +93,30 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&b.addRunArtifact(t).step);
+
+    // -- Benchmarks --
+
+    const bench_mod = b.createModule(.{
+        .root_source_file = b.path("src/bench.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    bench_mod.addImport("tree_sitter", ts_dep.module("tree_sitter"));
+
+    const bench_exe = b.addExecutable(.{
+        .name = "veer-bench",
+        .root_module = bench_mod,
+    });
+
+    bench_exe.addCSourceFiles(.{
+        .root = b.path("vendor/tree-sitter-bash/src"),
+        .files = &.{ "parser.c", "scanner.c" },
+        .flags = &.{"-std=c11"},
+    });
+    bench_exe.addIncludePath(b.path("vendor/tree-sitter-bash/src"));
+
+    const bench_run = b.addRunArtifact(bench_exe);
+    const bench_step = b.step("bench", "Run benchmarks");
+    bench_step.dependOn(&bench_run.step);
 }

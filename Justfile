@@ -39,6 +39,14 @@ list-rules:
 help:
     zig build run -- help || true
 
+# Run benchmarks (ReleaseFast for accurate timing)
+bench:
+    zig build bench -Doptimize=ReleaseFast
+
+# Build optimized release binary
+release:
+    zig build -Doptimize=ReleaseSmall
+
 # Clean build artifacts
 clean:
     rm -rf zig-out/ zig-cache/ .zig-cache/

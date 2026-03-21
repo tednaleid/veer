@@ -1,0 +1,43 @@
+name: CI
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.15.2
+      - name: Test
+        run: zig build test
+      - name: Lint
+        run: zig fmt --check src/
+
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.15.2
+      - name: Benchmark
+        run: zig build bench
+
+  size:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.15.2
+      - name: Build release
+        run: zig build -Doptimize=ReleaseSmall
+      - name: Check binary size
+        run: |
+          size=$(stat -c%s zig-out/bin/veer)
+          echo "Binary size: $size bytes ($(( size / 1024 ))KB)"
+          if [ "$size" -gt 2097152 ]; then
+            echo "FAIL: binary exceeds 2MB"
+            exit 1
+          fi
