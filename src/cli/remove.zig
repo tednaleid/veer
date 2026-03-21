@@ -107,7 +107,7 @@ test "remove existing rule" {
         \\[[rule]]
         \\id = "keep-this"
         \\name = "Keep"
-        \\action = "warn"
+        \\action = "reject"
         \\message = "kept"
         \\[rule.match]
         \\command = "foo"
@@ -115,7 +115,7 @@ test "remove existing rule" {
         \\[[rule]]
         \\id = "remove-this"
         \\name = "Remove"
-        \\action = "deny"
+        \\action = "reject"
         \\message = "removed"
         \\[rule.match]
         \\command = "bar"

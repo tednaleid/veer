@@ -13,7 +13,7 @@ command = "pytest"
 [[rule]]
 id = "no-curl-pipe-bash"
 name = "Block curl piped to bash"
-action = "deny"
+action = "reject"
 priority = 1
 message = "Don't pipe curl to bash."
 [rule.match]

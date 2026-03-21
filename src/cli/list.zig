@@ -47,7 +47,7 @@ fn truncate(s: []const u8, max_len: usize) []const u8 {
 test "list with rules renders table" {
     const rules = [_]config_mod.Rule{
         .{ .id = "use-just-test", .name = "Redirect pytest", .action = .rewrite, .rewrite_to = "just test", .message = "Use just test.", .match = .{ .command = "pytest" } },
-        .{ .id = "no-curl-bash", .name = "Block curl|bash", .action = .deny, .message = "Don't pipe curl to bash.", .match = .{ .pipeline_contains = &.{ "curl", "bash" } } },
+        .{ .id = "no-curl-bash", .name = "Block curl|bash", .action = .reject, .message = "Don't pipe curl to bash.", .match = .{ .pipeline_contains = &.{ "curl", "bash" } } },
     };
 
     var buf: [2048]u8 = undefined;

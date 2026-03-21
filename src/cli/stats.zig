@@ -16,8 +16,8 @@ pub fn run(allocator: std.mem.Allocator, store: Store, writer: anytype) !u8 {
     }
 
     try writer.print("Stats:\n\n", .{});
-    try writer.print("  Checks: {d} total | {d} approved | {d} rewritten | {d} warned | {d} denied\n\n", .{
-        stats.total_checks, stats.approved, stats.rewritten, stats.warned, stats.denied,
+    try writer.print("  Checks: {d} total | {d} approved | {d} rewritten | {d} rejected\n\n", .{
+        stats.total_checks, stats.approved, stats.rewritten, stats.rejected,
     });
 
     // Top commands
@@ -46,7 +46,7 @@ test "stats with data shows counts" {
 
     s.recordCheck(.{ .timestamp = 1000, .tool_name = "Bash", .action = .approve, .base_command = "ls" });
     s.recordCheck(.{ .timestamp = 2000, .tool_name = "Bash", .action = .rewrite, .rule_id = "r1", .base_command = "pytest" });
-    s.recordCheck(.{ .timestamp = 3000, .tool_name = "Bash", .action = .deny, .rule_id = "r2", .base_command = "rm" });
+    s.recordCheck(.{ .timestamp = 3000, .tool_name = "Bash", .action = .reject, .rule_id = "r2", .base_command = "rm" });
 
     var buf: [2048]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);

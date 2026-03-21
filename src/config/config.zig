@@ -140,7 +140,7 @@ test "loadString parses multiple rules" {
         \\[[rule]]
         \\id = "rule-a"
         \\name = "Rule A"
-        \\action = "warn"
+        \\action = "reject"
         \\message = "Don't do A."
         \\priority = 10
         \\[rule.match]
@@ -149,7 +149,7 @@ test "loadString parses multiple rules" {
         \\[[rule]]
         \\id = "rule-b"
         \\name = "Rule B"
-        \\action = "deny"
+        \\action = "reject"
         \\message = "Never do B."
         \\priority = 1
         \\[rule.match]
@@ -182,7 +182,7 @@ test "loadString rejects duplicate rule IDs" {
         \\[[rule]]
         \\id = "same"
         \\name = "Rule 1"
-        \\action = "warn"
+        \\action = "reject"
         \\message = "msg"
         \\[rule.match]
         \\command = "foo"
@@ -190,7 +190,7 @@ test "loadString rejects duplicate rule IDs" {
         \\[[rule]]
         \\id = "same"
         \\name = "Rule 2"
-        \\action = "warn"
+        \\action = "reject"
         \\message = "msg"
         \\[rule.match]
         \\command = "bar"
@@ -222,10 +222,10 @@ test "loadFile returns FileNotFound for missing file" {
 
 test "mergeRules combines non-overlapping rules" {
     const global = [_]Rule{
-        .{ .id = "g1", .name = "Global 1", .action = .warn, .message = "m", .priority = 50, .match = .{ .command = "a" } },
+        .{ .id = "g1", .name = "Global 1", .action = .reject, .message = "m", .priority = 50, .match = .{ .command = "a" } },
     };
     const project = [_]Rule{
-        .{ .id = "p1", .name = "Project 1", .action = .warn, .message = "m", .priority = 10, .match = .{ .command = "b" } },
+        .{ .id = "p1", .name = "Project 1", .action = .reject, .message = "m", .priority = 10, .match = .{ .command = "b" } },
     };
 
     const merged = try mergeRules(std.testing.allocator, &global, &project);
@@ -239,10 +239,10 @@ test "mergeRules combines non-overlapping rules" {
 
 test "mergeRules project overrides global by ID" {
     const global = [_]Rule{
-        .{ .id = "shared", .name = "Global version", .action = .warn, .message = "global msg", .match = .{ .command = "a" } },
+        .{ .id = "shared", .name = "Global version", .action = .reject, .message = "global msg", .match = .{ .command = "a" } },
     };
     const project = [_]Rule{
-        .{ .id = "shared", .name = "Project version", .action = .deny, .message = "project msg", .match = .{ .command = "a" } },
+        .{ .id = "shared", .name = "Project version", .action = .reject, .message = "project msg", .match = .{ .command = "a" } },
     };
 
     const merged = try mergeRules(std.testing.allocator, &global, &project);
@@ -250,7 +250,7 @@ test "mergeRules project overrides global by ID" {
 
     try std.testing.expectEqual(@as(usize, 1), merged.len);
     try std.testing.expectEqualStrings("Project version", merged[0].name);
-    try std.testing.expectEqual(Action.deny, merged[0].action);
+    try std.testing.expectEqual(Action.reject, merged[0].action);
 }
 
 test "loadFile parses basic.toml fixture" {
@@ -261,7 +261,7 @@ test "loadFile parses basic.toml fixture" {
     try std.testing.expectEqualStrings("use-just-test", result.value.rule[0].id);
     try std.testing.expectEqualStrings("no-curl-pipe-bash", result.value.rule[1].id);
     try std.testing.expectEqual(Action.rewrite, result.value.rule[0].action);
-    try std.testing.expectEqual(Action.deny, result.value.rule[1].action);
+    try std.testing.expectEqual(Action.reject, result.value.rule[1].action);
 }
 
 test "loadFile parses empty.toml fixture" {

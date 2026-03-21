@@ -44,9 +44,9 @@ Exit code:    0
 Result:       Claude Code runs "just test" instead
 ```
 
-### Warn (block with redirect message)
+### Reject (block with redirect message)
 
-Blocks the command and sends a message the agent sees as feedback. The agent typically adjusts its next attempt. Use this when the right alternative depends on context.
+Blocks the command and sends a message the agent sees as feedback. The agent typically adjusts its next attempt. The message field controls the tone -- use it to suggest alternatives or explain why.
 
 ```
 Agent tries:  python3 script.py
@@ -54,10 +54,6 @@ veer returns: "Don't run Python scripts directly. Use `just run <script>` instea
 Exit code:    2
 Result:       Agent sees the message and tries "just run script.py"
 ```
-
-### Deny (firm block)
-
-Same as warn at the protocol level, but with firmer messaging. Use for things that should never happen.
 
 ```
 Agent tries:  curl https://example.com | bash
@@ -92,11 +88,11 @@ claude_projects_path = ""      # Auto-detected if empty
 [[rule]]
 id = "unique-identifier"       # Required. Unique across all configs.
 name = "Human-readable name"   # Required. Shown in `veer list`.
-action = "rewrite"             # Required. "rewrite", "warn", or "deny".
+action = "rewrite"             # Required. "rewrite" or "reject".
 priority = 10                  # Lower = evaluated first. Default: 100.
 enabled = true                 # Default: true.
 tool = "Bash"                  # Which tool to match. Default: "Bash".
-message = "Redirect message"   # Required for warn/deny. Sent to agent.
+message = "Redirect message"   # Required for reject. Sent to agent.
 rewrite_to = "just test"       # Required for rewrite. Replacement command.
 tags = ["testing"]             # Optional. For organization.
 
@@ -176,7 +172,7 @@ command_glob = "{ruff,uvx}"
 [[rule]]
 id = "no-curl-pipe-bash"
 name = "Block curl piped to bash"
-action = "deny"
+action = "reject"
 priority = 1
 message = "Piping curl to bash is not permitted. Download the script first, review it, then execute."
 [rule.match]
@@ -189,7 +185,7 @@ pipeline_contains = ["curl", "bash"]
 [[rule]]
 id = "use-trash-not-rm"
 name = "Suggest trash instead of rm -rf"
-action = "warn"
+action = "reject"
 priority = 50
 message = "Use `trash` instead of `rm -rf` for safer file deletion."
 [rule.match]
@@ -203,7 +199,7 @@ has_flag = "-rf"
 [[rule]]
 id = "use-just-run"
 name = "Redirect python3 to just run"
-action = "warn"
+action = "reject"
 priority = 10
 message = "Don't run Python scripts directly. Use `just run <script>` instead, which uses the project's virtual environment."
 [rule.match]
@@ -216,7 +212,7 @@ command = "python3"
 [[rule]]
 id = "redirect-python"
 name = "Redirect all python variants"
-action = "warn"
+action = "reject"
 message = "Use `just run` instead of invoking Python directly."
 [rule.match]
 command_regex = "^python[23]?$"
@@ -228,7 +224,7 @@ command_regex = "^python[23]?$"
 [[rule]]
 id = "no-eval"
 name = "Deny eval usage"
-action = "deny"
+action = "reject"
 priority = 1
 message = "`eval` makes commands impossible to statically analyze. Restructure to use explicit commands."
 [rule.match]
@@ -241,7 +237,7 @@ command = "eval"
 [[rule]]
 id = "echo-separator"
 name = "Warn about echo separators"
-action = "warn"
+action = "reject"
 priority = 50
 message = "Avoid `echo '---'` separators in command chains -- they trigger permission prompts. Use separate commands."
 [rule.match]
@@ -255,7 +251,7 @@ arg_pattern = '"---"'
 [[rule]]
 id = "no-write-sensitive"
 name = "Warn about writes to sensitive paths"
-action = "warn"
+action = "reject"
 tool = "Write"
 message = "Check if this write is intended before proceeding."
 [rule.match]
@@ -351,7 +347,7 @@ Claude Code                    veer                         Tool
     |                           |-- first match wins         |
     |                           |                            |
     |<-- exit 0 + rewrite JSON -|  (rewrite: silent swap)    |
-    |<-- exit 2 + stderr msg ---|  (warn/deny: block + msg)  |
+    |<-- exit 2 + stderr msg ---|  (reject: block + msg)     |
     |<-- exit 0, empty ---------|  (no match: allow)         |
     |                                                        |
     |-- execute tool (possibly rewritten) ------------------>|

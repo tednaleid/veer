@@ -156,10 +156,8 @@ pub const SqliteStore = struct {
                     result.approved = count;
                 } else if (std.mem.eql(u8, action, "rewrite")) {
                     result.rewritten = count;
-                } else if (std.mem.eql(u8, action, "warn")) {
-                    result.warned = count;
-                } else if (std.mem.eql(u8, action, "deny")) {
-                    result.denied = count;
+                } else if (std.mem.eql(u8, action, "reject")) {
+                    result.rejected = count;
                 }
             }
             result.total_checks += count;
@@ -190,8 +188,7 @@ pub const SqliteStore = struct {
             if (action_text) |txt| {
                 const a = std.mem.span(txt);
                 if (std.mem.eql(u8, a, "rewrite")) action = .rewrite;
-                if (std.mem.eql(u8, a, "warn")) action = .warn;
-                if (std.mem.eql(u8, a, "deny")) action = .deny;
+                if (std.mem.eql(u8, a, "reject")) action = .reject;
             }
 
             return .{
@@ -337,7 +334,7 @@ test "SqliteStore recordCheck and getStats round-trip" {
 
     s.recordCheck(.{ .timestamp = 1000, .tool_name = "Bash", .action = .approve, .base_command = "ls" });
     s.recordCheck(.{ .timestamp = 2000, .tool_name = "Bash", .action = .rewrite, .rule_id = "test", .base_command = "pytest" });
-    s.recordCheck(.{ .timestamp = 3000, .tool_name = "Bash", .action = .deny, .rule_id = "deny", .base_command = "rm" });
+    s.recordCheck(.{ .timestamp = 3000, .tool_name = "Bash", .action = .reject, .rule_id = "reject-rm", .base_command = "rm" });
 
     // Wait for background writer to process
     std.Thread.sleep(50_000_000); // 50ms
@@ -346,7 +343,7 @@ test "SqliteStore recordCheck and getStats round-trip" {
     try std.testing.expectEqual(@as(u64, 3), stats.total_checks);
     try std.testing.expectEqual(@as(u64, 1), stats.approved);
     try std.testing.expectEqual(@as(u64, 1), stats.rewritten);
-    try std.testing.expectEqual(@as(u64, 1), stats.denied);
+    try std.testing.expectEqual(@as(u64, 1), stats.rejected);
 }
 
 test "SqliteStore getRuleStats" {

@@ -22,7 +22,7 @@ pub fn run(parent_allocator: std.mem.Allocator, opts: AddOptions, writer: anytyp
     const allocator = arena.allocator();
 
     const action_str = opts.action orelse {
-        try writer.print("veer add: --action is required (rewrite, warn, deny)\n", .{});
+        try writer.print("veer add: --action is required (rewrite, reject)\n", .{});
         return 1;
     };
     const command = opts.command orelse {
@@ -32,7 +32,7 @@ pub fn run(parent_allocator: std.mem.Allocator, opts: AddOptions, writer: anytyp
 
     // Validate action
     const action = std.meta.stringToEnum(rule_mod.Action, action_str) orelse {
-        try writer.print("veer add: invalid action '{s}' (must be rewrite, warn, or deny)\n", .{action_str});
+        try writer.print("veer add: invalid action '{s}' (must be rewrite or reject)\n", .{action_str});
         return 1;
     };
 
@@ -41,9 +41,9 @@ pub fn run(parent_allocator: std.mem.Allocator, opts: AddOptions, writer: anytyp
         try writer.print("veer add: --rewrite-to is required for rewrite rules\n", .{});
         return 1;
     }
-    // Warn/deny requires --message
-    if ((action == .warn or action == .deny) and opts.message == null) {
-        try writer.print("veer add: --message is required for warn/deny rules\n", .{});
+    // Reject requires --message
+    if (action == .reject and opts.message == null) {
+        try writer.print("veer add: --message is required for reject rules\n", .{});
         return 1;
     }
 
@@ -95,16 +95,14 @@ pub fn run(parent_allocator: std.mem.Allocator, opts: AddOptions, writer: anytyp
 fn autoId(allocator: std.mem.Allocator, action: []const u8, command: []const u8) ![]const u8 {
     return switch (std.meta.stringToEnum(rule_mod.Action, action) orelse return "custom-rule") {
         .rewrite => try std.fmt.allocPrint(allocator, "use-{s}", .{command}),
-        .warn => try std.fmt.allocPrint(allocator, "warn-{s}", .{command}),
-        .deny => try std.fmt.allocPrint(allocator, "no-{s}", .{command}),
+        .reject => try std.fmt.allocPrint(allocator, "reject-{s}", .{command}),
     };
 }
 
 fn autoName(allocator: std.mem.Allocator, action: []const u8, command: []const u8) ![]const u8 {
     return switch (std.meta.stringToEnum(rule_mod.Action, action) orelse return "Custom rule") {
         .rewrite => try std.fmt.allocPrint(allocator, "Redirect {s}", .{command}),
-        .warn => try std.fmt.allocPrint(allocator, "Warn about {s}", .{command}),
-        .deny => try std.fmt.allocPrint(allocator, "Block {s}", .{command}),
+        .reject => try std.fmt.allocPrint(allocator, "Reject {s}", .{command}),
     };
 }
 

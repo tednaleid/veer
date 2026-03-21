@@ -5,8 +5,7 @@ const std = @import("std");
 
 pub const Action = enum {
     rewrite,
-    warn,
-    deny,
+    reject,
 };
 
 pub const AstMatch = struct {
@@ -42,7 +41,7 @@ pub const ValidationError = error{
     MissingRequiredField,
     DuplicateRuleId,
     RewriteRequiresTarget,
-    WarnDenyRequiresMessage,
+    RejectRequiresMessage,
     EmptyMatch,
 };
 
@@ -64,8 +63,8 @@ pub fn validate(rules: []const Rule) ValidationError!void {
             return ValidationError.RewriteRequiresTarget;
         }
 
-        if ((rule.action == .warn or rule.action == .deny) and rule.message == null) {
-            return ValidationError.WarnDenyRequiresMessage;
+        if (rule.action == .reject and rule.message == null) {
+            return ValidationError.RejectRequiresMessage;
         }
 
         if (!hasAnyMatch(rule.match)) {
@@ -102,22 +101,22 @@ test "valid rewrite rule passes validation" {
     try validate(&rules);
 }
 
-test "valid warn rule passes validation" {
+test "valid reject rule passes validation" {
     const rules = [_]Rule{.{
         .id = "use-just-run",
         .name = "Redirect python3",
-        .action = .warn,
+        .action = .reject,
         .message = "Use just run instead.",
         .match = .{ .command = "python3" },
     }};
     try validate(&rules);
 }
 
-test "valid deny rule passes validation" {
+test "valid reject rule with pipeline passes validation" {
     const rules = [_]Rule{.{
         .id = "no-curl-bash",
         .name = "Block curl pipe bash",
-        .action = .deny,
+        .action = .reject,
         .message = "Don't pipe curl to bash.",
         .match = .{ .pipeline_contains = &.{ "curl", "bash" } },
     }};
@@ -128,7 +127,7 @@ test "empty id fails validation" {
     const rules = [_]Rule{.{
         .id = "",
         .name = "Bad rule",
-        .action = .warn,
+        .action = .reject,
         .message = "msg",
         .match = .{ .command = "foo" },
     }};
@@ -139,7 +138,7 @@ test "empty name fails validation" {
     const rules = [_]Rule{.{
         .id = "good-id",
         .name = "",
-        .action = .warn,
+        .action = .reject,
         .message = "msg",
         .match = .{ .command = "foo" },
     }};
@@ -151,14 +150,14 @@ test "duplicate IDs fail validation" {
         .{
             .id = "same-id",
             .name = "Rule 1",
-            .action = .warn,
+            .action = .reject,
             .message = "msg",
             .match = .{ .command = "foo" },
         },
         .{
             .id = "same-id",
             .name = "Rule 2",
-            .action = .warn,
+            .action = .reject,
             .message = "msg",
             .match = .{ .command = "bar" },
         },
@@ -176,21 +175,21 @@ test "rewrite without rewrite_to fails" {
     try std.testing.expectError(ValidationError.RewriteRequiresTarget, validate(&rules));
 }
 
-test "warn without message fails" {
+test "reject without message fails" {
     const rules = [_]Rule{.{
-        .id = "bad-warn",
+        .id = "bad-reject",
         .name = "Missing message",
-        .action = .warn,
+        .action = .reject,
         .match = .{ .command = "foo" },
     }};
-    try std.testing.expectError(ValidationError.WarnDenyRequiresMessage, validate(&rules));
+    try std.testing.expectError(ValidationError.RejectRequiresMessage, validate(&rules));
 }
 
 test "empty match fails" {
     const rules = [_]Rule{.{
         .id = "no-match",
         .name = "No match fields",
-        .action = .warn,
+        .action = .reject,
         .message = "msg",
     }};
     try std.testing.expectError(ValidationError.EmptyMatch, validate(&rules));
@@ -198,9 +197,9 @@ test "empty match fails" {
 
 test "compareByPriority sorts lower first" {
     var rules = [_]Rule{
-        .{ .id = "b", .name = "B", .action = .warn, .message = "m", .priority = 100, .match = .{ .command = "b" } },
-        .{ .id = "a", .name = "A", .action = .warn, .message = "m", .priority = 1, .match = .{ .command = "a" } },
-        .{ .id = "c", .name = "C", .action = .warn, .message = "m", .priority = 50, .match = .{ .command = "c" } },
+        .{ .id = "b", .name = "B", .action = .reject, .message = "m", .priority = 100, .match = .{ .command = "b" } },
+        .{ .id = "a", .name = "A", .action = .reject, .message = "m", .priority = 1, .match = .{ .command = "a" } },
+        .{ .id = "c", .name = "C", .action = .reject, .message = "m", .priority = 50, .match = .{ .command = "c" } },
     };
     std.mem.sort(Rule, &rules, {}, compareByPriority);
     try std.testing.expectEqualStrings("a", rules[0].id);

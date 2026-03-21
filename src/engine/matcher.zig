@@ -215,7 +215,7 @@ test "matchCommand exact match" {
     var info = try parseCmd(std.testing.allocator, "pytest tests/");
     defer info.deinit(std.testing.allocator);
 
-    const rule = Rule{ .id = "t", .name = "t", .action = .warn, .message = "m", .match = .{ .command = "pytest" } };
+    const rule = Rule{ .id = "t", .name = "t", .action = .reject, .message = "m", .match = .{ .command = "pytest" } };
     try std.testing.expect(matchRule(rule, info));
 }
 
@@ -223,7 +223,7 @@ test "matchCommand no match" {
     var info = try parseCmd(std.testing.allocator, "python3 test.py");
     defer info.deinit(std.testing.allocator);
 
-    const rule = Rule{ .id = "t", .name = "t", .action = .warn, .message = "m", .match = .{ .command = "pytest" } };
+    const rule = Rule{ .id = "t", .name = "t", .action = .reject, .message = "m", .match = .{ .command = "pytest" } };
     try std.testing.expect(!matchRule(rule, info));
 }
 
@@ -237,7 +237,7 @@ test "matchCommandGlob with brace expansion" {
     var info3 = try parseCmd(std.testing.allocator, "black format");
     defer info3.deinit(std.testing.allocator);
 
-    const rule = Rule{ .id = "t", .name = "t", .action = .warn, .message = "m", .match = .{ .command_glob = "{ruff,uvx}" } };
+    const rule = Rule{ .id = "t", .name = "t", .action = .reject, .message = "m", .match = .{ .command_glob = "{ruff,uvx}" } };
     try std.testing.expect(matchRule(rule, info1));
     try std.testing.expect(matchRule(rule, info2));
     try std.testing.expect(!matchRule(rule, info3));
@@ -247,7 +247,7 @@ test "matchCommandGlob with wildcard" {
     var info = try parseCmd(std.testing.allocator, "pytest tests/");
     defer info.deinit(std.testing.allocator);
 
-    const rule = Rule{ .id = "t", .name = "t", .action = .warn, .message = "m", .match = .{ .command_glob = "py*" } };
+    const rule = Rule{ .id = "t", .name = "t", .action = .reject, .message = "m", .match = .{ .command_glob = "py*" } };
     try std.testing.expect(matchRule(rule, info));
 }
 
@@ -261,7 +261,7 @@ test "matchCommandRegex" {
     var info3 = try parseCmd(std.testing.allocator, "ruby script.rb");
     defer info3.deinit(std.testing.allocator);
 
-    const rule = Rule{ .id = "t", .name = "t", .action = .warn, .message = "m", .match = .{ .command_regex = "^python[23]?$" } };
+    const rule = Rule{ .id = "t", .name = "t", .action = .reject, .message = "m", .match = .{ .command_regex = "^python[23]?$" } };
     try std.testing.expect(matchRule(rule, info1));
     try std.testing.expect(matchRule(rule, info2));
     try std.testing.expect(!matchRule(rule, info3));
@@ -275,7 +275,7 @@ test "matchPipelineContains" {
     defer info2.deinit(std.testing.allocator);
 
     const required: []const []const u8 = &.{ "curl", "bash" };
-    const rule = Rule{ .id = "t", .name = "t", .action = .deny, .message = "m", .match = .{ .pipeline_contains = required } };
+    const rule = Rule{ .id = "t", .name = "t", .action = .reject, .message = "m", .match = .{ .pipeline_contains = required } };
     try std.testing.expect(matchRule(rule, info1));
     try std.testing.expect(!matchRule(rule, info2));
 }
@@ -287,7 +287,7 @@ test "matchFlag" {
     var info2 = try parseCmd(std.testing.allocator, "rm file.txt");
     defer info2.deinit(std.testing.allocator);
 
-    const rule = Rule{ .id = "t", .name = "t", .action = .warn, .message = "m", .match = .{ .command = "rm", .has_flag = "-rf" } };
+    const rule = Rule{ .id = "t", .name = "t", .action = .reject, .message = "m", .match = .{ .command = "rm", .has_flag = "-rf" } };
     try std.testing.expect(matchRule(rule, info1));
     try std.testing.expect(!matchRule(rule, info2));
 }
@@ -297,7 +297,7 @@ test "AND logic: command + has_flag" {
     defer info.deinit(std.testing.allocator);
 
     // Rule requires command=rm AND has_flag=-rf. ls has -rf but isn't rm.
-    const rule = Rule{ .id = "t", .name = "t", .action = .warn, .message = "m", .match = .{ .command = "rm", .has_flag = "-rf" } };
+    const rule = Rule{ .id = "t", .name = "t", .action = .reject, .message = "m", .match = .{ .command = "rm", .has_flag = "-rf" } };
     try std.testing.expect(!matchRule(rule, info));
 }
 
@@ -305,7 +305,7 @@ test "no match returns false" {
     var info = try parseCmd(std.testing.allocator, "ls -la");
     defer info.deinit(std.testing.allocator);
 
-    const rule = Rule{ .id = "t", .name = "t", .action = .warn, .message = "m", .match = .{ .command = "pytest" } };
+    const rule = Rule{ .id = "t", .name = "t", .action = .reject, .message = "m", .match = .{ .command = "pytest" } };
     try std.testing.expect(!matchRule(rule, info));
 }
 

@@ -12,7 +12,7 @@ pub const HookInput = struct {
 pub const ExitCode = struct {
     pub const allow: u8 = 0;
     pub const rewrite: u8 = 0;
-    pub const block: u8 = 2; // Used for both warn and deny
+    pub const reject: u8 = 2;
 };
 
 /// Parse hook input from a JSON string (read from stdin).

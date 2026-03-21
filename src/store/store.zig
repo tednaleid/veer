@@ -6,8 +6,7 @@ const std = @import("std");
 pub const Action = enum {
     approve,
     rewrite,
-    warn,
-    deny,
+    reject,
 };
 
 pub const CheckEntry = struct {
@@ -31,8 +30,7 @@ pub const StatsResult = struct {
     total_checks: u64 = 0,
     approved: u64 = 0,
     rewritten: u64 = 0,
-    warned: u64 = 0,
-    denied: u64 = 0,
+    rejected: u64 = 0,
 };
 
 pub const RuleStats = struct {

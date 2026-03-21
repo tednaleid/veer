@@ -56,8 +56,7 @@ pub const MemoryStore = struct {
             switch (entry.action) {
                 .approve => result.approved += 1,
                 .rewrite => result.rewritten += 1,
-                .warn => result.warned += 1,
-                .deny => result.denied += 1,
+                .reject => result.rejected += 1,
             }
         }
         return result;
@@ -147,7 +146,7 @@ test "recordCheck appends entry" {
     var s = ms.store();
 
     s.recordCheck(.{ .timestamp = 1000, .tool_name = "Bash", .action = .approve });
-    s.recordCheck(.{ .timestamp = 2000, .tool_name = "Bash", .action = .warn });
+    s.recordCheck(.{ .timestamp = 2000, .tool_name = "Bash", .action = .reject });
 
     try std.testing.expectEqual(@as(usize, 2), ms.entries.items.len);
 }
@@ -159,16 +158,14 @@ test "getStats returns correct counts" {
 
     s.recordCheck(.{ .timestamp = 1000, .tool_name = "Bash", .action = .approve });
     s.recordCheck(.{ .timestamp = 2000, .tool_name = "Bash", .action = .rewrite });
-    s.recordCheck(.{ .timestamp = 3000, .tool_name = "Bash", .action = .warn });
-    s.recordCheck(.{ .timestamp = 4000, .tool_name = "Bash", .action = .deny });
-    s.recordCheck(.{ .timestamp = 5000, .tool_name = "Bash", .action = .approve });
+    s.recordCheck(.{ .timestamp = 3000, .tool_name = "Bash", .action = .reject });
+    s.recordCheck(.{ .timestamp = 4000, .tool_name = "Bash", .action = .approve });
 
     const stats = try s.getStats(std.testing.allocator, .{});
-    try std.testing.expectEqual(@as(u64, 5), stats.total_checks);
+    try std.testing.expectEqual(@as(u64, 4), stats.total_checks);
     try std.testing.expectEqual(@as(u64, 2), stats.approved);
     try std.testing.expectEqual(@as(u64, 1), stats.rewritten);
-    try std.testing.expectEqual(@as(u64, 1), stats.warned);
-    try std.testing.expectEqual(@as(u64, 1), stats.denied);
+    try std.testing.expectEqual(@as(u64, 1), stats.rejected);
 }
 
 test "getStats with since filter" {
@@ -177,11 +174,11 @@ test "getStats with since filter" {
     var s = ms.store();
 
     s.recordCheck(.{ .timestamp = 1000, .tool_name = "Bash", .action = .approve });
-    s.recordCheck(.{ .timestamp = 5000, .tool_name = "Bash", .action = .warn });
+    s.recordCheck(.{ .timestamp = 5000, .tool_name = "Bash", .action = .reject });
 
     const stats = try s.getStats(std.testing.allocator, .{ .since = 3000 });
     try std.testing.expectEqual(@as(u64, 1), stats.total_checks);
-    try std.testing.expectEqual(@as(u64, 1), stats.warned);
+    try std.testing.expectEqual(@as(u64, 1), stats.rejected);
 }
 
 test "getRuleStats returns stats for known rule" {
@@ -191,7 +188,7 @@ test "getRuleStats returns stats for known rule" {
 
     s.recordCheck(.{ .timestamp = 1000, .tool_name = "Bash", .action = .rewrite, .rule_id = "use-just-test" });
     s.recordCheck(.{ .timestamp = 2000, .tool_name = "Bash", .action = .rewrite, .rule_id = "use-just-test" });
-    s.recordCheck(.{ .timestamp = 3000, .tool_name = "Bash", .action = .warn, .rule_id = "other-rule" });
+    s.recordCheck(.{ .timestamp = 3000, .tool_name = "Bash", .action = .reject, .rule_id = "other-rule" });
 
     const stats = (try s.getRuleStats(std.testing.allocator, "use-just-test")).?;
     try std.testing.expectEqual(@as(u64, 2), stats.hit_count);

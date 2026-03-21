@@ -83,7 +83,7 @@ test "table renders with aligned columns" {
     defer t.deinit(allocator);
 
     try t.addRow(allocator, &.{ "use-just-test", "rewrite", "pytest" });
-    try t.addRow(allocator, &.{ "no-curl-bash", "deny", "pipeline:curl|bash" });
+    try t.addRow(allocator, &.{ "no-curl-bash", "reject", "pipeline:curl|bash" });
 
     var buf: [1024]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);

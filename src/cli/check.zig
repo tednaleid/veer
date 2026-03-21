@@ -36,11 +36,11 @@ pub fn run(
                 }
                 return hook.ExitCode.rewrite;
             },
-            .warn, .deny => {
+            .reject => {
                 if (result.message) |msg| {
                     try stderr_writer.print("{s}\n", .{msg});
                 }
-                return hook.ExitCode.block;
+                return hook.ExitCode.reject;
             },
         }
     }
@@ -89,11 +89,11 @@ test "end-to-end: rewrite rule returns updatedInput on stdout" {
     try std.testing.expectEqualStrings("just test", cmd.string);
 }
 
-test "end-to-end: warn rule returns exit 2 with message on stderr" {
+test "end-to-end: reject rule returns exit 2 with message on stderr" {
     const rules = [_]Rule{.{
         .id = "use-just-run",
         .name = "Redirect python3",
-        .action = .warn,
+        .action = .reject,
         .message = "Use `just run` instead.",
         .match = .{ .command = "python3" },
     }};
@@ -121,11 +121,11 @@ test "end-to-end: warn rule returns exit 2 with message on stderr" {
     try std.testing.expect(std.mem.indexOf(u8, stderr_output, "just run") != null);
 }
 
-test "end-to-end: deny rule returns exit 2" {
+test "end-to-end: reject rule with pipeline returns exit 2" {
     const rules = [_]Rule{.{
         .id = "no-curl-bash",
         .name = "Block curl|bash",
-        .action = .deny,
+        .action = .reject,
         .message = "Don't pipe curl to bash.",
         .match = .{ .pipeline_contains = &.{ "curl", "bash" } },
     }};
@@ -185,7 +185,7 @@ test "end-to-end: invalid JSON returns exit 1" {
     const rules = [_]Rule{.{
         .id = "t",
         .name = "t",
-        .action = .warn,
+        .action = .reject,
         .message = "m",
         .match = .{ .command = "foo" },
     }};

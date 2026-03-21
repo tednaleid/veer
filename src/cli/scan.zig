@@ -130,7 +130,7 @@ fn outputToml(
         try writer.print("[[rule]]\n", .{});
         try writer.print("id = \"redirect-{s}\"\n", .{entry.cmd});
         try writer.print("name = \"Redirect {s}\"\n", .{entry.cmd});
-        try writer.print("action = \"warn\"\n", .{});
+        try writer.print("action = \"reject\"\n", .{});
         try writer.print("message = \"Consider using a project-specific command instead of `{s}`.\"\n", .{entry.cmd});
         try writer.print("# Seen {d} times\n", .{entry.stats.count});
         try writer.print("[rule.match]\n", .{});
