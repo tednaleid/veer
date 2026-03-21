@@ -1,12 +1,19 @@
-default: test
+default: check
+
+# Run tests + lint
+check: test lint
 
 # Run all tests
 test:
-    zig build test
-
-# Run all tests with summary
-test-summary:
     zig build test --summary all
+
+# Check formatting (fails if unformatted)
+lint:
+    zig fmt --check src/
+
+# Auto-format source files
+fmt:
+    zig fmt src/
 
 # Build debug binary
 build:
