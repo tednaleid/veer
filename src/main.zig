@@ -9,6 +9,8 @@ const list_cmd = @import("cli/list.zig");
 const add_cmd = @import("cli/add.zig");
 const remove_cmd = @import("cli/remove.zig");
 const stats_cmd = @import("cli/stats.zig");
+const scan_cmd = @import("cli/scan.zig");
+const settings_mod = @import("claude/settings.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -35,6 +37,8 @@ pub fn main() !void {
         try runRemove(allocator, &args);
     } else if (std.mem.eql(u8, command, "stats")) {
         try runStats(allocator);
+    } else if (std.mem.eql(u8, command, "scan")) {
+        try runScan(allocator, &args);
     } else {
         printUsage();
         std.process.exit(1);
@@ -200,6 +204,63 @@ fn runStats(_: std.mem.Allocator) !void {
     std.process.exit(0);
 }
 
+fn runScan(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !void {
+    var opts = scan_cmd.ScanOptions{};
+    var settings_path: ?[]const u8 = null;
+    var transcript_path: ?[]const u8 = null;
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--global")) opts.global = true;
+        if (std.mem.eql(u8, arg, "--min-count")) {
+            if (args.next()) |n| {
+                opts.min_count = std.fmt.parseInt(u32, n, 10) catch 1;
+            }
+        }
+        if (std.mem.eql(u8, arg, "--output")) {
+            if (args.next()) |fmt| {
+                opts.output_toml = std.mem.eql(u8, fmt, "toml");
+            }
+        }
+        if (std.mem.eql(u8, arg, "--permissions")) opts.permissions = true;
+        if (std.mem.eql(u8, arg, "--settings")) settings_path = args.next();
+        if (std.mem.eql(u8, arg, "--transcript")) transcript_path = args.next();
+    }
+
+    // Load transcript content
+    const content = if (transcript_path) |path|
+        std.fs.cwd().readFileAlloc(allocator, path, 100 * 1024 * 1024) catch {
+            std.debug.print("veer scan: cannot read {s}\n", .{path});
+            std.process.exit(1);
+        }
+    else blk: {
+        // TODO: auto-discover transcripts from ~/.claude/projects/
+        std.debug.print("veer scan: use --transcript <path> to specify a JSONL file\n", .{});
+        std.process.exit(1);
+        break :blk undefined;
+    };
+    defer allocator.free(content);
+
+    // Load settings if requested
+    var settings: ?settings_mod.SettingsReader = null;
+    defer if (settings) |*s| s.deinit();
+    if (opts.permissions) {
+        if (settings_path) |path| {
+            settings = settings_mod.SettingsReader.loadFile(allocator, path) catch null;
+        }
+    }
+
+    var buf: [16384]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    const exit_code = scan_cmd.scanContent(allocator, content, opts, settings, stream.writer()) catch {
+        std.debug.print("veer scan: internal error\n", .{});
+        std.process.exit(1);
+    };
+
+    const output = stream.getWritten();
+    if (output.len > 0) _ = std.fs.File.stdout().write(output) catch {};
+    std.process.exit(exit_code);
+}
+
 fn printUsage() void {
     std.debug.print(
         \\Usage: veer <command>
@@ -211,6 +272,7 @@ fn printUsage() void {
         \\  add        Add a rule to config
         \\  remove     Remove a rule by ID
         \\  stats      Display usage statistics
+        \\  scan       Mine transcripts to discover command patterns
         \\
         \\Options:
         \\  check   --config <path>     Use a specific config file
@@ -218,6 +280,7 @@ fn printUsage() void {
         \\  list    --config <path>
         \\  add     --action <action> --command <cmd> [--message <msg>] [--rewrite-to <cmd>]
         \\  remove  <rule-id> [--config <path>]
+        \\  scan    --transcript <path> [--min-count <n>] [--output toml] [--permissions --settings <path>]
         \\
     , .{});
 }

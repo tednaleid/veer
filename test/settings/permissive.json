@@ -1,0 +1,4 @@
+{
+  "allowedTools": ["Bash(grep:*)", "Bash(cat:*)", "Bash(just *)", "Bash(ls:*)", "Read"],
+  "deniedTools": []
+}

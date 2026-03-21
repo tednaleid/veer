@@ -1,0 +1,4 @@
+{
+  "allowedTools": ["Bash(just *)", "Read"],
+  "deniedTools": ["Bash(python3:*)", "Bash(rm:*)", "Bash(pytest:*)"]
+}
