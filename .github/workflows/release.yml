@@ -1,0 +1,78 @@
+name: Release
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-macos
+            os: macos-latest
+            zig_target: -Dtarget=aarch64-macos
+          - target: x86_64-macos
+            os: macos-latest
+            zig_target: -Dtarget=x86_64-macos
+          - target: aarch64-linux-musl
+            os: ubuntu-latest
+            zig_target: -Dtarget=aarch64-linux-musl
+          - target: x86_64-linux-musl
+            os: ubuntu-latest
+            zig_target: -Dtarget=x86_64-linux-musl
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Build
+        run: zig build -Doptimize=ReleaseSmall ${{ matrix.zig_target }}
+
+      - name: Package
+        run: |
+          cd zig-out/bin
+          tar czf ../../veer-${{ matrix.target }}.tar.gz veer
+          cd ../..
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: veer-${{ matrix.target }}
+          path: veer-${{ matrix.target }}.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: artifacts/*/veer-*.tar.gz
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.15.2
+      - name: Test
+        run: zig build test
+      - name: Lint
+        run: zig fmt --check src/
+      - name: Benchmark
+        run: zig build bench -Doptimize=ReleaseFast

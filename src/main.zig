@@ -3,6 +3,9 @@
 
 const std = @import("std");
 const config_mod = @import("config/config.zig");
+
+// Keep in sync with build.zig.zon
+const version = "0.1.0";
 const check_cmd = @import("cli/check.zig");
 const install_cmd = @import("cli/install.zig");
 const list_cmd = @import("cli/list.zig");
@@ -25,7 +28,10 @@ pub fn main() !void {
         std.process.exit(1);
     };
 
-    if (std.mem.eql(u8, command, "check")) {
+    if (std.mem.eql(u8, command, "--version") or std.mem.eql(u8, command, "-v")) {
+        std.debug.print("veer {s}\n", .{version});
+        std.process.exit(0);
+    } else if (std.mem.eql(u8, command, "check")) {
         try runCheck(allocator, &args);
     } else if (std.mem.eql(u8, command, "install")) {
         try runInstall(allocator, &args);
