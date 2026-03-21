@@ -11,7 +11,6 @@ pub const AddOptions = struct {
     name: ?[]const u8 = null,
     message: ?[]const u8 = null,
     rewrite_to: ?[]const u8 = null,
-    priority: ?[]const u8 = null,
     config_path: []const u8 = ".veer/config.toml",
 };
 
@@ -60,9 +59,6 @@ pub fn run(parent_allocator: std.mem.Allocator, opts: AddOptions, writer: anytyp
     try w.print("id = \"{s}\"\n", .{id});
     try w.print("name = \"{s}\"\n", .{name_str});
     try w.print("action = \"{s}\"\n", .{action_str});
-    if (opts.priority) |p| {
-        try w.print("priority = {s}\n", .{p});
-    }
     if (opts.message) |m| {
         try w.print("message = \"{s}\"\n", .{m});
     }

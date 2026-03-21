@@ -54,10 +54,7 @@ pub fn run(
 test "end-to-end: rewrite rule returns updatedInput on stdout" {
     const rules = [_]Rule{.{
         .id = "use-just-test",
-        .name = "Redirect pytest",
-        .action = .rewrite,
         .rewrite_to = "just test",
-        .message = "Use just test.",
         .match = .{ .command = "pytest" },
     }};
 
@@ -91,9 +88,7 @@ test "end-to-end: rewrite rule returns updatedInput on stdout" {
 
 test "end-to-end: reject rule returns exit 2 with message on stderr" {
     const rules = [_]Rule{.{
-        .id = "use-just-run",
-        .name = "Redirect python3",
-        .action = .reject,
+        .id = "no-python3",
         .message = "Use `just run` instead.",
         .match = .{ .command = "python3" },
     }};
@@ -121,13 +116,11 @@ test "end-to-end: reject rule returns exit 2 with message on stderr" {
     try std.testing.expect(std.mem.indexOf(u8, stderr_output, "just run") != null);
 }
 
-test "end-to-end: reject rule with pipeline returns exit 2" {
+test "end-to-end: reject rule with command_all returns exit 2" {
     const rules = [_]Rule{.{
         .id = "no-curl-bash",
-        .name = "Block curl|bash",
-        .action = .reject,
         .message = "Don't pipe curl to bash.",
-        .match = .{ .pipeline_contains = &.{ "curl", "bash" } },
+        .match = .{ .command_all = &.{ "curl", "bash" } },
     }};
 
     const input =
@@ -153,8 +146,6 @@ test "end-to-end: reject rule with pipeline returns exit 2" {
 test "end-to-end: no matching rule returns exit 0 with empty output" {
     const rules = [_]Rule{.{
         .id = "use-just-test",
-        .name = "Redirect pytest",
-        .action = .rewrite,
         .rewrite_to = "just test",
         .match = .{ .command = "pytest" },
     }};
@@ -184,8 +175,6 @@ test "end-to-end: no matching rule returns exit 0 with empty output" {
 test "end-to-end: invalid JSON returns exit 1" {
     const rules = [_]Rule{.{
         .id = "t",
-        .name = "t",
-        .action = .reject,
         .message = "m",
         .match = .{ .command = "foo" },
     }};

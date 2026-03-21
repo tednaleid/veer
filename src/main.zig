@@ -164,7 +164,6 @@ fn runAdd(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !void {
         if (std.mem.eql(u8, arg, "--name")) opts.name = args.next();
         if (std.mem.eql(u8, arg, "--message")) opts.message = args.next();
         if (std.mem.eql(u8, arg, "--rewrite-to")) opts.rewrite_to = args.next();
-        if (std.mem.eql(u8, arg, "--priority")) opts.priority = args.next();
         if (std.mem.eql(u8, arg, "--config")) opts.config_path = args.next() orelse ".veer/config.toml";
     }
 

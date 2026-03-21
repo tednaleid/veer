@@ -18,7 +18,7 @@ pub fn run(allocator: std.mem.Allocator, rules: []const config_mod.Rule, writer:
     for (rules) |rule| {
         const pattern = describeMatch(rule.match);
         const message = if (rule.message) |m| truncate(m, 40) else "";
-        const action_str = @tagName(rule.action);
+        const action_str = @tagName(rule.effectiveAction());
         try table.addRow(allocator, &.{ rule.id, action_str, pattern, message });
     }
 
@@ -29,11 +29,12 @@ pub fn run(allocator: std.mem.Allocator, rules: []const config_mod.Rule, writer:
 
 fn describeMatch(m: config_mod.MatchConfig) []const u8 {
     if (m.command) |cmd| return cmd;
-    if (m.command_glob) |g| return g;
     if (m.command_regex) |r| return r;
-    if (m.pipeline_contains != null) return "pipeline:...";
-    if (m.has_flag) |f| return f;
-    if (m.arg_pattern) |p| return p;
+    if (m.flag) |f| return f;
+    if (m.arg) |a| return a;
+    if (m.raw_regex) |r| return r;
+    if (m.command_any != null) return "(command_any)";
+    if (m.command_all != null) return "(command_all)";
     return "(complex)";
 }
 
@@ -46,8 +47,8 @@ fn truncate(s: []const u8, max_len: usize) []const u8 {
 
 test "list with rules renders table" {
     const rules = [_]config_mod.Rule{
-        .{ .id = "use-just-test", .name = "Redirect pytest", .action = .rewrite, .rewrite_to = "just test", .message = "Use just test.", .match = .{ .command = "pytest" } },
-        .{ .id = "no-curl-bash", .name = "Block curl|bash", .action = .reject, .message = "Don't pipe curl to bash.", .match = .{ .pipeline_contains = &.{ "curl", "bash" } } },
+        .{ .id = "use-just-test", .rewrite_to = "just test", .message = "Use just test.", .match = .{ .command = "pytest" } },
+        .{ .id = "no-curl-bash", .message = "Don't pipe curl to bash.", .match = .{ .command_all = &.{ "curl", "bash" } } },
     };
 
     var buf: [2048]u8 = undefined;

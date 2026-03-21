@@ -15,26 +15,54 @@ pub const AstMatch = struct {
 };
 
 pub const MatchConfig = struct {
+    // Command name matching (per-command, glob-aware)
     command: ?[]const u8 = null,
-    command_glob: ?[]const u8 = null,
+    command_any: ?[]const []const u8 = null,
     command_regex: ?[]const u8 = null,
-    pipeline_contains: ?[]const []const u8 = null,
-    has_flag: ?[]const u8 = null,
-    arg_pattern: ?[]const u8 = null,
+
+    // Command presence (cross-command, glob-aware)
+    command_all: ?[]const []const u8 = null,
+
+    // Flag matching (per-command, no dash prefix, smart combined flag handling)
+    flag: ?[]const u8 = null,
+    flag_any: ?[]const []const u8 = null,
+    flag_all: ?[]const []const u8 = null,
+
+    // Arg matching (per-command, positional args only, glob-aware)
+    arg: ?[]const u8 = null,
+    arg_any: ?[]const []const u8 = null,
+    arg_all: ?[]const []const u8 = null,
+    arg_regex: ?[]const u8 = null,
+
+    // Whole-input matching (before parsing)
+    raw_regex: ?[]const u8 = null,
+
+    // AST structural matching
     ast: ?AstMatch = null,
 };
 
 pub const Rule = struct {
     id: []const u8,
-    name: []const u8,
-    action: Action,
-    priority: i64 = 100,
+    name: ?[]const u8 = null,
+    action: ?Action = null,
     enabled: bool = true,
     tool: []const u8 = "Bash",
     message: ?[]const u8 = null,
     rewrite_to: ?[]const u8 = null,
     tags: ?[]const []const u8 = null,
     match: MatchConfig = .{},
+
+    /// Returns the effective action: explicit if set, otherwise inferred
+    /// from rewrite_to presence.
+    pub fn effectiveAction(self: Rule) Action {
+        if (self.action) |a| return a;
+        return if (self.rewrite_to != null) .rewrite else .reject;
+    }
+
+    /// Returns the display name: explicit name if set, otherwise id.
+    pub fn displayName(self: Rule) []const u8 {
+        return self.name orelse self.id;
+    }
 };
 
 pub const ValidationError = error{
@@ -48,7 +76,7 @@ pub const ValidationError = error{
 /// Validate a slice of rules. Returns the first validation error found.
 pub fn validate(rules: []const Rule) ValidationError!void {
     for (rules, 0..) |rule, i| {
-        if (rule.id.len == 0 or rule.name.len == 0) {
+        if (rule.id.len == 0) {
             return ValidationError.MissingRequiredField;
         }
 
@@ -59,11 +87,13 @@ pub fn validate(rules: []const Rule) ValidationError!void {
             }
         }
 
-        if (rule.action == .rewrite and rule.rewrite_to == null) {
+        // Validate action (explicit or inferred)
+        const action = rule.effectiveAction();
+        if (action == .rewrite and rule.rewrite_to == null) {
             return ValidationError.RewriteRequiresTarget;
         }
 
-        if (rule.action == .reject and rule.message == null) {
+        if (action == .reject and rule.message == null) {
             return ValidationError.RejectRequiresMessage;
         }
 
@@ -75,17 +105,18 @@ pub fn validate(rules: []const Rule) ValidationError!void {
 
 fn hasAnyMatch(m: MatchConfig) bool {
     return m.command != null or
-        m.command_glob != null or
+        m.command_any != null or
+        m.command_all != null or
         m.command_regex != null or
-        m.pipeline_contains != null or
-        m.has_flag != null or
-        m.arg_pattern != null or
+        m.flag != null or
+        m.flag_any != null or
+        m.flag_all != null or
+        m.arg != null or
+        m.arg_any != null or
+        m.arg_all != null or
+        m.arg_regex != null or
+        m.raw_regex != null or
         m.ast != null;
-}
-
-/// Compare rules by priority (lower first) for sorting.
-pub fn compareByPriority(_: void, a: Rule, b: Rule) bool {
-    return a.priority < b.priority;
 }
 
 // -- Tests --
@@ -93,7 +124,6 @@ pub fn compareByPriority(_: void, a: Rule, b: Rule) bool {
 test "valid rewrite rule passes validation" {
     const rules = [_]Rule{.{
         .id = "use-just-test",
-        .name = "Redirect pytest",
         .action = .rewrite,
         .rewrite_to = "just test",
         .match = .{ .command = "pytest" },
@@ -103,8 +133,7 @@ test "valid rewrite rule passes validation" {
 
 test "valid reject rule passes validation" {
     const rules = [_]Rule{.{
-        .id = "use-just-run",
-        .name = "Redirect python3",
+        .id = "no-python3",
         .action = .reject,
         .message = "Use just run instead.",
         .match = .{ .command = "python3" },
@@ -112,52 +141,80 @@ test "valid reject rule passes validation" {
     try validate(&rules);
 }
 
-test "valid reject rule with pipeline passes validation" {
+test "valid reject rule with command_all passes validation" {
     const rules = [_]Rule{.{
         .id = "no-curl-bash",
-        .name = "Block curl pipe bash",
-        .action = .reject,
         .message = "Don't pipe curl to bash.",
-        .match = .{ .pipeline_contains = &.{ "curl", "bash" } },
+        .match = .{ .command_all = &.{ "curl", "bash" } },
     }};
     try validate(&rules);
+}
+
+test "action inferred as rewrite when rewrite_to present" {
+    const rule = Rule{
+        .id = "use-just-test",
+        .rewrite_to = "just test",
+        .match = .{ .command = "pytest" },
+    };
+    try std.testing.expectEqual(Action.rewrite, rule.effectiveAction());
+}
+
+test "action inferred as reject when no rewrite_to" {
+    const rule = Rule{
+        .id = "no-chmod",
+        .message = "nope",
+        .match = .{ .command = "chmod" },
+    };
+    try std.testing.expectEqual(Action.reject, rule.effectiveAction());
+}
+
+test "explicit action overrides inference" {
+    const rule = Rule{
+        .id = "explicit",
+        .action = .reject,
+        .message = "msg",
+        .match = .{ .command = "foo" },
+    };
+    try std.testing.expectEqual(Action.reject, rule.effectiveAction());
+}
+
+test "displayName returns name when set" {
+    const rule = Rule{ .id = "my-id", .name = "My Name", .message = "m", .match = .{ .command = "foo" } };
+    try std.testing.expectEqualStrings("My Name", rule.displayName());
+}
+
+test "displayName falls back to id" {
+    const rule = Rule{ .id = "my-id", .message = "m", .match = .{ .command = "foo" } };
+    try std.testing.expectEqualStrings("my-id", rule.displayName());
 }
 
 test "empty id fails validation" {
     const rules = [_]Rule{.{
         .id = "",
-        .name = "Bad rule",
-        .action = .reject,
         .message = "msg",
         .match = .{ .command = "foo" },
     }};
     try std.testing.expectError(ValidationError.MissingRequiredField, validate(&rules));
 }
 
-test "empty name fails validation" {
+test "name is optional" {
     const rules = [_]Rule{.{
         .id = "good-id",
-        .name = "",
-        .action = .reject,
         .message = "msg",
         .match = .{ .command = "foo" },
     }};
-    try std.testing.expectError(ValidationError.MissingRequiredField, validate(&rules));
+    try validate(&rules);
 }
 
 test "duplicate IDs fail validation" {
     const rules = [_]Rule{
         .{
             .id = "same-id",
-            .name = "Rule 1",
-            .action = .reject,
             .message = "msg",
             .match = .{ .command = "foo" },
         },
         .{
             .id = "same-id",
-            .name = "Rule 2",
-            .action = .reject,
             .message = "msg",
             .match = .{ .command = "bar" },
         },
@@ -168,17 +225,23 @@ test "duplicate IDs fail validation" {
 test "rewrite without rewrite_to fails" {
     const rules = [_]Rule{.{
         .id = "bad-rewrite",
-        .name = "Missing target",
         .action = .rewrite,
         .match = .{ .command = "foo" },
     }};
     try std.testing.expectError(ValidationError.RewriteRequiresTarget, validate(&rules));
 }
 
+test "inferred reject without message fails" {
+    const rules = [_]Rule{.{
+        .id = "bad-inferred",
+        .match = .{ .command = "foo" },
+    }};
+    try std.testing.expectError(ValidationError.RejectRequiresMessage, validate(&rules));
+}
+
 test "reject without message fails" {
     const rules = [_]Rule{.{
         .id = "bad-reject",
-        .name = "Missing message",
         .action = .reject,
         .match = .{ .command = "foo" },
     }};
@@ -188,21 +251,31 @@ test "reject without message fails" {
 test "empty match fails" {
     const rules = [_]Rule{.{
         .id = "no-match",
-        .name = "No match fields",
-        .action = .reject,
         .message = "msg",
     }};
     try std.testing.expectError(ValidationError.EmptyMatch, validate(&rules));
 }
 
-test "compareByPriority sorts lower first" {
-    var rules = [_]Rule{
-        .{ .id = "b", .name = "B", .action = .reject, .message = "m", .priority = 100, .match = .{ .command = "b" } },
-        .{ .id = "a", .name = "A", .action = .reject, .message = "m", .priority = 1, .match = .{ .command = "a" } },
-        .{ .id = "c", .name = "C", .action = .reject, .message = "m", .priority = 50, .match = .{ .command = "c" } },
+test "hasAnyMatch with each field type" {
+    // Each field alone should pass hasAnyMatch
+    const cases = .{
+        MatchConfig{ .command = "x" },
+        MatchConfig{ .command_any = &.{"x"} },
+        MatchConfig{ .command_all = &.{"x"} },
+        MatchConfig{ .command_regex = "x" },
+        MatchConfig{ .flag = "x" },
+        MatchConfig{ .flag_any = &.{"x"} },
+        MatchConfig{ .flag_all = &.{"x"} },
+        MatchConfig{ .arg = "x" },
+        MatchConfig{ .arg_any = &.{"x"} },
+        MatchConfig{ .arg_all = &.{"x"} },
+        MatchConfig{ .arg_regex = "x" },
+        MatchConfig{ .raw_regex = "x" },
+        MatchConfig{ .ast = .{} },
     };
-    std.mem.sort(Rule, &rules, {}, compareByPriority);
-    try std.testing.expectEqualStrings("a", rules[0].id);
-    try std.testing.expectEqualStrings("c", rules[1].id);
-    try std.testing.expectEqualStrings("b", rules[2].id);
+    inline for (cases) |m| {
+        try std.testing.expect(hasAnyMatch(m));
+    }
+    // Empty match should fail
+    try std.testing.expect(!hasAnyMatch(MatchConfig{}));
 }

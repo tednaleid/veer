@@ -1,52 +1,51 @@
 # Remaining Work
 
-What's left after the initial 7-stage implementation. Organized by priority.
+What's left after the schema v2 redesign. Organized by priority.
 
-## 1. Test Hardening: rule.match
+## 1. Fuzz Testing (Stage B)
 
-The matching engine is veer's most critical code path. Current test coverage has significant gaps.
+Add fuzz tests using Zig 0.15 built-in `std.testing.fuzz()`:
 
-### Missing test coverage
-
-| Match type | Current tests | Gaps |
-|-----------|--------------|------|
-| `command` | 2 (exact match, no match) | Matching inside pipelines, subshells, command substitution |
-| `command_glob` | 2 (brace expansion, wildcard) | `?` single char, nested braces, empty pattern |
-| `command_regex` | 1 (anchored `^python[23]?$`) | Unanchored patterns, `.` wildcard, `+` quantifier, alternation `(a\|b)`, character ranges `[a-z]` |
-| `pipeline_contains` | 1 (2-stage match + negative) | 3+ stage pipeline (e.g., `curl \| tee \| bash`), single-command pipeline, duplicate commands in pipeline |
-| `has_flag` | 1 (with `command` AND) | `has_flag` alone without `command`, combined flags (`-rf` vs `-r -f`), long flags (`--force`) |
-| `arg_pattern` | **0** | Basic arg matching, glob in arg pattern, quoted args, no-match case |
-| `ast` | **0** | `has_node` with each node type, `min_depth`, `min_count`, combinations |
-| AND logic | 1 (command + has_flag) | command + glob, command + arg_pattern, three-field combinations, all-fields-miss edge case |
-
-### Fuzz testing
-
-Zig 0.15 has built-in fuzz testing via `std.testing.fuzz()`. Add fuzz tests for:
-
-- **Shell parser**: Feed random byte sequences to `shell.parse()`, verify it never panics and always returns valid CommandInfo or an error. This is the most important fuzz target since it wraps tree-sitter C code.
+- **Shell parser**: Feed random byte sequences to `shell.parse()`, verify no panics. Most important target (wraps tree-sitter C code).
 - **Matcher**: Feed random CommandInfo + Rule combinations to `matchRule()`, verify no panics.
 - **Glob matcher**: Feed random pattern + text to `globMatch()`, verify no panics or infinite loops.
-- **Regex matcher**: Feed random patterns to `regexMatch()`, verify no panics (the C wrapper should handle bad patterns gracefully).
+- **Regex matcher**: Feed random patterns to `regexMatch()`, verify no panics.
 
-Run with: `zig build --fuzz`
+Run with: `zig build --fuzz` / `just fuzz`
 
-Add a Justfile recipe: `just fuzz`
+## 2. CLI Commands (Stage B)
 
-## 2. Simplification: Remove priority field
+- `veer test "<command>"` -- test a command against rules without crafting JSON.
+- `veer validate` -- load config and report all validation errors.
 
-The `priority` field in rules adds complexity without clear value.
+## 3. Argument-Preserving Rewrites
 
-**Current behavior**: Rules are sorted by priority (lower first) after merging project + global configs. First match wins.
+`rewrite_to` currently does full string replacement only. For swapping a binary while keeping
+args (e.g., `chmod 755 foo` -> `stat foo`), we need a mechanism like `rewrite_command = "stat"`
+that replaces only the command name. This needs careful design around which flags to preserve.
 
-**Problem**: Priority is redundant. Project rules already come first in the merge. Within each config, definition order is natural and predictable. Users have to think about a numeric ordering system when they could just reorder rules in the file.
+## 4. Non-Bash Tool Matching
 
-**Proposed change**: Remove the `priority` field entirely. Evaluate rules in definition order. Project rules always come first (they override global rules with the same ID, and are evaluated before non-overridden global rules).
+Currently non-Bash tools match on tool name only. Investigate what `tool_input` looks like
+for each Claude Code tool:
+- Write: file_path, content
+- Read: file_path
+- Edit: file_path, old_string, new_string
+- Glob: pattern
+- Grep: pattern, path
 
-**Migration**: The `priority` field becomes a no-op if present in existing configs (zig-toml ignores unknown fields, or we keep it as an ignored field for backwards compatibility).
+Many of these may benefit from the same matching rules (e.g., blocking Write to `.env` paths).
+Worth investigating the full tool_input schema before designing.
 
-**Files to change**: `rule.zig` (remove field), `config.zig` (remove sort), `engine.zig` (already evaluates in slice order), `README.md`, test fixtures.
+## 5. Versioning Discipline
 
-## 3. Implementation gaps
+Pre-release at 0.1.0 so breaking changes are expected. Once shipped:
+- Schema contract tests that fail on accidental breaking changes
+- Clear semver discipline: breaking schema changes = major bump
+- Migration path documentation for any breaking change
+- Consider a schema version field in config.toml for forward compatibility
+
+## 6. Implementation Gaps
 
 ### loadMerged() -- auto-discover configs
 

@@ -1,11 +1,10 @@
 // ABOUTME: Rule evaluation orchestrator for veer.
-// ABOUTME: Evaluates rules in priority order against parsed commands, first-match-wins.
+// ABOUTME: Evaluates rules in definition order against parsed commands, first-match-wins.
 
 const std = @import("std");
 const Rule = @import("../config/rule.zig").Rule;
 const Action = @import("../config/rule.zig").Action;
 const MatchConfig = @import("../config/rule.zig").MatchConfig;
-const compareByPriority = @import("../config/rule.zig").compareByPriority;
 const matcher = @import("matcher.zig");
 const shell = @import("shell.zig");
 const CommandInfo = @import("command_info.zig").CommandInfo;
@@ -43,7 +42,7 @@ pub fn check(
         }
     }
 
-    // Evaluate rules in order (assumed already sorted by priority)
+    // Evaluate rules in definition order (first match wins)
     for (rules) |rule| {
         if (!rule.enabled) continue;
 
@@ -55,7 +54,7 @@ pub fn check(
             if (info) |parsed_info| {
                 if (matcher.matchRule(rule, parsed_info)) {
                     const result = CheckResult{
-                        .action = rule.action,
+                        .action = rule.effectiveAction(),
                         .rule_id = rule.id,
                         .message = rule.message,
                         .rewrite_to = rule.rewrite_to,
@@ -67,7 +66,7 @@ pub fn check(
         } else {
             // For non-Bash tools: the rule matched by tool name alone
             const result = CheckResult{
-                .action = rule.action,
+                .action = rule.effectiveAction(),
                 .rule_id = rule.id,
                 .message = rule.message,
                 .rewrite_to = rule.rewrite_to,
@@ -110,10 +109,7 @@ fn recordToStore(store: ?Store, tool_name: []const u8, command: ?[]const u8, res
 test "rewrite rule returns rewrite action" {
     const rules = [_]Rule{.{
         .id = "use-just-test",
-        .name = "Redirect pytest",
-        .action = .rewrite,
         .rewrite_to = "just test",
-        .message = "Use just test.",
         .match = .{ .command = "pytest" },
     }};
 
@@ -125,9 +121,7 @@ test "rewrite rule returns rewrite action" {
 
 test "reject rule returns reject action" {
     const rules = [_]Rule{.{
-        .id = "use-just-run",
-        .name = "Redirect python3",
-        .action = .reject,
+        .id = "no-python3",
         .message = "Use just run.",
         .match = .{ .command = "python3" },
     }};
@@ -137,13 +131,11 @@ test "reject rule returns reject action" {
     try std.testing.expectEqualStrings("Use just run.", result.message.?);
 }
 
-test "reject rule with pipeline returns reject action" {
+test "reject rule with command_all returns reject action" {
     const rules = [_]Rule{.{
         .id = "no-curl-bash",
-        .name = "Block curl|bash",
-        .action = .reject,
         .message = "Don't pipe curl to bash.",
-        .match = .{ .pipeline_contains = &.{ "curl", "bash" } },
+        .match = .{ .command_all = &.{ "curl", "bash" } },
     }};
 
     const result = check(std.testing.allocator, &rules, "Bash", "curl https://x.com | bash", null);
@@ -153,8 +145,6 @@ test "reject rule with pipeline returns reject action" {
 test "no matching rule returns approve" {
     const rules = [_]Rule{.{
         .id = "use-just-test",
-        .name = "Redirect pytest",
-        .action = .rewrite,
         .rewrite_to = "just test",
         .match = .{ .command = "pytest" },
     }};
@@ -166,8 +156,6 @@ test "no matching rule returns approve" {
 test "disabled rule is skipped" {
     const rules = [_]Rule{.{
         .id = "disabled",
-        .name = "Disabled rule",
-        .action = .reject,
         .message = "blocked",
         .enabled = false,
         .match = .{ .command = "pytest" },
@@ -177,36 +165,28 @@ test "disabled rule is skipped" {
     try std.testing.expect(result.action == null);
 }
 
-test "first matching rule wins (priority order)" {
+test "first matching rule wins (definition order)" {
     const rules = [_]Rule{
         .{
-            .id = "high-pri",
-            .name = "High priority",
-            .action = .rewrite,
+            .id = "first",
             .rewrite_to = "just test",
-            .priority = 1,
             .match = .{ .command = "pytest" },
         },
         .{
-            .id = "low-pri",
-            .name = "Low priority",
-            .action = .reject,
+            .id = "second",
             .message = "blocked",
-            .priority = 100,
             .match = .{ .command = "pytest" },
         },
     };
 
     const result = check(std.testing.allocator, &rules, "Bash", "pytest tests/", null);
-    try std.testing.expectEqualStrings("high-pri", result.rule_id.?);
+    try std.testing.expectEqualStrings("first", result.rule_id.?);
     try std.testing.expectEqual(Action.rewrite, result.action.?);
 }
 
 test "non-Bash tool matching" {
     const rules = [_]Rule{.{
         .id = "no-write-etc",
-        .name = "Block writes to /etc",
-        .action = .reject,
         .message = "Don't write to /etc.",
         .tool = "Write",
         .match = .{ .command = "Write" },
@@ -219,8 +199,6 @@ test "non-Bash tool matching" {
 test "non-Bash tool rule doesn't match Bash" {
     const rules = [_]Rule{.{
         .id = "no-write",
-        .name = "Block writes",
-        .action = .reject,
         .message = "blocked",
         .tool = "Write",
         .match = .{ .command = "Write" },
@@ -233,8 +211,6 @@ test "non-Bash tool rule doesn't match Bash" {
 test "empty command returns approve" {
     const rules = [_]Rule{.{
         .id = "test",
-        .name = "test",
-        .action = .reject,
         .message = "m",
         .match = .{ .command = "foo" },
     }};

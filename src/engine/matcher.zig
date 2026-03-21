@@ -9,54 +9,53 @@ const CommandInfo = @import("command_info.zig").CommandInfo;
 const SingleCommand = @import("command_info.zig").SingleCommand;
 
 /// Returns true if the rule matches the given command info.
-/// All specified match fields must match (AND logic).
-/// Checks every command in the parsed AST.
+/// All specified match fields must match (AND logic across levels).
 pub fn matchRule(rule: Rule, info: CommandInfo) bool {
     const m = rule.match;
 
-    // Pipeline-level match (operates on pipeline_stages, not individual commands)
-    if (m.pipeline_contains) |required| {
-        if (!matchPipelineContains(required, info)) return false;
-        // If this is the only match field, it's a match
-        if (isOnlyField(m, .pipeline_contains)) return true;
+    // Level 1: Raw input check (before parsing)
+    if (m.raw_regex) |pattern| {
+        if (!regexMatch(pattern, info.raw)) return false;
+        if (isOnlyCrossField(m)) return true;
     }
 
-    // AST-level match (operates on CommandInfo structural properties)
+    // Level 2: Cross-command checks
+    if (m.command_all) |required| {
+        if (!matchCommandAll(required, info)) return false;
+        if (isOnlyCrossField(m)) return true;
+    }
+
     if (m.ast) |ast_match| {
         if (!matchAst(ast_match, info)) return false;
-        if (isOnlyField(m, .ast)) return true;
+        if (isOnlyCrossField(m)) return true;
     }
 
-    // Command-level matches: check every command in the AST
-    for (info.commands.items) |cmd| {
-        if (matchSingleCommand(m, cmd)) return true;
+    // Level 3: Per-command checks (iterate commands, all must match on ONE command)
+    if (hasPerCommandFields(m)) {
+        for (info.commands.items) |cmd| {
+            if (matchSingleCommand(m, cmd)) return true;
+        }
+        return false;
     }
 
-    return false;
+    return true;
 }
 
 /// Check if all per-command match fields match a single command.
 fn matchSingleCommand(m: MatchConfig, cmd: SingleCommand) bool {
-    if (m.command) |pattern| {
-        if (!std.mem.eql(u8, cmd.name, pattern)) return false;
-    }
+    var any_field = false;
 
-    if (m.command_glob) |pattern| {
+    // Command name matching (glob-aware)
+    if (m.command) |pattern| {
+        any_field = true;
         if (!globMatch(pattern, cmd.name)) return false;
     }
 
-    if (m.command_regex) |pattern| {
-        if (!regexMatch(pattern, cmd.name)) return false;
-    }
-
-    if (m.has_flag) |flag| {
-        if (!cmd.hasFlag(flag)) return false;
-    }
-
-    if (m.arg_pattern) |pattern| {
+    if (m.command_any) |patterns| {
+        any_field = true;
         var found = false;
-        for (cmd.args.items) |arg| {
-            if (globMatch(pattern, arg)) {
+        for (patterns) |pattern| {
+            if (globMatch(pattern, cmd.name)) {
                 found = true;
                 break;
             }
@@ -64,18 +63,106 @@ fn matchSingleCommand(m: MatchConfig, cmd: SingleCommand) bool {
         if (!found) return false;
     }
 
-    // At least one field must have been specified and matched
-    return m.command != null or m.command_glob != null or
-        m.command_regex != null or m.has_flag != null or
-        m.arg_pattern != null;
+    if (m.command_regex) |pattern| {
+        any_field = true;
+        if (!regexMatch(pattern, cmd.name)) return false;
+    }
+
+    // Flag matching (smart: no dash prefix, combined short flag handling)
+    if (m.flag) |flag_name| {
+        any_field = true;
+        if (!matchFlag(cmd, flag_name)) return false;
+    }
+
+    if (m.flag_any) |flags| {
+        any_field = true;
+        var found = false;
+        for (flags) |flag_name| {
+            if (matchFlag(cmd, flag_name)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+    }
+
+    if (m.flag_all) |flags| {
+        any_field = true;
+        for (flags) |flag_name| {
+            if (!matchFlag(cmd, flag_name)) return false;
+        }
+    }
+
+    // Arg matching (positional only, glob-aware)
+    if (m.arg) |pattern| {
+        any_field = true;
+        if (!matchAnyPositional(cmd, pattern, globMatch)) return false;
+    }
+
+    if (m.arg_any) |patterns| {
+        any_field = true;
+        var found = false;
+        for (patterns) |pattern| {
+            if (matchAnyPositional(cmd, pattern, globMatch)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+    }
+
+    if (m.arg_all) |patterns| {
+        any_field = true;
+        for (patterns) |pattern| {
+            if (!matchAnyPositional(cmd, pattern, globMatch)) return false;
+        }
+    }
+
+    if (m.arg_regex) |pattern| {
+        any_field = true;
+        if (!matchAnyPositional(cmd, pattern, regexMatch)) return false;
+    }
+
+    return any_field;
 }
 
-/// Check if all required commands appear in pipeline stages.
-fn matchPipelineContains(required: []const []const u8, info: CommandInfo) bool {
+/// Smart flag matching. No dash prefix in the pattern.
+/// Single char: matches combined short flags (-f in -rf).
+/// Multi char: glob match on long flags (--force, --no-*).
+fn matchFlag(cmd: SingleCommand, flag_name: []const u8) bool {
+    if (flag_name.len == 1) {
+        // Short flag: check if char appears in any combined short flag
+        for (cmd.flags.items) |f| {
+            if (f.len >= 2 and f[0] == '-' and f[1] != '-') {
+                // Short flag(s): strip leading dash and check for char
+                if (std.mem.indexOfScalar(u8, f[1..], flag_name[0]) != null) return true;
+            }
+        }
+    } else {
+        // Long flag: glob match against --{name}
+        for (cmd.flags.items) |f| {
+            if (f.len > 2 and f[0] == '-' and f[1] == '-') {
+                if (globMatch(flag_name, f[2..])) return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// Check if any positional arg matches using the given match function.
+fn matchAnyPositional(cmd: SingleCommand, pattern: []const u8, matchFn: fn ([]const u8, []const u8) bool) bool {
+    for (cmd.positional.items) |pos_arg| {
+        if (matchFn(pattern, pos_arg)) return true;
+    }
+    return false;
+}
+
+/// Check if all required commands exist somewhere in the AST (glob-aware).
+fn matchCommandAll(required: []const []const u8, info: CommandInfo) bool {
     for (required) |req| {
         var found = false;
-        for (info.pipeline_stages.items) |stage| {
-            if (std.mem.eql(u8, stage.name, req)) {
+        for (info.commands.items) |cmd| {
+            if (globMatch(req, cmd.name)) {
                 found = true;
                 break;
             }
@@ -105,22 +192,16 @@ fn matchAst(ast_match: AstMatch, info: CommandInfo) bool {
     return true;
 }
 
-/// Check if a specific field is the only non-null field in MatchConfig.
-const FieldTag = enum { pipeline_contains, ast };
+/// Check if the match config has any per-command fields set.
+fn hasPerCommandFields(m: MatchConfig) bool {
+    return m.command != null or m.command_any != null or m.command_regex != null or
+        m.flag != null or m.flag_any != null or m.flag_all != null or
+        m.arg != null or m.arg_any != null or m.arg_all != null or m.arg_regex != null;
+}
 
-fn isOnlyField(m: MatchConfig, field: FieldTag) bool {
-    const has_command = m.command != null;
-    const has_glob = m.command_glob != null;
-    const has_regex = m.command_regex != null;
-    const has_pipeline = m.pipeline_contains != null;
-    const has_flag = m.has_flag != null;
-    const has_arg = m.arg_pattern != null;
-    const has_ast = m.ast != null;
-
-    return switch (field) {
-        .pipeline_contains => has_pipeline and !has_command and !has_glob and !has_regex and !has_flag and !has_arg and !has_ast,
-        .ast => has_ast and !has_command and !has_glob and !has_regex and !has_pipeline and !has_flag and !has_arg,
-    };
+/// Check if only cross-command/raw fields are set (no per-command fields).
+fn isOnlyCrossField(m: MatchConfig) bool {
+    return !hasPerCommandFields(m);
 }
 
 /// Simple glob matching supporting *, ?, and {a,b,c} brace expansion.
@@ -211,23 +292,23 @@ fn parseCmd(allocator: std.mem.Allocator, command: []const u8) !CommandInfo {
     return shell.parse(allocator, command);
 }
 
-test "matchCommand exact match" {
+test "command exact match" {
     var info = try parseCmd(std.testing.allocator, "pytest tests/");
     defer info.deinit(std.testing.allocator);
 
-    const rule = Rule{ .id = "t", .name = "t", .action = .reject, .message = "m", .match = .{ .command = "pytest" } };
+    const rule = Rule{ .id = "t", .message = "m", .match = .{ .command = "pytest" } };
     try std.testing.expect(matchRule(rule, info));
 }
 
-test "matchCommand no match" {
-    var info = try parseCmd(std.testing.allocator, "python3 test.py");
+test "command glob match" {
+    var info = try parseCmd(std.testing.allocator, "pytest tests/");
     defer info.deinit(std.testing.allocator);
 
-    const rule = Rule{ .id = "t", .name = "t", .action = .reject, .message = "m", .match = .{ .command = "pytest" } };
-    try std.testing.expect(!matchRule(rule, info));
+    const rule = Rule{ .id = "t", .message = "m", .match = .{ .command = "py*" } };
+    try std.testing.expect(matchRule(rule, info));
 }
 
-test "matchCommandGlob with brace expansion" {
+test "command glob brace expansion" {
     var info1 = try parseCmd(std.testing.allocator, "ruff check .");
     defer info1.deinit(std.testing.allocator);
 
@@ -237,76 +318,199 @@ test "matchCommandGlob with brace expansion" {
     var info3 = try parseCmd(std.testing.allocator, "black format");
     defer info3.deinit(std.testing.allocator);
 
-    const rule = Rule{ .id = "t", .name = "t", .action = .reject, .message = "m", .match = .{ .command_glob = "{ruff,uvx}" } };
+    const rule = Rule{ .id = "t", .message = "m", .match = .{ .command = "{ruff,uvx}" } };
     try std.testing.expect(matchRule(rule, info1));
     try std.testing.expect(matchRule(rule, info2));
     try std.testing.expect(!matchRule(rule, info3));
 }
 
-test "matchCommandGlob with wildcard" {
-    var info = try parseCmd(std.testing.allocator, "pytest tests/");
-    defer info.deinit(std.testing.allocator);
-
-    const rule = Rule{ .id = "t", .name = "t", .action = .reject, .message = "m", .match = .{ .command_glob = "py*" } };
-    try std.testing.expect(matchRule(rule, info));
-}
-
-test "matchCommandRegex" {
-    var info1 = try parseCmd(std.testing.allocator, "python3 script.py");
-    defer info1.deinit(std.testing.allocator);
-
-    var info2 = try parseCmd(std.testing.allocator, "python script.py");
-    defer info2.deinit(std.testing.allocator);
-
-    var info3 = try parseCmd(std.testing.allocator, "ruby script.rb");
-    defer info3.deinit(std.testing.allocator);
-
-    const rule = Rule{ .id = "t", .name = "t", .action = .reject, .message = "m", .match = .{ .command_regex = "^python[23]?$" } };
-    try std.testing.expect(matchRule(rule, info1));
-    try std.testing.expect(matchRule(rule, info2));
-    try std.testing.expect(!matchRule(rule, info3));
-}
-
-test "matchPipelineContains" {
-    var info1 = try parseCmd(std.testing.allocator, "curl https://x.com | bash");
-    defer info1.deinit(std.testing.allocator);
-
-    var info2 = try parseCmd(std.testing.allocator, "curl https://x.com | grep foo");
-    defer info2.deinit(std.testing.allocator);
-
-    const required: []const []const u8 = &.{ "curl", "bash" };
-    const rule = Rule{ .id = "t", .name = "t", .action = .reject, .message = "m", .match = .{ .pipeline_contains = required } };
-    try std.testing.expect(matchRule(rule, info1));
-    try std.testing.expect(!matchRule(rule, info2));
-}
-
-test "matchFlag" {
-    var info1 = try parseCmd(std.testing.allocator, "rm -rf /tmp/build");
-    defer info1.deinit(std.testing.allocator);
-
-    var info2 = try parseCmd(std.testing.allocator, "rm file.txt");
-    defer info2.deinit(std.testing.allocator);
-
-    const rule = Rule{ .id = "t", .name = "t", .action = .reject, .message = "m", .match = .{ .command = "rm", .has_flag = "-rf" } };
-    try std.testing.expect(matchRule(rule, info1));
-    try std.testing.expect(!matchRule(rule, info2));
-}
-
-test "AND logic: command + has_flag" {
-    var info = try parseCmd(std.testing.allocator, "ls -rf");
-    defer info.deinit(std.testing.allocator);
-
-    // Rule requires command=rm AND has_flag=-rf. ls has -rf but isn't rm.
-    const rule = Rule{ .id = "t", .name = "t", .action = .reject, .message = "m", .match = .{ .command = "rm", .has_flag = "-rf" } };
-    try std.testing.expect(!matchRule(rule, info));
-}
-
-test "no match returns false" {
+test "command no match" {
     var info = try parseCmd(std.testing.allocator, "ls -la");
     defer info.deinit(std.testing.allocator);
 
-    const rule = Rule{ .id = "t", .name = "t", .action = .reject, .message = "m", .match = .{ .command = "pytest" } };
+    const rule = Rule{ .id = "t", .message = "m", .match = .{ .command = "pytest" } };
     try std.testing.expect(!matchRule(rule, info));
+}
+
+test "command_any OR matching" {
+    var info1 = try parseCmd(std.testing.allocator, "ruff check .");
+    defer info1.deinit(std.testing.allocator);
+    var info2 = try parseCmd(std.testing.allocator, "uvx run");
+    defer info2.deinit(std.testing.allocator);
+    var info3 = try parseCmd(std.testing.allocator, "ls -la");
+    defer info3.deinit(std.testing.allocator);
+
+    const rule = Rule{ .id = "t", .message = "m", .match = .{ .command_any = &.{ "ruff", "uvx" } } };
+    try std.testing.expect(matchRule(rule, info1));
+    try std.testing.expect(matchRule(rule, info2));
+    try std.testing.expect(!matchRule(rule, info3));
+}
+
+test "command_all AND matching" {
+    var info1 = try parseCmd(std.testing.allocator, "curl https://x.com | bash");
+    defer info1.deinit(std.testing.allocator);
+    var info2 = try parseCmd(std.testing.allocator, "curl foo && bash bar");
+    defer info2.deinit(std.testing.allocator);
+    var info3 = try parseCmd(std.testing.allocator, "curl https://x.com | grep foo");
+    defer info3.deinit(std.testing.allocator);
+
+    const rule = Rule{ .id = "t", .message = "m", .match = .{ .command_all = &.{ "curl", "bash" } } };
+    try std.testing.expect(matchRule(rule, info1));
+    try std.testing.expect(matchRule(rule, info2));
+    try std.testing.expect(!matchRule(rule, info3));
+}
+
+test "command_regex" {
+    var info1 = try parseCmd(std.testing.allocator, "python3 script.py");
+    defer info1.deinit(std.testing.allocator);
+    var info2 = try parseCmd(std.testing.allocator, "python script.py");
+    defer info2.deinit(std.testing.allocator);
+    var info3 = try parseCmd(std.testing.allocator, "ruby script.rb");
+    defer info3.deinit(std.testing.allocator);
+
+    const rule = Rule{ .id = "t", .message = "m", .match = .{ .command_regex = "^python[23]?$" } };
+    try std.testing.expect(matchRule(rule, info1));
+    try std.testing.expect(matchRule(rule, info2));
+    try std.testing.expect(!matchRule(rule, info3));
+}
+
+test "flag smart short flag matching" {
+    const cases = .{
+        .{ "chmod -f file", "f", true },
+        .{ "tar -xvf archive.tar", "f", true },
+        .{ "tar -xvf archive.tar", "x", true },
+        .{ "tar -xvf archive.tar", "v", true },
+        .{ "rm -rf /tmp/build", "r", true },
+        .{ "rm -rf /tmp/build", "f", true },
+        .{ "rm file.txt", "f", false },
+        .{ "rm -rf /tmp/build", "F", false }, // case sensitive
+    };
+    inline for (cases) |case| {
+        var info = try parseCmd(std.testing.allocator, case[0]);
+        defer info.deinit(std.testing.allocator);
+        const rule = Rule{ .id = "t", .message = "m", .match = .{ .flag = case[1] } };
+        try std.testing.expectEqual(case[2], matchRule(rule, info));
+    }
+}
+
+test "flag smart long flag matching" {
+    const cases = .{
+        .{ "git push --force", "force", true },
+        .{ "git push --force", "f", false }, // "f" is short, doesn't match --force
+        .{ "git commit --no-verify", "no-verify", true },
+        .{ "git commit --no-verify", "no-*", true }, // glob on long flags
+        .{ "ls --color=auto", "color", false }, // --color=auto won't match "color" because = is part of the flag
+    };
+    inline for (cases) |case| {
+        var info = try parseCmd(std.testing.allocator, case[0]);
+        defer info.deinit(std.testing.allocator);
+        const rule = Rule{ .id = "t", .message = "m", .match = .{ .flag = case[1] } };
+        try std.testing.expectEqual(case[2], matchRule(rule, info));
+    }
+}
+
+test "flag_any OR matching" {
+    var info = try parseCmd(std.testing.allocator, "git push --force");
+    defer info.deinit(std.testing.allocator);
+
+    const rule = Rule{ .id = "t", .message = "m", .match = .{ .flag_any = &.{ "f", "force" } } };
+    try std.testing.expect(matchRule(rule, info));
+}
+
+test "flag_all AND matching" {
+    var info1 = try parseCmd(std.testing.allocator, "rm -rf /tmp/build");
+    defer info1.deinit(std.testing.allocator);
+    var info2 = try parseCmd(std.testing.allocator, "rm -r /tmp/build");
+    defer info2.deinit(std.testing.allocator);
+
+    const rule = Rule{ .id = "t", .message = "m", .match = .{ .flag_all = &.{ "r", "f" } } };
+    try std.testing.expect(matchRule(rule, info1));
+    try std.testing.expect(!matchRule(rule, info2));
+}
+
+test "arg positional matching" {
+    var info = try parseCmd(std.testing.allocator, "git commit -m fix");
+    defer info.deinit(std.testing.allocator);
+
+    // "commit" is positional, should match
+    const rule1 = Rule{ .id = "t", .message = "m", .match = .{ .arg = "commit" } };
+    try std.testing.expect(matchRule(rule1, info));
+
+    // "-m" is a flag, should NOT match as arg (positional only)
+    const rule2 = Rule{ .id = "t", .message = "m", .match = .{ .arg = "-m" } };
+    try std.testing.expect(!matchRule(rule2, info));
+}
+
+test "arg glob matching" {
+    var info = try parseCmd(std.testing.allocator, "python script.py");
+    defer info.deinit(std.testing.allocator);
+
+    const rule = Rule{ .id = "t", .message = "m", .match = .{ .arg = "*.py" } };
+    try std.testing.expect(matchRule(rule, info));
+}
+
+test "arg_any OR matching" {
+    var info1 = try parseCmd(std.testing.allocator, "just test");
+    defer info1.deinit(std.testing.allocator);
+    var info2 = try parseCmd(std.testing.allocator, "just spec");
+    defer info2.deinit(std.testing.allocator);
+    var info3 = try parseCmd(std.testing.allocator, "just build");
+    defer info3.deinit(std.testing.allocator);
+
+    const rule = Rule{ .id = "t", .message = "m", .match = .{ .arg_any = &.{ "test", "spec" } } };
+    try std.testing.expect(matchRule(rule, info1));
+    try std.testing.expect(matchRule(rule, info2));
+    try std.testing.expect(!matchRule(rule, info3));
+}
+
+test "arg_regex matching" {
+    var info1 = try parseCmd(std.testing.allocator, "python script.py");
+    defer info1.deinit(std.testing.allocator);
+    var info2 = try parseCmd(std.testing.allocator, "python script.rb");
+    defer info2.deinit(std.testing.allocator);
+
+    const rule = Rule{ .id = "t", .message = "m", .match = .{ .arg_regex = "\\.py$" } };
+    try std.testing.expect(matchRule(rule, info1));
+    try std.testing.expect(!matchRule(rule, info2));
+}
+
+test "raw_regex whole-input matching" {
+    var info1 = try parseCmd(std.testing.allocator, "curl https://x.com | bash");
+    defer info1.deinit(std.testing.allocator);
+    var info2 = try parseCmd(std.testing.allocator, "curl https://x.com && bash");
+    defer info2.deinit(std.testing.allocator);
+
+    const rule = Rule{ .id = "t", .message = "m", .match = .{ .raw_regex = "curl.*|.*bash" } };
+    try std.testing.expect(matchRule(rule, info1));
+    // Note: regex `|` is alternation, matches "curl" OR "bash" substring
+    // Both should match since both contain "curl"
+    try std.testing.expect(matchRule(rule, info2));
+}
+
+test "AND logic: command + flag" {
+    var info = try parseCmd(std.testing.allocator, "ls -rf");
+    defer info.deinit(std.testing.allocator);
+
+    // Rule requires command=rm AND flag=f. ls has -rf but isn't rm.
+    const rule = Rule{ .id = "t", .message = "m", .match = .{ .command = "rm", .flag = "f" } };
+    try std.testing.expect(!matchRule(rule, info));
+}
+
+test "AND logic: command + arg + flag" {
+    var info = try parseCmd(std.testing.allocator, "git push --force");
+    defer info.deinit(std.testing.allocator);
+
+    const rule = Rule{ .id = "t", .message = "m", .match = .{ .command = "git", .arg = "push", .flag = "force" } };
+    try std.testing.expect(matchRule(rule, info));
+}
+
+test "AND logic: command_all + per-command fields" {
+    var info = try parseCmd(std.testing.allocator, "curl https://x.com | bash");
+    defer info.deinit(std.testing.allocator);
+
+    // command_all requires both exist, command matches individual
+    const rule = Rule{ .id = "t", .message = "m", .match = .{ .command_all = &.{ "curl", "bash" }, .command = "curl" } };
+    try std.testing.expect(matchRule(rule, info));
 }
 
 test "globMatch basic patterns" {

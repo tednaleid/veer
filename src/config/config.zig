@@ -11,7 +11,6 @@ pub const MatchConfig = rule_mod.MatchConfig;
 pub const AstMatch = rule_mod.AstMatch;
 pub const ValidationError = rule_mod.ValidationError;
 pub const validate = rule_mod.validate;
-pub const compareByPriority = rule_mod.compareByPriority;
 
 pub const Settings = struct {
     stats: bool = true,
@@ -66,12 +65,12 @@ pub fn loadFile(allocator: std.mem.Allocator, path: []const u8) !toml.Parsed(Con
 }
 
 /// Merge two configs. Project rules override global rules with the same ID.
-/// Returns a new slice of rules sorted by priority.
+/// Project rules come first (definition order), then non-overridden global rules.
 /// Caller owns the returned slice (allocated with `allocator`).
 pub fn mergeRules(allocator: std.mem.Allocator, global_rules: []const Rule, project_rules: []const Rule) ![]Rule {
     var merged = std.ArrayListUnmanaged(Rule).empty;
 
-    // Add all project rules
+    // Add all project rules first
     for (project_rules) |r| {
         try merged.append(allocator, r);
     }
@@ -89,9 +88,6 @@ pub fn mergeRules(allocator: std.mem.Allocator, global_rules: []const Rule, proj
             try merged.append(allocator, global_rule);
         }
     }
-
-    // Sort by priority
-    std.mem.sort(Rule, merged.items, {}, compareByPriority);
 
     return merged.items;
 }
@@ -131,7 +127,7 @@ test "loadString parses basic config" {
     try std.testing.expectEqual(@as(usize, 1), config.rule.len);
     try std.testing.expectEqualStrings("use-just-test", config.rule[0].id);
     try std.testing.expectEqualStrings("pytest", config.rule[0].match.command.?);
-    try std.testing.expectEqual(Action.rewrite, config.rule[0].action);
+    try std.testing.expectEqual(Action.rewrite, config.rule[0].effectiveAction());
     try std.testing.expectEqualStrings("just test", config.rule[0].rewrite_to.?);
 }
 
@@ -220,37 +216,37 @@ test "loadFile returns FileNotFound for missing file" {
     try std.testing.expectError(error.FileNotFound, loadFile(std.testing.allocator, "/nonexistent/path/config.toml"));
 }
 
-test "mergeRules combines non-overlapping rules" {
+test "mergeRules combines non-overlapping rules, project first" {
     const global = [_]Rule{
-        .{ .id = "g1", .name = "Global 1", .action = .reject, .message = "m", .priority = 50, .match = .{ .command = "a" } },
+        .{ .id = "g1", .message = "m", .match = .{ .command = "a" } },
     };
     const project = [_]Rule{
-        .{ .id = "p1", .name = "Project 1", .action = .reject, .message = "m", .priority = 10, .match = .{ .command = "b" } },
+        .{ .id = "p1", .message = "m", .match = .{ .command = "b" } },
     };
 
     const merged = try mergeRules(std.testing.allocator, &global, &project);
     defer std.testing.allocator.free(merged);
 
     try std.testing.expectEqual(@as(usize, 2), merged.len);
-    // Sorted by priority: p1 (10) before g1 (50)
+    // Project rules first, then global
     try std.testing.expectEqualStrings("p1", merged[0].id);
     try std.testing.expectEqualStrings("g1", merged[1].id);
 }
 
 test "mergeRules project overrides global by ID" {
     const global = [_]Rule{
-        .{ .id = "shared", .name = "Global version", .action = .reject, .message = "global msg", .match = .{ .command = "a" } },
+        .{ .id = "shared", .name = "Global version", .message = "global msg", .match = .{ .command = "a" } },
     };
     const project = [_]Rule{
-        .{ .id = "shared", .name = "Project version", .action = .reject, .message = "project msg", .match = .{ .command = "a" } },
+        .{ .id = "shared", .name = "Project version", .message = "project msg", .match = .{ .command = "a" } },
     };
 
     const merged = try mergeRules(std.testing.allocator, &global, &project);
     defer std.testing.allocator.free(merged);
 
     try std.testing.expectEqual(@as(usize, 1), merged.len);
-    try std.testing.expectEqualStrings("Project version", merged[0].name);
-    try std.testing.expectEqual(Action.reject, merged[0].action);
+    try std.testing.expectEqualStrings("Project version", merged[0].displayName());
+    try std.testing.expectEqual(Action.reject, merged[0].effectiveAction());
 }
 
 test "loadFile parses basic.toml fixture" {
@@ -260,8 +256,8 @@ test "loadFile parses basic.toml fixture" {
     try std.testing.expectEqual(@as(usize, 2), result.value.rule.len);
     try std.testing.expectEqualStrings("use-just-test", result.value.rule[0].id);
     try std.testing.expectEqualStrings("no-curl-pipe-bash", result.value.rule[1].id);
-    try std.testing.expectEqual(Action.rewrite, result.value.rule[0].action);
-    try std.testing.expectEqual(Action.reject, result.value.rule[1].action);
+    try std.testing.expectEqual(Action.rewrite, result.value.rule[0].effectiveAction());
+    try std.testing.expectEqual(Action.reject, result.value.rule[1].effectiveAction());
 }
 
 test "loadFile parses empty.toml fixture" {

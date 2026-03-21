@@ -12,16 +12,16 @@ pub fn main() !void {
 
     // Representative rules (10 rules, mix of types)
     const rules = [_]Rule{
-        .{ .id = "use-just-test", .name = "r", .action = .rewrite, .rewrite_to = "just test", .match = .{ .command = "pytest" } },
-        .{ .id = "use-just-lint", .name = "r", .action = .rewrite, .rewrite_to = "just lint", .match = .{ .command_glob = "{ruff,uvx}" } },
-        .{ .id = "use-just-run", .name = "r", .action = .reject, .message = "m", .match = .{ .command = "python3" } },
-        .{ .id = "no-curl-bash", .name = "r", .action = .reject, .message = "m", .priority = 1, .match = .{ .pipeline_contains = &.{ "curl", "bash" } } },
-        .{ .id = "no-curl-sh", .name = "r", .action = .reject, .message = "m", .priority = 1, .match = .{ .pipeline_contains = &.{ "curl", "sh" } } },
-        .{ .id = "no-eval", .name = "r", .action = .reject, .message = "m", .priority = 1, .match = .{ .command = "eval" } },
-        .{ .id = "no-rm-rf", .name = "r", .action = .reject, .message = "m", .match = .{ .command = "rm", .has_flag = "-rf" } },
-        .{ .id = "no-chmod", .name = "r", .action = .reject, .message = "m", .match = .{ .command = "chmod", .has_flag = "+x" } },
-        .{ .id = "redirect-python", .name = "r", .action = .reject, .message = "m", .match = .{ .command_regex = "^python[23]?$" } },
-        .{ .id = "echo-sep", .name = "r", .action = .reject, .message = "m", .match = .{ .command = "echo", .arg_pattern = "\"---\"" } },
+        .{ .id = "use-just-test", .rewrite_to = "just test", .match = .{ .command = "pytest" } },
+        .{ .id = "use-just-lint", .rewrite_to = "just lint", .match = .{ .command = "{ruff,uvx}" } },
+        .{ .id = "use-just-run", .message = "m", .match = .{ .command = "python3" } },
+        .{ .id = "no-curl-bash", .message = "m", .match = .{ .command_all = &.{ "curl", "bash" } } },
+        .{ .id = "no-curl-sh", .message = "m", .match = .{ .command_all = &.{ "curl", "sh" } } },
+        .{ .id = "no-eval", .message = "m", .match = .{ .command = "eval" } },
+        .{ .id = "no-rm-rf", .message = "m", .match = .{ .command = "rm", .flag = "f" } },
+        .{ .id = "no-chmod", .message = "m", .match = .{ .command = "chmod", .arg = "777" } },
+        .{ .id = "redirect-python", .message = "m", .match = .{ .command_regex = "^python[23]?$" } },
+        .{ .id = "echo-sep", .message = "m", .match = .{ .command = "echo", .arg = "---" } },
     };
 
     // Representative commands

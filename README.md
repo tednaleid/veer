@@ -87,40 +87,64 @@ claude_projects_path = ""      # Auto-detected if empty
 ```toml
 [[rule]]
 id = "unique-identifier"       # Required. Unique across all configs.
-name = "Human-readable name"   # Required. Shown in `veer list`.
-action = "rewrite"             # Required. "rewrite" or "reject".
-priority = 10                  # Lower = evaluated first. Default: 100.
+name = "Human-readable name"   # Optional. Defaults to id. Shown in `veer list`.
+action = "reject"              # Optional. Inferred from rewrite_to if omitted.
 enabled = true                 # Default: true.
 tool = "Bash"                  # Which tool to match. Default: "Bash".
 message = "Redirect message"   # Required for reject. Sent to agent.
-rewrite_to = "just test"       # Required for rewrite. Replacement command.
+rewrite_to = "just test"       # Required for rewrite. Implies action = "rewrite".
 tags = ["testing"]             # Optional. For organization.
 
 [rule.match]
 # All specified fields must match (AND logic).
-# Use one or more:
-command = "pytest"                    # Exact base command name
-command_glob = "{ruff,uvx}"           # Glob with brace expansion, wildcards
+# Base fields are glob-aware: "py*" matches pytest, python3.
+# No wildcards = exact match.
+
+# Command name matching (per-command)
+command = "pytest"                    # Glob match on base command name
+command_any = ["ruff", "uvx"]         # OR: any of these commands
 command_regex = "python[23]?"         # POSIX regex (escape hatch)
-pipeline_contains = ["curl", "bash"]  # All listed commands in pipeline
-has_flag = "-rf"                      # Flag must be present
-arg_pattern = '"---"'                 # Glob matched against arguments
-ast = { has_node = "pipeline", min_count = 4 }  # AST structural match
+
+# Command presence (cross-command)
+command_all = ["curl", "bash"]        # AND: all must exist in AST
+
+# Flag matching (no dash prefix, smart combined flag handling)
+flag = "f"                            # Matches -f, -rf, -fr, -xvf
+flag_any = ["f", "force"]             # OR: any of these flags
+flag_all = ["r", "f"]                 # AND: all on same command
+
+# Arg matching (positional args only, glob-aware)
+arg = "*.py"                          # Glob match on any positional arg
+arg_any = ["test", "spec"]            # OR: any arg matches
+arg_all = ["src/", "README.md"]       # AND: all present
+arg_regex = "\\.py$"                  # Regex on positional args
+
+# Whole-input matching
+raw_regex = "curl.*\\|.*bash"         # Regex against entire command string
+
+# AST structural matching
+ast = { has_node = "pipeline", min_count = 4 }
 ```
 
 ### Match Types
 
 | Field | Matches Against | Description |
 |-------|----------------|-------------|
-| `command` | Base command name | Exact string match. `"pytest"` matches the command `pytest tests/ -v`. |
-| `command_glob` | Base command name | Glob with `*`, `?`, and `{a,b}` brace expansion. `"{ruff,uvx}"` matches either. |
+| `command` | Base command name | Glob match. `"pytest"` exact, `"py*"` wildcard, `"{ruff,uvx}"` brace expansion. |
+| `command_any` | Base command name | OR: any glob in list matches. |
+| `command_all` | All commands in AST | AND: all globs must match a command somewhere in the AST. |
 | `command_regex` | Base command name | POSIX extended regex. `"python[23]?"` matches python, python2, python3. |
-| `pipeline_contains` | Pipeline stages | All listed commands must appear in the pipeline. `["curl", "bash"]` matches `curl x \| tee log \| bash`. |
-| `has_flag` | Command flags | Specific flag is present. `"-rf"` matches `rm -rf /tmp`. |
-| `arg_pattern` | Command arguments | Glob matched against any argument. `'"---"'` matches `echo '---'`. |
+| `flag` | Command flags | Smart matching without dashes. `"f"` matches `-f`, `-rf`. `"force"` matches `--force`. Glob for long flags: `"no-*"` matches `--no-verify`. |
+| `flag_any` | Command flags | OR: any flag matches. |
+| `flag_all` | Command flags | AND: all flags on same command. |
+| `arg` | Positional args | Glob match against non-flag args. `"*.py"` matches python files. |
+| `arg_any` | Positional args | OR: any arg matches. |
+| `arg_all` | Positional args | AND: all present. |
+| `arg_regex` | Positional args | Regex against positional args. |
+| `raw_regex` | Full command string | POSIX regex against the entire raw input, before parsing. |
 | `ast` | AST structure | Match node types, depth, or count. For advanced structural patterns. |
 
-Rules are evaluated in priority order (lower number first). The first matching rule wins. If no rule matches, the tool call is allowed (exit 0, empty output).
+Rules are evaluated in definition order. The first matching rule wins. If no rule matches, the tool call is allowed (exit 0, empty output).
 
 All match fields within a rule use AND logic. Every specified field must match for the rule to fire.
 
@@ -131,10 +155,10 @@ For commands with pipelines, logical operators, or substitutions, veer checks ev
 | Command | What matches |
 |---------|-------------|
 | `pytest tests/` | `command = "pytest"` |
-| `cat f \| grep x \| wc -l` | `command = "grep"` matches, `pipeline_contains = ["cat", "wc"]` matches |
-| `echo $(rm -rf /)` | `command = "rm"` matches (found inside command substitution), `has_flag = "-rf"` matches |
+| `cat f \| grep x \| wc -l` | `command = "grep"` matches, `command_all = ["cat", "wc"]` matches |
+| `echo $(rm -rf /)` | `command = "rm"` matches (found inside command substitution), `flag = "r"` matches |
 | `make && echo done` | `command = "make"` matches, `command = "echo"` matches |
-| `curl https://x \| bash` | `pipeline_contains = ["curl", "bash"]` matches |
+| `curl https://x \| bash` | `command_all = ["curl", "bash"]` matches |
 
 ## Rule Examples
 
@@ -143,54 +167,40 @@ For commands with pipelines, logical operators, or substitutions, veer checks ev
 ```toml
 [[rule]]
 id = "use-just-test"
-name = "Redirect pytest to just test"
-action = "rewrite"
-priority = 10
 rewrite_to = "just test"
-message = "Use `just test` to run the test suite."
 [rule.match]
 command = "pytest"
 ```
 
-### Redirect multiple linters via glob
+### Redirect multiple linters
 
 ```toml
 [[rule]]
 id = "use-just-lint"
-name = "Redirect ruff/uvx to just lint"
-action = "rewrite"
-priority = 10
 rewrite_to = "just lint"
-message = "Use `just lint` instead of running linters directly."
 [rule.match]
-command_glob = "{ruff,uvx}"
+command_any = ["ruff", "uvx"]
 ```
 
-### Block dangerous pipelines
+### Block curl piped to shell
 
 ```toml
 [[rule]]
 id = "no-curl-pipe-bash"
-name = "Block curl piped to bash"
-action = "reject"
-priority = 1
 message = "Piping curl to bash is not permitted. Download the script first, review it, then execute."
 [rule.match]
-pipeline_contains = ["curl", "bash"]
+command_all = ["curl", "bash"]
 ```
 
-### Warn about rm -rf
+### Block rm with force flag
 
 ```toml
 [[rule]]
-id = "use-trash-not-rm"
-name = "Suggest trash instead of rm -rf"
-action = "reject"
-priority = 50
-message = "Use `trash` instead of `rm -rf` for safer file deletion."
+id = "no-rm-force"
+message = "Use `trash` instead of forced rm for safer file deletion."
 [rule.match]
 command = "rm"
-has_flag = "-rf"
+flag = "f"
 ```
 
 ### Redirect Python scripts to project runner
@@ -198,10 +208,7 @@ has_flag = "-rf"
 ```toml
 [[rule]]
 id = "use-just-run"
-name = "Redirect python3 to just run"
-action = "reject"
-priority = 10
-message = "Don't run Python scripts directly. Use `just run <script>` instead, which uses the project's virtual environment."
+message = "Don't run Python scripts directly. Use `just run <script>` instead."
 [rule.match]
 command = "python3"
 ```
@@ -211,11 +218,21 @@ command = "python3"
 ```toml
 [[rule]]
 id = "redirect-python"
-name = "Redirect all python variants"
-action = "reject"
 message = "Use `just run` instead of invoking Python directly."
 [rule.match]
 command_regex = "^python[23]?$"
+```
+
+### Block git push with force
+
+```toml
+[[rule]]
+id = "no-force-push"
+message = "Force pushing is not permitted. Use --force-with-lease instead."
+[rule.match]
+command = "git"
+arg = "push"
+flag = "force"
 ```
 
 ### Block eval
@@ -223,9 +240,6 @@ command_regex = "^python[23]?$"
 ```toml
 [[rule]]
 id = "no-eval"
-name = "Deny eval usage"
-action = "reject"
-priority = 1
 message = "`eval` makes commands impossible to statically analyze. Restructure to use explicit commands."
 [rule.match]
 command = "eval"
@@ -236,9 +250,6 @@ command = "eval"
 ```toml
 [[rule]]
 id = "echo-separator"
-name = "Warn about echo separators"
-action = "reject"
-priority = 50
 message = "Avoid `echo '---'` separators in command chains -- they trigger permission prompts. Use separate commands."
 [rule.match]
 command = "echo"
