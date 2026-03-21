@@ -47,6 +47,34 @@ bench:
 release:
     zig build -Doptimize=ReleaseSmall
 
+# Bump version (patch by default), commit, tag, and push
+bump part="patch":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    current=$(grep 'version = "' build.zig.zon | head -1 | sed 's/.*"\(.*\)".*/\1/')
+    IFS='.' read -r major minor patch <<< "$current"
+    case "{{part}}" in
+        major) major=$((major + 1)); minor=0; patch=0 ;;
+        minor) minor=$((minor + 1)); patch=0 ;;
+        patch) patch=$((patch + 1)) ;;
+        *) echo "Usage: just bump [major|minor|patch]"; exit 1 ;;
+    esac
+    new="${major}.${minor}.${patch}"
+    echo "Bumping $current -> $new"
+    sed -i '' "s/version = \"$current\"/version = \"$new\"/" build.zig.zon
+    sed -i '' "s/const version = \"$current\"/const version = \"$new\"/" src/main.zig
+    git add build.zig.zon src/main.zig
+    git commit -m "bump version to $new"
+    git tag "v$new"
+    echo "Tagged v$new. Run 'git push && git push --tags' to release."
+
+# Delete a GitHub release and re-tag to re-trigger release workflow
+retag tag:
+    gh release delete {{tag}} --yes || true
+    git push origin :refs/tags/{{tag}} || true
+    git tag -f {{tag}}
+    git push && git push --tags
+
 # Clean build artifacts
 clean:
     rm -rf zig-out/ zig-cache/ .zig-cache/
