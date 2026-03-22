@@ -265,11 +265,26 @@ fn runRemove(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !void
     std.process.exit(exit_code);
 }
 
-fn runStats(_: std.mem.Allocator) !void {
-    // Stats requires a store, which requires a database path.
-    // For now, print a message. Full wiring happens when loadMerged is implemented.
-    std.debug.print("veer stats: not yet wired to database. Use --config with other commands.\n", .{});
-    std.process.exit(0);
+fn runStats(allocator: std.mem.Allocator) !void {
+    const s = initStore(allocator) orelse {
+        std.debug.print("veer stats: no database found at .veer/veer.db\n", .{});
+        std.process.exit(1);
+    };
+    defer {
+        s.close();
+        allocator.destroy(s);
+    }
+
+    var buf: [4096]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    const exit_code = stats_cmd.run(allocator, s.store(), stream.writer()) catch {
+        std.debug.print("veer stats: internal error\n", .{});
+        std.process.exit(1);
+    };
+
+    const output = stream.getWritten();
+    if (output.len > 0) _ = std.fs.File.stdout().write(output) catch {};
+    std.process.exit(exit_code);
 }
 
 fn runScan(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !void {
