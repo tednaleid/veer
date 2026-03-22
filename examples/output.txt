@@ -14,6 +14,9 @@ REJECT	2	python3 deploy.py	no-direct-python	Use `just run` instead of invoking P
 REJECT	2	sudo apt-get update	no-sudo	Don't use sudo. Ask for help if you need elevated permissions.
 REJECT	2	docker build .	no-docker	Use `just container` instead of running docker commands directly.
 REJECT	2	docker-compose up	no-docker	Use `just container` instead of running docker commands directly.
+REWRITE	0	echo start && pytest tests/ && echo done	use-just-test	echo start && just test && echo done
+REWRITE	0	tail -5 README.md && echo "---" && tail -5 Justfile	fix-echo-separator	tail -5 README.md && echo --- && tail -5 Justfile
+REWRITE	0	ruff check . | head -20	use-just-lint	just lint | head -20
 ALLOW	0	ls -la		
 ALLOW	0	git status		
 ALLOW	0	git log --oneline -5		

@@ -33,7 +33,9 @@ pub fn run(
         switch (action) {
             .rewrite => {
                 if (result.rewrite_to) |target| {
-                    try hook.formatRewrite(stdout_writer, target);
+                    const rewritten = spliceRewrite(allocator, input.command, target, result.match_start, result.match_end);
+                    defer if (rewritten.allocated) allocator.free(rewritten.command);
+                    try hook.formatRewrite(stdout_writer, rewritten.command);
                 }
                 return hook.ExitCode.rewrite;
             },
@@ -48,6 +50,32 @@ pub fn run(
 
     // No match: allow
     return hook.ExitCode.allow;
+}
+
+const SpliceResult = struct {
+    command: []const u8,
+    allocated: bool,
+};
+
+/// Splice rewrite_to into the original command at the matched byte range.
+/// If no byte range (cross-command match), returns rewrite_to as-is.
+fn spliceRewrite(allocator: std.mem.Allocator, raw_command: ?[]const u8, rewrite_to: []const u8, match_start: ?u32, match_end: ?u32) SpliceResult {
+    const raw = raw_command orelse return .{ .command = rewrite_to, .allocated = false };
+    const start = match_start orelse return .{ .command = rewrite_to, .allocated = false };
+    const end = match_end orelse return .{ .command = rewrite_to, .allocated = false };
+
+    if (start == 0 and end >= raw.len) {
+        // Matched the entire command -- no splicing needed
+        return .{ .command = rewrite_to, .allocated = false };
+    }
+
+    // Surgical splice: raw[0..start] ++ rewrite_to ++ raw[end..]
+    const new_len = start + rewrite_to.len + (raw.len - end);
+    const buf = allocator.alloc(u8, new_len) catch return .{ .command = rewrite_to, .allocated = false };
+    @memcpy(buf[0..start], raw[0..start]);
+    @memcpy(buf[start..][0..rewrite_to.len], rewrite_to);
+    @memcpy(buf[start + rewrite_to.len ..], raw[end..]);
+    return .{ .command = buf, .allocated = true };
 }
 
 // -- Tests --
@@ -199,4 +227,44 @@ test "end-to-end: invalid JSON returns exit 1" {
     );
 
     try std.testing.expectEqual(@as(u8, 1), exit_code);
+}
+
+test "end-to-end: surgical rewrite in compound command" {
+    const rules = [_]Rule{.{
+        .id = "use-just-test",
+        .rewrite_to = "just test",
+        .match = .{ .command = "pytest" },
+    }};
+
+    // pytest is the second command in a compound statement
+    const input =
+        \\{"tool_name":"Bash","tool_input":{"command":"echo starting && pytest tests/ -v && echo done"}}
+    ;
+
+    var stdout_buf: [512]u8 = undefined;
+    var stdout_stream = std.io.fixedBufferStream(&stdout_buf);
+    var stderr_buf: [512]u8 = undefined;
+    var stderr_stream = std.io.fixedBufferStream(&stderr_buf);
+
+    const exit_code = try run(
+        std.testing.allocator,
+        &rules,
+        input,
+        null,
+        stdout_stream.writer(),
+        stderr_stream.writer(),
+    );
+
+    try std.testing.expectEqual(@as(u8, 0), exit_code);
+    const stdout_output = stdout_stream.getWritten();
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, stdout_output, .{});
+    defer parsed.deinit();
+    const cmd = parsed.value.object.get("updatedInput").?.object.get("command").?.string;
+    // Should preserve surrounding commands
+    try std.testing.expect(std.mem.indexOf(u8, cmd, "echo starting") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cmd, "echo done") != null);
+    // Should have replaced pytest with just test
+    try std.testing.expect(std.mem.indexOf(u8, cmd, "just test") != null);
+    // Should NOT contain the original pytest
+    try std.testing.expect(std.mem.indexOf(u8, cmd, "pytest") == null);
 }

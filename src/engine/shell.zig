@@ -117,7 +117,11 @@ fn walkNode(
 }
 
 fn extractCommand(allocator: std.mem.Allocator, node: ts.Node, source: []const u8) !SingleCommand {
-    var cmd = SingleCommand{ .name = "" };
+    var cmd = SingleCommand{
+        .name = "",
+        .start_byte = node.startByte(),
+        .end_byte = node.endByte(),
+    };
     var found_name = false;
 
     var i: u32 = 0;

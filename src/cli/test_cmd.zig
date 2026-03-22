@@ -55,10 +55,16 @@ fn checkOne(allocator: std.mem.Allocator, rules: []const Rule, command: []const 
     if (result.action) |action| {
         switch (action) {
             .rewrite => {
+                // Surgical splice: show the full rewritten command
+                const rewritten = if (result.rewrite_to) |target|
+                    spliceRewrite(allocator, command, target, result.match_start, result.match_end)
+                else
+                    SpliceResult{ .command = command, .allocated = false };
+                defer if (rewritten.allocated) allocator.free(rewritten.command);
                 try writer.print("REWRITE\t0\t{s}\t{s}\t{s}\n", .{
                     command,
                     result.rule_id orelse "",
-                    result.rewrite_to orelse "",
+                    rewritten.command,
                 });
             },
             .reject => {
@@ -74,6 +80,28 @@ fn checkOne(allocator: std.mem.Allocator, rules: []const Rule, command: []const 
     }
 
     return 0;
+}
+
+const SpliceResult = struct {
+    command: []const u8,
+    allocated: bool,
+};
+
+/// Splice rewrite_to into the original command at the matched byte range.
+fn spliceRewrite(allocator: std.mem.Allocator, raw: []const u8, rewrite_to: []const u8, match_start: ?u32, match_end: ?u32) SpliceResult {
+    const start = match_start orelse return .{ .command = rewrite_to, .allocated = false };
+    const end = match_end orelse return .{ .command = rewrite_to, .allocated = false };
+
+    if (start == 0 and end >= raw.len) {
+        return .{ .command = rewrite_to, .allocated = false };
+    }
+
+    const new_len = start + rewrite_to.len + (raw.len - end);
+    const buf = allocator.alloc(u8, new_len) catch return .{ .command = rewrite_to, .allocated = false };
+    @memcpy(buf[0..start], raw[0..start]);
+    @memcpy(buf[start..][0..rewrite_to.len], rewrite_to);
+    @memcpy(buf[start + rewrite_to.len ..], raw[end..]);
+    return .{ .command = buf, .allocated = true };
 }
 
 // -- Tests --
@@ -129,6 +157,23 @@ test "test command without argument returns error" {
     const exit_code = try run(std.testing.allocator, &.{}, .{}, stream.writer());
 
     try std.testing.expectEqual(@as(u8, 1), exit_code);
+}
+
+test "test surgical rewrite in compound command" {
+    const rules = [_]Rule{.{
+        .id = "use-just-test",
+        .rewrite_to = "just test",
+        .match = .{ .command = "pytest" },
+    }};
+
+    var buf: [512]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    const exit_code = try run(std.testing.allocator, &rules, .{ .command = "echo start && pytest tests/ && echo done" }, stream.writer());
+
+    try std.testing.expectEqual(@as(u8, 0), exit_code);
+    const output = stream.getWritten();
+    // TSV output column should show the full spliced command
+    try std.testing.expect(std.mem.indexOf(u8, output, "echo start && just test && echo done") != null);
 }
 
 test "test --file checks each line" {

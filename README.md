@@ -2,13 +2,50 @@
 
 A fast CLI tool that acts as a [Claude Code](https://claude.com/claude-code) PreToolUse hook. It intercepts tool calls before execution, evaluates them against user-defined rules, and either rewrites or rejects them -- helping the agent self-correct toward project-appropriate alternatives.
 
-Think of it as a linter for agent behavior: "never ask an LLM to do the job of a linter."
+Think of `veer` as a linter for the commands your agent wants to run. Rather than asking you repeatedly for permission to do something unsafe, `veer` can let the agent know that the command it is trying will not be approved and they should use an alternate path.
 
 ## Why
 
-Claude Code agents frequently run commands that bypass project conventions -- `pytest` instead of `just test`, `python3` directly instead of `just run`, or dangerous pipelines like `curl | bash`. The built-in permission system (allowedTools/deniedTools) can only allow or block. It can't redirect.
+LLMs have been trained to use specific commands. It really wants to use raw `python3` or 
+
+If don't want to live `--dangerously-skip-permissions` and are tired of repeatedly reminding claude to use your `just` or `make` commands, `veer` can help.
+
+If you've gotten sick of approving `Command contains quoted characters in flag names`:
+
+```
+──────
+ Bash command
+
+   tail -5 README.md && echo "---" && tail -5 Justfile
+   Test if echo separator triggers permission dialog
+
+ Command contains quoted characters in flag names
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. No
+```
+
+`veer` can deny this command with a `PreToolUse` hook and let the agent know it should do something else. Here's a `veer` rule to automatically give instructions to the agent:
+
+```
+[[rule]]
+id = "no-quoted-characters-in-flag-names"
+message = "Command contains quoted characters in flag names. Run the commands directly."
+[rule.match]
+command = "echo"
+arg = "---"
+```
+
+Claude Code agents frequently run commands that bypass project conventions. I often use `justfile`s to hold safe, pre-approved commands that I'm ok with `claude` running. `veer` remind Claude that these files exist and should be used.
+
+examples:
+- don't use `pytest`, use `just test`
+- `python3` directly instead of `just run`, or dangerous pipelines like `curl | bash`. The built-in permission system (allowedTools/deniedTools) can only allow or block. It can't redirect.
 
 veer fills this gap. It parses shell commands into ASTs via tree-sitter-bash and matches them against rules that rewrite or reject -- with helpful messages that guide the agent toward the right approach.
+
+It turns out that `claude` is great at creating these rules. Just let it know about `veer` and ask it to write rules for everything in your just/make files.
 
 ## Quick Start
 
@@ -152,6 +189,26 @@ ast = { has_node = "pipeline", min_count = 4 }
 Rules are evaluated in definition order. The first matching rule wins. If no rule matches, the tool call is allowed (exit 0, empty output).
 
 All match fields within a rule use AND logic. Every specified field must match for the rule to fire.
+
+### Surgical Rewrite in Compound Commands
+
+When a rewrite rule matches a subcommand inside a compound statement, veer replaces only the matched subcommand -- preserving the surrounding commands:
+
+```
+Input:   echo start && pytest tests/ && echo done
+Rule:    command = "pytest", rewrite_to = "just test"
+Output:  echo start && just test && echo done
+```
+
+This also works in pipelines:
+
+```
+Input:   ruff check . | head -20
+Rule:    command_any = ["ruff", "uvx"], rewrite_to = "just lint"
+Output:  just lint | head -20
+```
+
+For single commands (the common case), surgical and full replacement produce the same result.
 
 ### Rule Evaluation Against Compound Commands
 

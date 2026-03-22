@@ -43,6 +43,13 @@ sudo apt-get update
 docker build .
 docker-compose up
 
+# --- Surgical rewrites in compound commands ---
+
+# Rewrite only the matched subcommand, preserve the rest
+echo start && pytest tests/ && echo done
+tail -5 README.md && echo "---" && tail -5 Justfile
+ruff check . | head -20
+
 # --- Allowed (no matching rule) ---
 
 # Normal commands that don't trigger any rules

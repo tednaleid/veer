@@ -37,6 +37,8 @@ pub const SingleCommand = struct {
     args: std.ArrayListUnmanaged([]const u8) = .empty,
     flags: std.ArrayListUnmanaged([]const u8) = .empty,
     positional: std.ArrayListUnmanaged([]const u8) = .empty,
+    start_byte: u32 = 0,
+    end_byte: u32 = 0,
 
     pub fn deinit(self: *SingleCommand, allocator: std.mem.Allocator) void {
         self.args.deinit(allocator);
@@ -63,6 +65,25 @@ test "SingleCommand.hasFlag returns true when present" {
     try std.testing.expect(cmd.hasFlag("-r"));
     try std.testing.expect(cmd.hasFlag("--color"));
     try std.testing.expect(!cmd.hasFlag("-v"));
+}
+
+test "SingleCommand byte offsets from shell parser" {
+    const shell = @import("shell.zig");
+    // "ls -la && echo hello"
+    //  ^----^    ^---------^
+    //  0..5      9..19
+    var info = try shell.parse(std.testing.allocator, "ls -la && echo hello");
+    defer info.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), info.commands.items.len);
+    // First command: "ls -la" starts at 0
+    try std.testing.expectEqual(@as(u32, 0), info.commands.items[0].start_byte);
+    try std.testing.expectEqualStrings("ls", info.commands.items[0].name);
+    // Second command: "echo hello" starts at 10
+    try std.testing.expectEqualStrings("echo", info.commands.items[1].name);
+    // Byte offsets should be within the string
+    try std.testing.expect(info.commands.items[1].start_byte > 0);
+    try std.testing.expect(info.commands.items[1].end_byte <= 20);
 }
 
 test "CommandInfo.deinit frees all memory" {

@@ -8,37 +8,40 @@ const AstMatch = @import("../config/rule.zig").AstMatch;
 const CommandInfo = @import("command_info.zig").CommandInfo;
 const SingleCommand = @import("command_info.zig").SingleCommand;
 
-/// Returns true if the rule matches the given command info.
-/// All specified match fields must match (AND logic across levels).
-pub fn matchRule(rule: Rule, info: CommandInfo) bool {
+/// Returns the index of the matched command, or null if no match.
+/// For cross-command-only matches (no per-command fields), returns
+/// a sentinel (no specific command matched).
+pub const CROSS_COMMAND_MATCH: usize = std.math.maxInt(usize);
+
+pub fn matchRule(rule: Rule, info: CommandInfo) ?usize {
     const m = rule.match;
 
     // Level 1: Raw input check (before parsing)
     if (m.raw_regex) |pattern| {
-        if (!regexMatch(pattern, info.raw)) return false;
-        if (isOnlyCrossField(m)) return true;
+        if (!regexMatch(pattern, info.raw)) return null;
+        if (isOnlyCrossField(m)) return CROSS_COMMAND_MATCH;
     }
 
     // Level 2: Cross-command checks
     if (m.command_all) |required| {
-        if (!matchCommandAll(required, info)) return false;
-        if (isOnlyCrossField(m)) return true;
+        if (!matchCommandAll(required, info)) return null;
+        if (isOnlyCrossField(m)) return CROSS_COMMAND_MATCH;
     }
 
     if (m.ast) |ast_match| {
-        if (!matchAst(ast_match, info)) return false;
-        if (isOnlyCrossField(m)) return true;
+        if (!matchAst(ast_match, info)) return null;
+        if (isOnlyCrossField(m)) return CROSS_COMMAND_MATCH;
     }
 
     // Level 3: Per-command checks (iterate commands, all must match on ONE command)
     if (hasPerCommandFields(m)) {
-        for (info.commands.items) |cmd| {
-            if (matchSingleCommand(m, cmd)) return true;
+        for (info.commands.items, 0..) |cmd, i| {
+            if (matchSingleCommand(m, cmd)) return i;
         }
-        return false;
+        return null;
     }
 
-    return true;
+    return CROSS_COMMAND_MATCH;
 }
 
 /// Check if all per-command match fields match a single command.
@@ -297,7 +300,7 @@ test "command exact match" {
     defer info.deinit(std.testing.allocator);
 
     const rule = Rule{ .id = "t", .message = "m", .match = .{ .command = "pytest" } };
-    try std.testing.expect(matchRule(rule, info));
+    try std.testing.expect(matchRule(rule, info) != null);
 }
 
 test "command glob match" {
@@ -305,7 +308,7 @@ test "command glob match" {
     defer info.deinit(std.testing.allocator);
 
     const rule = Rule{ .id = "t", .message = "m", .match = .{ .command = "py*" } };
-    try std.testing.expect(matchRule(rule, info));
+    try std.testing.expect(matchRule(rule, info) != null);
 }
 
 test "command glob brace expansion" {
@@ -319,9 +322,9 @@ test "command glob brace expansion" {
     defer info3.deinit(std.testing.allocator);
 
     const rule = Rule{ .id = "t", .message = "m", .match = .{ .command = "{ruff,uvx}" } };
-    try std.testing.expect(matchRule(rule, info1));
-    try std.testing.expect(matchRule(rule, info2));
-    try std.testing.expect(!matchRule(rule, info3));
+    try std.testing.expect(matchRule(rule, info1) != null);
+    try std.testing.expect(matchRule(rule, info2) != null);
+    try std.testing.expect(matchRule(rule, info3) == null);
 }
 
 test "command no match" {
@@ -329,7 +332,7 @@ test "command no match" {
     defer info.deinit(std.testing.allocator);
 
     const rule = Rule{ .id = "t", .message = "m", .match = .{ .command = "pytest" } };
-    try std.testing.expect(!matchRule(rule, info));
+    try std.testing.expect(matchRule(rule, info) == null);
 }
 
 test "command_any OR matching" {
@@ -341,9 +344,9 @@ test "command_any OR matching" {
     defer info3.deinit(std.testing.allocator);
 
     const rule = Rule{ .id = "t", .message = "m", .match = .{ .command_any = &.{ "ruff", "uvx" } } };
-    try std.testing.expect(matchRule(rule, info1));
-    try std.testing.expect(matchRule(rule, info2));
-    try std.testing.expect(!matchRule(rule, info3));
+    try std.testing.expect(matchRule(rule, info1) != null);
+    try std.testing.expect(matchRule(rule, info2) != null);
+    try std.testing.expect(matchRule(rule, info3) == null);
 }
 
 test "command_all AND matching" {
@@ -355,9 +358,9 @@ test "command_all AND matching" {
     defer info3.deinit(std.testing.allocator);
 
     const rule = Rule{ .id = "t", .message = "m", .match = .{ .command_all = &.{ "curl", "bash" } } };
-    try std.testing.expect(matchRule(rule, info1));
-    try std.testing.expect(matchRule(rule, info2));
-    try std.testing.expect(!matchRule(rule, info3));
+    try std.testing.expect(matchRule(rule, info1) != null);
+    try std.testing.expect(matchRule(rule, info2) != null);
+    try std.testing.expect(matchRule(rule, info3) == null);
 }
 
 test "command_regex" {
@@ -369,9 +372,9 @@ test "command_regex" {
     defer info3.deinit(std.testing.allocator);
 
     const rule = Rule{ .id = "t", .message = "m", .match = .{ .command_regex = "^python[23]?$" } };
-    try std.testing.expect(matchRule(rule, info1));
-    try std.testing.expect(matchRule(rule, info2));
-    try std.testing.expect(!matchRule(rule, info3));
+    try std.testing.expect(matchRule(rule, info1) != null);
+    try std.testing.expect(matchRule(rule, info2) != null);
+    try std.testing.expect(matchRule(rule, info3) == null);
 }
 
 test "flag smart short flag matching" {
@@ -389,7 +392,7 @@ test "flag smart short flag matching" {
         var info = try parseCmd(std.testing.allocator, case[0]);
         defer info.deinit(std.testing.allocator);
         const rule = Rule{ .id = "t", .message = "m", .match = .{ .flag = case[1] } };
-        try std.testing.expectEqual(case[2], matchRule(rule, info));
+        try std.testing.expectEqual(case[2], matchRule(rule, info) != null);
     }
 }
 
@@ -405,7 +408,7 @@ test "flag smart long flag matching" {
         var info = try parseCmd(std.testing.allocator, case[0]);
         defer info.deinit(std.testing.allocator);
         const rule = Rule{ .id = "t", .message = "m", .match = .{ .flag = case[1] } };
-        try std.testing.expectEqual(case[2], matchRule(rule, info));
+        try std.testing.expectEqual(case[2], matchRule(rule, info) != null);
     }
 }
 
@@ -414,7 +417,7 @@ test "flag_any OR matching" {
     defer info.deinit(std.testing.allocator);
 
     const rule = Rule{ .id = "t", .message = "m", .match = .{ .flag_any = &.{ "f", "force" } } };
-    try std.testing.expect(matchRule(rule, info));
+    try std.testing.expect(matchRule(rule, info) != null);
 }
 
 test "flag_all AND matching" {
@@ -424,8 +427,8 @@ test "flag_all AND matching" {
     defer info2.deinit(std.testing.allocator);
 
     const rule = Rule{ .id = "t", .message = "m", .match = .{ .flag_all = &.{ "r", "f" } } };
-    try std.testing.expect(matchRule(rule, info1));
-    try std.testing.expect(!matchRule(rule, info2));
+    try std.testing.expect(matchRule(rule, info1) != null);
+    try std.testing.expect(matchRule(rule, info2) == null);
 }
 
 test "arg positional matching" {
@@ -434,11 +437,11 @@ test "arg positional matching" {
 
     // "commit" is positional, should match
     const rule1 = Rule{ .id = "t", .message = "m", .match = .{ .arg = "commit" } };
-    try std.testing.expect(matchRule(rule1, info));
+    try std.testing.expect(matchRule(rule1, info) != null);
 
     // "-m" is a flag, should NOT match as arg (positional only)
     const rule2 = Rule{ .id = "t", .message = "m", .match = .{ .arg = "-m" } };
-    try std.testing.expect(!matchRule(rule2, info));
+    try std.testing.expect(matchRule(rule2, info) == null);
 }
 
 test "arg glob matching" {
@@ -446,7 +449,7 @@ test "arg glob matching" {
     defer info.deinit(std.testing.allocator);
 
     const rule = Rule{ .id = "t", .message = "m", .match = .{ .arg = "*.py" } };
-    try std.testing.expect(matchRule(rule, info));
+    try std.testing.expect(matchRule(rule, info) != null);
 }
 
 test "arg_any OR matching" {
@@ -458,9 +461,9 @@ test "arg_any OR matching" {
     defer info3.deinit(std.testing.allocator);
 
     const rule = Rule{ .id = "t", .message = "m", .match = .{ .arg_any = &.{ "test", "spec" } } };
-    try std.testing.expect(matchRule(rule, info1));
-    try std.testing.expect(matchRule(rule, info2));
-    try std.testing.expect(!matchRule(rule, info3));
+    try std.testing.expect(matchRule(rule, info1) != null);
+    try std.testing.expect(matchRule(rule, info2) != null);
+    try std.testing.expect(matchRule(rule, info3) == null);
 }
 
 test "arg_regex matching" {
@@ -470,8 +473,8 @@ test "arg_regex matching" {
     defer info2.deinit(std.testing.allocator);
 
     const rule = Rule{ .id = "t", .message = "m", .match = .{ .arg_regex = "\\.py$" } };
-    try std.testing.expect(matchRule(rule, info1));
-    try std.testing.expect(!matchRule(rule, info2));
+    try std.testing.expect(matchRule(rule, info1) != null);
+    try std.testing.expect(matchRule(rule, info2) == null);
 }
 
 test "raw_regex whole-input matching" {
@@ -481,10 +484,10 @@ test "raw_regex whole-input matching" {
     defer info2.deinit(std.testing.allocator);
 
     const rule = Rule{ .id = "t", .message = "m", .match = .{ .raw_regex = "curl.*|.*bash" } };
-    try std.testing.expect(matchRule(rule, info1));
+    try std.testing.expect(matchRule(rule, info1) != null);
     // Note: regex `|` is alternation, matches "curl" OR "bash" substring
     // Both should match since both contain "curl"
-    try std.testing.expect(matchRule(rule, info2));
+    try std.testing.expect(matchRule(rule, info2) != null);
 }
 
 test "AND logic: command + flag" {
@@ -493,7 +496,7 @@ test "AND logic: command + flag" {
 
     // Rule requires command=rm AND flag=f. ls has -rf but isn't rm.
     const rule = Rule{ .id = "t", .message = "m", .match = .{ .command = "rm", .flag = "f" } };
-    try std.testing.expect(!matchRule(rule, info));
+    try std.testing.expect(matchRule(rule, info) == null);
 }
 
 test "AND logic: command + arg + flag" {
@@ -501,7 +504,7 @@ test "AND logic: command + arg + flag" {
     defer info.deinit(std.testing.allocator);
 
     const rule = Rule{ .id = "t", .message = "m", .match = .{ .command = "git", .arg = "push", .flag = "force" } };
-    try std.testing.expect(matchRule(rule, info));
+    try std.testing.expect(matchRule(rule, info) != null);
 }
 
 test "AND logic: command_all + per-command fields" {
@@ -510,7 +513,7 @@ test "AND logic: command_all + per-command fields" {
 
     // command_all requires both exist, command matches individual
     const rule = Rule{ .id = "t", .message = "m", .match = .{ .command_all = &.{ "curl", "bash" }, .command = "curl" } };
-    try std.testing.expect(matchRule(rule, info));
+    try std.testing.expect(matchRule(rule, info) != null);
 }
 
 test "globMatch basic patterns" {
@@ -554,7 +557,7 @@ test "glob in command_any list elements" {
     defer info.deinit(std.testing.allocator);
 
     const rule = Rule{ .id = "t", .message = "m", .match = .{ .command_any = &.{ "py*", "ruby" } } };
-    try std.testing.expect(matchRule(rule, info));
+    try std.testing.expect(matchRule(rule, info) != null);
 }
 
 test "glob in command_all" {
@@ -562,7 +565,7 @@ test "glob in command_all" {
     defer info.deinit(std.testing.allocator);
 
     const rule = Rule{ .id = "t", .message = "m", .match = .{ .command_all = &.{ "curl", "*sh" } } };
-    try std.testing.expect(matchRule(rule, info));
+    try std.testing.expect(matchRule(rule, info) != null);
 }
 
 test "glob in arg_any" {
@@ -570,7 +573,7 @@ test "glob in arg_any" {
     defer info.deinit(std.testing.allocator);
 
     const rule = Rule{ .id = "t", .message = "m", .match = .{ .arg_any = &.{ "*.py", "*.rb" } } };
-    try std.testing.expect(matchRule(rule, info));
+    try std.testing.expect(matchRule(rule, info) != null);
 }
 
 test "glob in arg_all" {
@@ -578,7 +581,7 @@ test "glob in arg_all" {
     defer info.deinit(std.testing.allocator);
 
     const rule = Rule{ .id = "t", .message = "m", .match = .{ .arg_all = &.{ "src/*", "*.md" } } };
-    try std.testing.expect(matchRule(rule, info));
+    try std.testing.expect(matchRule(rule, info) != null);
 }
 
 test "flag long glob matching" {
@@ -590,9 +593,9 @@ test "flag long glob matching" {
     defer info3.deinit(std.testing.allocator);
 
     const rule = Rule{ .id = "t", .message = "m", .match = .{ .flag = "no-*" } };
-    try std.testing.expect(matchRule(rule, info1));
-    try std.testing.expect(matchRule(rule, info2));
-    try std.testing.expect(!matchRule(rule, info3));
+    try std.testing.expect(matchRule(rule, info1) != null);
+    try std.testing.expect(matchRule(rule, info2) != null);
+    try std.testing.expect(matchRule(rule, info3) == null);
 }
 
 // -- Fuzz tests --

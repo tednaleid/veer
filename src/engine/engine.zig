@@ -16,6 +16,8 @@ pub const CheckResult = struct {
     rule_id: ?[]const u8 = null,
     message: ?[]const u8 = null,
     rewrite_to: ?[]const u8 = null,
+    match_start: ?u32 = null, // byte offset for surgical rewrite
+    match_end: ?u32 = null,
 
     pub const approve: CheckResult = .{ .action = null };
 };
@@ -52,12 +54,24 @@ pub fn check(
         // For Bash tools: match against parsed CommandInfo
         if (std.mem.eql(u8, tool_name, "Bash")) {
             if (info) |parsed_info| {
-                if (matcher.matchRule(rule, parsed_info)) {
+                if (matcher.matchRule(rule, parsed_info)) |match_idx| {
+                    // Get byte range for surgical rewrite (if per-command match)
+                    var match_start: ?u32 = null;
+                    var match_end: ?u32 = null;
+                    if (match_idx != matcher.CROSS_COMMAND_MATCH and
+                        match_idx < parsed_info.commands.items.len)
+                    {
+                        const matched_cmd = parsed_info.commands.items[match_idx];
+                        match_start = matched_cmd.start_byte;
+                        match_end = matched_cmd.end_byte;
+                    }
                     const result = CheckResult{
                         .action = rule.effectiveAction(),
                         .rule_id = rule.id,
                         .message = rule.message,
                         .rewrite_to = rule.rewrite_to,
+                        .match_start = match_start,
+                        .match_end = match_end,
                     };
                     recordToStore(store, tool_name, command, result, .approve);
                     return result;
