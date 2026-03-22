@@ -36,7 +36,7 @@ See [examples/](examples/) for a full demo of all match types.
 
 ## Actions
 
-veer supports three actions, each serving a different purpose:
+veer supports two actions:
 
 ### Rewrite (silent replacement)
 
