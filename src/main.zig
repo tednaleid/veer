@@ -350,6 +350,8 @@ fn runTest(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !void {
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--config")) {
             config_path = args.next();
+        } else if (std.mem.eql(u8, arg, "--file")) {
+            opts.file_path = args.next();
         } else if (arg.len > 0 and arg[0] != '-') {
             opts.command = arg;
         }
@@ -413,7 +415,7 @@ fn printUsage() void {
         \\  add      --action <action> --command <cmd> [--message <msg>] [--rewrite-to <cmd>]
         \\  remove   <rule-id> [--config <path>]
         \\  scan     --transcript <path> [--min-count <n>] [--output toml] [--permissions --settings <path>]
-        \\  test     "<command>" [--config <path>]
+        \\  test     "<command>" [--config <path>] [--file <path>]
         \\  validate [--config <path>]
         \\
     , .{});

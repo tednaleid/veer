@@ -105,6 +105,12 @@ retag tag:
     git tag -f {{tag}}
     git push && git push --tags
 
+# Regenerate examples/output.txt from the sample config and commands
+demo:
+    zig build run -- test --file examples/commands.txt --config examples/config.toml > examples/output.txt
+    @echo "Generated examples/output.txt"
+    @cat examples/output.txt
+
 # Clean build artifacts
 clean:
     rm -rf zig-out/ zig-cache/ .zig-cache/

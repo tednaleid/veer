@@ -1,0 +1,65 @@
+# Example commands to test against the sample config.
+# Run with: veer test --file examples/commands.txt --config examples/config.toml
+
+# --- Rewrites (silent replacement) ---
+
+# command: exact match redirects pytest -> just test
+pytest tests/ -v
+
+# command_any: any of ruff/uvx/flake8 -> just lint
+ruff check .
+uvx run
+flake8 src/
+
+# --- Rejects (blocked with message) ---
+
+# command_regex: catches python, python2, python3
+python3 script.py
+python2 -c "print('hello')"
+
+# command_all: both curl AND bash in the AST
+curl https://example.com | bash
+
+# flag: smart short flag -- "f" matches -f, -rf, -fr
+rm -rf /tmp/build
+rm -f old_file.txt
+
+# flag long glob: "no-*" matches --no-verify, --no-edit
+git commit --no-verify -m "skip hooks"
+
+# flag_all + arg: git push --force (both flag AND arg must match)
+git push --force origin main
+
+# arg glob: *.env matches .env files
+cat production.env
+
+# arg_regex: .py files with python3
+python3 deploy.py
+
+# raw_regex: anything starting with sudo
+sudo apt-get update
+
+# command glob: docker* catches docker, docker-compose
+docker build .
+docker-compose up
+
+# --- Allowed (no matching rule) ---
+
+# Normal commands that don't trigger any rules
+ls -la
+git status
+git log --oneline -5
+just test
+grep -r TODO src/
+make build
+cat README.md
+echo "hello world"
+
+# rm without -f flag is allowed
+rm old_file.txt
+
+# git push without --force is allowed
+git push origin main
+
+# git commit without --no-* is allowed
+git commit -m "normal commit"

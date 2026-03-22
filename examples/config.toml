@@ -1,0 +1,89 @@
+# Example veer config demonstrating all match types.
+# Use with: veer test --file examples/commands.txt --config examples/config.toml
+
+# --- Rewrites (silent replacement) ---
+
+# Exact command match: redirect test runner
+[[rule]]
+id = "use-just-test"
+rewrite_to = "just test"
+[rule.match]
+command = "pytest"
+
+# command_any: redirect multiple linters to project command
+[[rule]]
+id = "use-just-lint"
+rewrite_to = "just lint"
+[rule.match]
+command_any = ["ruff", "uvx", "flake8"]
+
+# --- Rejects (block with message) ---
+
+# command_regex: catch all python version variants
+[[rule]]
+id = "no-direct-python"
+message = "Use `just run` instead of invoking Python directly."
+[rule.match]
+command_regex = "^python[23]?$"
+
+# command_all: block curl piped to any shell
+[[rule]]
+id = "no-curl-bash"
+message = "Don't pipe curl to a shell. Download first, review, then execute."
+[rule.match]
+command_all = ["curl", "bash"]
+
+# flag: smart short flag matching (f matches -f, -rf, -fr)
+[[rule]]
+id = "no-rm-force"
+message = "Use `trash` instead of forced rm."
+[rule.match]
+command = "rm"
+flag = "f"
+
+# flag with long flag glob: block git --no-* flags
+[[rule]]
+id = "no-git-skip-hooks"
+message = "Don't skip git hooks. Fix the underlying issue instead."
+[rule.match]
+command = "git"
+flag = "no-*"
+
+# flag_all + arg: block force push (must have both --force AND push arg)
+[[rule]]
+id = "no-force-push"
+message = "Force pushing is not allowed. Use --force-with-lease instead."
+[rule.match]
+command = "git"
+arg = "push"
+flag = "force"
+
+# arg glob: block writes to dotenv files
+[[rule]]
+id = "no-write-env"
+message = "Don't modify .env files directly. Use the secrets manager."
+[rule.match]
+command = "cat"
+arg = "*.env"
+
+# arg_regex: block executing Python files directly
+[[rule]]
+id = "no-run-py-files"
+message = "Use `just run <script>` instead of running .py files directly."
+[rule.match]
+command = "python3"
+arg_regex = "\\.py$"
+
+# raw_regex: whole-input pattern match
+[[rule]]
+id = "no-sudo"
+message = "Don't use sudo. Ask for help if you need elevated permissions."
+[rule.match]
+raw_regex = "^sudo "
+
+# command glob: block any docker* command
+[[rule]]
+id = "no-docker"
+message = "Use `just container` instead of running docker commands directly."
+[rule.match]
+command = "docker*"

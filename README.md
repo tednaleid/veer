@@ -1,6 +1,6 @@
 # veer
 
-A fast CLI tool that acts as a [Claude Code](https://claude.com/claude-code) PreToolUse hook. It intercepts tool calls before execution, evaluates them against user-defined rules, and either rewrites, warns, or denies them -- helping the agent self-correct toward project-appropriate alternatives.
+A fast CLI tool that acts as a [Claude Code](https://claude.com/claude-code) PreToolUse hook. It intercepts tool calls before execution, evaluates them against user-defined rules, and either rewrites or rejects them -- helping the agent self-correct toward project-appropriate alternatives.
 
 Think of it as a linter for agent behavior: "never ask an LLM to do the job of a linter."
 
@@ -8,13 +8,13 @@ Think of it as a linter for agent behavior: "never ask an LLM to do the job of a
 
 Claude Code agents frequently run commands that bypass project conventions -- `pytest` instead of `just test`, `python3` directly instead of `just run`, or dangerous pipelines like `curl | bash`. The built-in permission system (allowedTools/deniedTools) can only allow or block. It can't redirect.
 
-veer fills this gap. It parses shell commands into ASTs via tree-sitter-bash and matches them against rules that rewrite, warn, or deny -- with helpful messages that guide the agent toward the right approach.
+veer fills this gap. It parses shell commands into ASTs via tree-sitter-bash and matches them against rules that rewrite or reject -- with helpful messages that guide the agent toward the right approach.
 
 ## Quick Start
 
 ```bash
-# Build from source (requires Zig 0.15+)
-zig build -Doptimize=ReleaseSmall
+# Build and install (requires Zig 0.15+)
+just install    # builds release binary, symlinks to ~/.local/bin/veer
 
 # Register veer as a Claude Code hook
 veer install
@@ -23,11 +23,16 @@ veer install
 veer add --action rewrite --command pytest --rewrite-to "just test" \
   --message "Use just test to run the test suite."
 
-# See your rules
+# See your rules (auto-discovers .veer/config.toml)
 veer list
+
+# Test a command against your rules
+veer test "pytest tests/"
 ```
 
 That's it. The next time Claude Code tries to run `pytest`, veer silently replaces it with `just test`.
+
+See [examples/](examples/) for a full demo of all match types.
 
 ## Actions
 
@@ -253,7 +258,7 @@ id = "echo-separator"
 message = "Avoid `echo '---'` separators in command chains -- they trigger permission prompts. Use separate commands."
 [rule.match]
 command = "echo"
-arg_pattern = '"---"'
+arg = "---"
 ```
 
 ### Match non-Bash tools
@@ -273,7 +278,7 @@ command = "Write"
 
 ### veer check
 
-The hot-path command called by the PreToolUse hook. Reads JSON from stdin, evaluates against rules, outputs result.
+The hot-path command called by the PreToolUse hook. Reads JSON from stdin, evaluates against rules, outputs result. Auto-discovers `.veer/config.toml` and `~/.config/veer/config.toml` when `--config` is not specified.
 
 ```
 Usage: veer check [--config <path>]
@@ -302,7 +307,7 @@ Example output:
   ID                 Action   Command/Pattern  Message
   -----------------  -------  ---------------  -----------------------
   use-just-test      rewrite  pytest           Use just test.
-  no-curl-pipe-bash  deny     pipeline:...     Don't pipe curl to bash.
+  no-curl-pipe-bash  reject   (command_all)    Don't pipe curl to bash.
 
   2 rule(s)
 ```
@@ -315,7 +320,7 @@ Add a rule to the config file.
 Usage: veer add --action <action> --command <cmd>
                [--id <id>] [--name <name>]
                [--message <msg>] [--rewrite-to <cmd>]
-               [--priority <n>] [--config <path>]
+               [--config <path>]
 ```
 
 ### veer remove
@@ -326,9 +331,32 @@ Remove a rule by ID.
 Usage: veer remove <rule-id> [--config <path>]
 ```
 
+### veer test
+
+Test commands against rules without the hook protocol.
+
+```
+Usage: veer test "<command>" [--config <path>]
+       veer test --file <path> [--config <path>]
+
+Output (TSV): result, return_code, input, rule_id, output
+
+Examples:
+  veer test "pytest tests/"
+  veer test --file examples/commands.txt --config examples/config.toml
+```
+
+### veer validate
+
+Check a config file for errors.
+
+```
+Usage: veer validate [--config <path>]
+```
+
 ### veer stats
 
-Display usage statistics.
+Display usage statistics from `.veer/veer.db`.
 
 ```
 Usage: veer stats
@@ -378,9 +406,10 @@ Shell commands are parsed into ASTs using tree-sitter-bash, giving structural un
 ## Testing
 
 ```bash
-just test     # Run all tests (135 tests)
+just test     # Run all tests (138 tests)
 just check    # Test + lint
 just bench    # Benchmarks (ReleaseFast)
+just demo     # Regenerate examples/output.txt
 ```
 
 Fuzz test targets exist for the shell parser, glob matcher, and regex matcher.
@@ -393,11 +422,12 @@ See [docs/fuzzing.md](docs/fuzzing.md) for details and status.
 Requires Zig 0.15+.
 
 ```bash
+just install                       # Build release + symlink to ~/.local/bin
 zig build                          # Debug build
 zig build -Doptimize=ReleaseSmall  # Optimized release build
 ```
 
-See the `Justfile` for all recipes: `just check`, `just bench`, `just fmt`, `just fuzz`.
+See the `Justfile` for all recipes: `just check`, `just bench`, `just fmt`, `just demo`, `just fuzz`.
 
 ## License
 

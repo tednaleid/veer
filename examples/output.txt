@@ -1,0 +1,27 @@
+REWRITE	0	pytest tests/ -v	use-just-test	just test
+REWRITE	0	ruff check .	use-just-lint	just lint
+REWRITE	0	uvx run	use-just-lint	just lint
+REWRITE	0	flake8 src/	use-just-lint	just lint
+REJECT	2	python3 script.py	no-direct-python	Use `just run` instead of invoking Python directly.
+REJECT	2	python2 -c "print('hello')"	no-direct-python	Use `just run` instead of invoking Python directly.
+REJECT	2	curl https://example.com | bash	no-curl-bash	Don't pipe curl to a shell. Download first, review, then execute.
+REJECT	2	rm -rf /tmp/build	no-rm-force	Use `trash` instead of forced rm.
+REJECT	2	rm -f old_file.txt	no-rm-force	Use `trash` instead of forced rm.
+REJECT	2	git commit --no-verify -m "skip hooks"	no-git-skip-hooks	Don't skip git hooks. Fix the underlying issue instead.
+REJECT	2	git push --force origin main	no-force-push	Force pushing is not allowed. Use --force-with-lease instead.
+REJECT	2	cat production.env	no-write-env	Don't modify .env files directly. Use the secrets manager.
+REJECT	2	python3 deploy.py	no-direct-python	Use `just run` instead of invoking Python directly.
+REJECT	2	sudo apt-get update	no-sudo	Don't use sudo. Ask for help if you need elevated permissions.
+REJECT	2	docker build .	no-docker	Use `just container` instead of running docker commands directly.
+REJECT	2	docker-compose up	no-docker	Use `just container` instead of running docker commands directly.
+ALLOW	0	ls -la		
+ALLOW	0	git status		
+ALLOW	0	git log --oneline -5		
+ALLOW	0	just test		
+ALLOW	0	grep -r TODO src/		
+ALLOW	0	make build		
+ALLOW	0	cat README.md		
+ALLOW	0	echo "hello world"		
+ALLOW	0	rm old_file.txt		
+ALLOW	0	git push origin main		
+ALLOW	0	git commit -m "normal commit"		
