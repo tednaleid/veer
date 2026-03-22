@@ -65,6 +65,18 @@ bench:
 release:
     zig build -Doptimize=ReleaseSmall
 
+# Build release and symlink to ~/.local/bin/veer
+install:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    zig build -Doptimize=ReleaseSmall
+    mkdir -p ~/.local/bin
+    ln -sf "$(pwd)/zig-out/bin/veer" ~/.local/bin/veer
+    echo "Installed: ~/.local/bin/veer -> $(pwd)/zig-out/bin/veer"
+    if ! echo "$PATH" | tr ':' '\n' | grep -qx "$HOME/.local/bin"; then
+        echo "Make sure ~/.local/bin is in your PATH."
+    fi
+
 # Bump version (patch by default), commit, tag, and push
 bump part="patch":
     #!/usr/bin/env bash
