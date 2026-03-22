@@ -123,8 +123,8 @@ pub const SqliteStore = struct {
 
     fn recordCheckImpl(ptr: *anyopaque, entry: CheckEntry) void {
         const self: *SqliteStore = @ptrCast(@alignCast(ptr));
-        // Non-blocking: push to queue, drop if full
-        self.queue.tryPush(entry);
+        // Write synchronously (avoids background thread lifetime issues for CLI)
+        self.writeEntry(entry);
     }
 
     fn getStatsImpl(ptr: *anyopaque, _: std.mem.Allocator, opts: StatsQuery) anyerror!StatsResult {

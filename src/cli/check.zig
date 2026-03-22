@@ -7,6 +7,7 @@ const engine = @import("../engine/engine.zig");
 const hook = @import("../claude/hook.zig");
 const Action = @import("../config/rule.zig").Action;
 const Rule = @import("../config/rule.zig").Rule;
+const Store = @import("../store/store.zig").Store;
 
 /// Run the check command. Returns exit code.
 /// Takes reader/writer interfaces for testability.
@@ -14,6 +15,7 @@ pub fn run(
     allocator: std.mem.Allocator,
     rules: []const Rule,
     stdin_data: []const u8,
+    store: ?Store,
     stdout_writer: anytype,
     stderr_writer: anytype,
 ) !u8 {
@@ -24,8 +26,7 @@ pub fn run(
     };
     defer hook.freeInput(allocator, &input);
 
-    // Run engine (store wiring happens in Stage 5 when config paths are resolved)
-    const result = engine.check(allocator, rules, input.tool_name, input.command, null);
+    const result = engine.check(allocator, rules, input.tool_name, input.command, store);
 
     // Output based on action
     if (result.action) |action| {
@@ -71,6 +72,7 @@ test "end-to-end: rewrite rule returns updatedInput on stdout" {
         std.testing.allocator,
         &rules,
         input,
+        null,
         stdout_stream.writer(),
         stderr_stream.writer(),
     );
@@ -106,6 +108,7 @@ test "end-to-end: reject rule returns exit 2 with message on stderr" {
         std.testing.allocator,
         &rules,
         input,
+        null,
         stdout_stream.writer(),
         stderr_stream.writer(),
     );
@@ -136,6 +139,7 @@ test "end-to-end: reject rule with command_all returns exit 2" {
         std.testing.allocator,
         &rules,
         input,
+        null,
         stdout_stream.writer(),
         stderr_stream.writer(),
     );
@@ -163,6 +167,7 @@ test "end-to-end: no matching rule returns exit 0 with empty output" {
         std.testing.allocator,
         &rules,
         input,
+        null,
         stdout_stream.writer(),
         stderr_stream.writer(),
     );
@@ -188,6 +193,7 @@ test "end-to-end: invalid JSON returns exit 1" {
         std.testing.allocator,
         &rules,
         "not valid json",
+        null,
         stdout_stream.writer(),
         stderr_stream.writer(),
     );

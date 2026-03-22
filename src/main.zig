@@ -16,6 +16,7 @@ const scan_cmd = @import("cli/scan.zig");
 const test_cmd = @import("cli/test_cmd.zig");
 const validate_cmd = @import("cli/validate_cmd.zig");
 const settings_mod = @import("claude/settings.zig");
+const SqliteStore = @import("store/sqlite_store.zig").SqliteStore;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -57,6 +58,61 @@ pub fn main() !void {
     }
 }
 
+const LoadedConfig = struct {
+    rules: []const config_mod.Rule,
+    settings: config_mod.Settings,
+    parsed_file: ?@import("toml").Parsed(config_mod.Config),
+    merged: ?config_mod.MergedConfig,
+};
+
+/// Load config from explicit path or auto-discover. Exits on failure.
+fn loadConfig(allocator: std.mem.Allocator, config_path: ?[]const u8) LoadedConfig {
+    if (config_path) |path| {
+        if (config_mod.loadFile(allocator, path)) |result| {
+            return .{
+                .rules = result.value.rule,
+                .settings = result.value.settings,
+                .parsed_file = result,
+                .merged = null,
+            };
+        } else |_| {
+            std.debug.print("veer: failed to load config: {s}\n", .{path});
+            std.process.exit(1);
+        }
+    }
+
+    if (config_mod.loadMerged(allocator)) |result| {
+        return .{
+            .rules = result.config.rule,
+            .settings = result.config.settings,
+            .parsed_file = null,
+            .merged = result,
+        };
+    } else |err| {
+        if (err == error.NoConfigFound) {
+            std.debug.print("veer: no config found. Create .veer/config.toml or run `veer install`.\n", .{});
+        } else {
+            std.debug.print("veer: failed to load config: {}\n", .{err});
+        }
+        std.process.exit(1);
+    }
+}
+
+/// Create a heap-allocated SqliteStore. Returns null on any failure.
+fn initStore(allocator: std.mem.Allocator) ?*SqliteStore {
+    const s = allocator.create(SqliteStore) catch return null;
+    s.* = SqliteStore.init(".veer/veer.db") catch {
+        allocator.destroy(s);
+        return null;
+    };
+    s.start() catch {
+        s.close();
+        allocator.destroy(s);
+        return null;
+    };
+    return s;
+}
+
 fn runCheck(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !void {
     var config_path: ?[]const u8 = null;
     while (args.next()) |arg| {
@@ -65,19 +121,22 @@ fn runCheck(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !void 
         }
     }
 
-    var rules: []const config_mod.Rule = &.{};
-    var parsed_config: ?@import("toml").Parsed(config_mod.Config) = null;
-    defer if (parsed_config) |*pc| pc.deinit();
+    var loaded = loadConfig(allocator, config_path);
+    defer if (loaded.parsed_file) |*pf| pf.deinit();
+    defer if (loaded.merged) |*m| m.deinit(allocator);
 
-    if (config_path) |path| {
-        if (config_mod.loadFile(allocator, path)) |result| {
-            parsed_config = result;
-            rules = result.value.rule;
-        } else |_| {
-            std.debug.print("veer: failed to load config: {s}\n", .{path});
-            std.process.exit(1);
-        }
+    // Wire SqliteStore if stats enabled (heap-allocated for stable thread pointer)
+    var sqlite_store: ?*SqliteStore = null;
+    defer if (sqlite_store) |s| {
+        s.close();
+        allocator.destroy(s);
+    };
+
+    if (loaded.settings.stats) {
+        sqlite_store = initStore(allocator);
     }
+
+    const store = if (sqlite_store) |s| s.store() else null;
 
     const stdin_data = std.fs.File.stdin().readToEndAlloc(allocator, 1024 * 1024) catch {
         std.debug.print("veer: failed to read stdin\n", .{});
@@ -92,14 +151,22 @@ fn runCheck(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !void 
 
     const exit_code = check_cmd.run(
         allocator,
-        rules,
+        loaded.rules,
         stdin_data,
+        store,
         stdout_stream.writer(),
         stderr_stream.writer(),
     ) catch {
         std.debug.print("veer: internal error during check\n", .{});
         std.process.exit(1);
     };
+
+    // Close store before exit (std.process.exit skips defers)
+    if (sqlite_store) |s| {
+        s.close();
+        allocator.destroy(s);
+        sqlite_store = null;
+    }
 
     const stdout_output = stdout_stream.getWritten();
     const stderr_output = stderr_stream.getWritten();
@@ -135,23 +202,13 @@ fn runList(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !void {
         if (std.mem.eql(u8, arg, "--config")) config_path = args.next();
     }
 
-    var rules: []const config_mod.Rule = &.{};
-    var parsed_config: ?@import("toml").Parsed(config_mod.Config) = null;
-    defer if (parsed_config) |*pc| pc.deinit();
-
-    if (config_path) |path| {
-        if (config_mod.loadFile(allocator, path)) |result| {
-            parsed_config = result;
-            rules = result.value.rule;
-        } else |_| {
-            std.debug.print("veer: failed to load config: {s}\n", .{path});
-            std.process.exit(1);
-        }
-    }
+    var loaded = loadConfig(allocator, config_path);
+    defer if (loaded.parsed_file) |*pf| pf.deinit();
+    defer if (loaded.merged) |*m| m.deinit(allocator);
 
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = list_cmd.run(allocator, rules, stream.writer()) catch {
+    const exit_code = list_cmd.run(allocator, loaded.rules, stream.writer()) catch {
         std.debug.print("veer list: internal error\n", .{});
         std.process.exit(1);
     };
@@ -274,29 +331,22 @@ fn runScan(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !void {
 
 fn runTest(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !void {
     var opts = test_cmd.TestOptions{};
+    var config_path: ?[]const u8 = null;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--config")) {
-            opts.config_path = args.next() orelse ".veer/config.toml";
+            config_path = args.next();
         } else if (arg.len > 0 and arg[0] != '-') {
             opts.command = arg;
         }
     }
 
-    var rules: []const config_mod.Rule = &.{};
-    var parsed_config: ?@import("toml").Parsed(config_mod.Config) = null;
-    defer if (parsed_config) |*pc| pc.deinit();
-
-    if (config_mod.loadFile(allocator, opts.config_path)) |result| {
-        parsed_config = result;
-        rules = result.value.rule;
-    } else |_| {
-        std.debug.print("veer: failed to load config: {s}\n", .{opts.config_path});
-        std.process.exit(1);
-    }
+    var loaded = loadConfig(allocator, config_path);
+    defer if (loaded.parsed_file) |*pf| pf.deinit();
+    defer if (loaded.merged) |*m| m.deinit(allocator);
 
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = test_cmd.run(allocator, rules, opts, stream.writer()) catch {
+    const exit_code = test_cmd.run(allocator, loaded.rules, opts, stream.writer()) catch {
         std.debug.print("veer test: internal error\n", .{});
         std.process.exit(1);
     };
@@ -307,16 +357,16 @@ fn runTest(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !void {
 }
 
 fn runValidate(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !void {
-    var opts = validate_cmd.ValidateOptions{};
+    var config_path: []const u8 = ".veer/config.toml";
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--config")) {
-            opts.config_path = args.next() orelse ".veer/config.toml";
+            config_path = args.next() orelse ".veer/config.toml";
         }
     }
 
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = validate_cmd.run(allocator, opts, stream.writer()) catch {
+    const exit_code = validate_cmd.run(allocator, .{ .config_path = config_path }, stream.writer()) catch {
         std.debug.print("veer validate: internal error\n", .{});
         std.process.exit(1);
     };

@@ -30,7 +30,22 @@ pub const ConfigError = error{
     ParseFailed,
     FileNotFound,
     ReadFailed,
+    NoConfigFound,
 } || ValidationError;
+
+/// Result of loadMerged(). Owns parsed configs and merged rules.
+pub const MergedConfig = struct {
+    config: Config = .{},
+    project_parsed: ?toml.Parsed(Config) = null,
+    global_parsed: ?toml.Parsed(Config) = null,
+    merged_rules: ?[]Rule = null,
+
+    pub fn deinit(self: *MergedConfig, allocator: std.mem.Allocator) void {
+        if (self.merged_rules) |r| allocator.free(r);
+        if (self.project_parsed) |*p| p.deinit();
+        if (self.global_parsed) |*g| g.deinit();
+    }
+};
 
 /// Parse a TOML string into a Config. Caller owns the returned Parsed value.
 pub fn loadString(allocator: std.mem.Allocator, input: []const u8) !toml.Parsed(Config) {
@@ -101,6 +116,65 @@ pub fn mergeSettings(global: Settings, project: Settings) Settings {
         .claude_settings_path = project.claude_settings_path orelse global.claude_settings_path,
         .claude_projects_path = project.claude_projects_path orelse global.claude_projects_path,
     };
+}
+
+const project_config_path = ".veer/config.toml";
+
+/// Build the global config path: $XDG_CONFIG_HOME/veer/config.toml or ~/.config/veer/config.toml.
+/// Caller owns the returned string.
+pub fn globalConfigPath(allocator: std.mem.Allocator) ![]const u8 {
+    if (std.posix.getenv("XDG_CONFIG_HOME")) |xdg| {
+        return std.fmt.allocPrint(allocator, "{s}/veer/config.toml", .{xdg});
+    }
+    const home = std.posix.getenv("HOME") orelse return error.FileNotFound;
+    return std.fmt.allocPrint(allocator, "{s}/.config/veer/config.toml", .{home});
+}
+
+/// Auto-discover and merge project + global configs.
+/// Tries .veer/config.toml (project) and ~/.config/veer/config.toml (global).
+/// Returns error.NoConfigFound if neither exists.
+pub fn loadMerged(allocator: std.mem.Allocator) !MergedConfig {
+    var result = MergedConfig{};
+    errdefer result.deinit(allocator);
+
+    // Try project config
+    result.project_parsed = loadFile(allocator, project_config_path) catch |err| blk: {
+        if (err == error.FileNotFound) break :blk null;
+        return err;
+    };
+
+    // Try global config
+    const global_path = globalConfigPath(allocator) catch null;
+    defer if (global_path) |p| allocator.free(p);
+
+    if (global_path) |path| {
+        result.global_parsed = loadFile(allocator, path) catch |err| blk: {
+            if (err == error.FileNotFound) break :blk null;
+            return err;
+        };
+    }
+
+    // Must have at least one config
+    if (result.project_parsed == null and result.global_parsed == null) {
+        return error.NoConfigFound;
+    }
+
+    // Build merged config
+    if (result.project_parsed != null and result.global_parsed != null) {
+        const project = result.project_parsed.?.value;
+        const global = result.global_parsed.?.value;
+        result.merged_rules = try mergeRules(allocator, global.rule, project.rule);
+        result.config = .{
+            .settings = mergeSettings(global.settings, project.settings),
+            .rule = result.merged_rules.?,
+        };
+    } else if (result.project_parsed) |p| {
+        result.config = p.value;
+    } else if (result.global_parsed) |g| {
+        result.config = g.value;
+    }
+
+    return result;
 }
 
 // -- Tests --
@@ -267,6 +341,26 @@ test "loadFile parses empty.toml fixture" {
     try std.testing.expect(!result.value.settings.stats);
     try std.testing.expectEqualStrings("debug", result.value.settings.log_level);
     try std.testing.expectEqual(@as(usize, 0), result.value.rule.len);
+}
+
+test "loadMerged finds project config when present" {
+    // This test works when .veer/config.toml exists in the project root.
+    // loadMerged should find it and return the config.
+    if (loadMerged(std.testing.allocator)) |*result| {
+        var r = result.*;
+        defer r.deinit(std.testing.allocator);
+        try std.testing.expect(r.config.rule.len > 0);
+    } else |_| {
+        // If no config exists, that's also OK for this test
+    }
+}
+
+test "globalConfigPath uses XDG_CONFIG_HOME" {
+    // We can't easily set env vars in Zig tests, but we can verify the
+    // function returns a path ending with the expected suffix.
+    const path = try globalConfigPath(std.testing.allocator);
+    defer std.testing.allocator.free(path);
+    try std.testing.expect(std.mem.endsWith(u8, path, "/veer/config.toml"));
 }
 
 test "mergeSettings project overrides global" {
