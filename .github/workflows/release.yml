@@ -26,7 +26,7 @@ jobs:
             zig_target: -Dtarget=x86_64-linux-musl
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
@@ -41,7 +41,7 @@ jobs:
           cd ../..
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: veer-${{ matrix.target }}
           path: veer-${{ matrix.target }}.tar.gz
@@ -52,11 +52,11 @@ jobs:
     env:
       HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
           fetch-tags: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           merge-multiple: true
       - name: Ensure annotated tag is available
@@ -132,17 +132,3 @@ jobs:
           git diff --cached --quiet && echo "No formula changes" && exit 0
           git commit -m "Update veer to ${VERSION}"
           git push
-
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.15.2
-      - name: Test
-        run: zig build test
-      - name: Lint
-        run: zig fmt --check src/
-      - name: Benchmark
-        run: zig build bench -Doptimize=ReleaseFast

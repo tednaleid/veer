@@ -2,17 +2,15 @@ name: CI
 on: [push, pull_request]
 
 jobs:
-  test:
+  check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
-      - name: Test
-        run: zig build test
-      - name: Lint
-        run: zig fmt --check src/
+      - uses: extractions/setup-just@v2
+      - run: just check
       # Fuzz: disabled until Zig fixes stdlib fuzzer bug (Build/Fuzz.zig:429).
       # Fuzz test functions still run as regular tests above.
       # Re-evaluate on Zig 0.16: timeout 20 zig build test --fuzz; test $? -eq 124
@@ -20,7 +18,7 @@ jobs:
   bench:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
@@ -30,7 +28,7 @@ jobs:
   size:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
