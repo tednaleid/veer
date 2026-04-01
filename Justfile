@@ -77,33 +77,75 @@ install:
         echo "Make sure ~/.local/bin is in your PATH."
     fi
 
-# Bump version (patch by default), commit, tag, and push
-bump part="patch":
+# Bump version, commit, tag with release notes, and push.
+# Usage: just bump 1.2.3 (or just bump for patch increment)
+bump version="":
     #!/usr/bin/env bash
     set -euo pipefail
     current=$(grep 'version = "' build.zig.zon | head -1 | sed 's/.*"\(.*\)".*/\1/')
-    IFS='.' read -r major minor patch <<< "$current"
-    case "{{part}}" in
-        major) major=$((major + 1)); minor=0; patch=0 ;;
-        minor) minor=$((minor + 1)); patch=0 ;;
-        patch) patch=$((patch + 1)) ;;
-        *) echo "Usage: just bump [major|minor|patch]"; exit 1 ;;
-    esac
-    new="${major}.${minor}.${patch}"
+    if [ -z "{{version}}" ]; then
+        IFS='.' read -r major minor patch <<< "$current"
+        new="$major.$minor.$((patch + 1))"
+    else
+        new="{{version}}"
+    fi
     echo "Bumping $current -> $new"
-    sed -i '' "s/version = \"$current\"/version = \"$new\"/" build.zig.zon
-    sed -i '' "s/const version = \"$current\"/const version = \"$new\"/" src/main.zig
-    git add build.zig.zon src/main.zig
-    git commit -m "bump version to $new"
-    git tag "v$new"
-    echo "Tagged v$new. Run 'git push && git push --tags' to release."
-
-# Delete a GitHub release and re-tag to re-trigger release workflow
-retag tag:
-    gh release delete {{tag}} --yes || true
-    git push origin :refs/tags/{{tag}} || true
-    git tag -f {{tag}}
+    if [ "$current" != "$new" ]; then
+        sed -i '' "s/version = \"$current\"/version = \"$new\"/" build.zig.zon
+        sed -i '' "s/const version = \"$current\"/const version = \"$new\"/" src/main.zig
+        git add build.zig.zon src/main.zig
+        git commit -m "Bump version to $new"
+    fi
+    # Generate release notes
+    prev_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+    if [ -n "$prev_tag" ]; then
+        log=$(git log "$prev_tag"..HEAD --oneline --no-merges)
+    else
+        log=$(git log --oneline --no-merges)
+    fi
+    notes_file=$(mktemp)
+    trap 'rm -f "$notes_file"' EXIT
+    if command -v claude >/dev/null 2>&1; then
+        claude -p "Generate concise release notes for version $new. Commits:\n$log\n\nGuidelines: group related commits, focus on user-facing changes, skip version bumps and CI changes, one line per bullet, past tense, output only a bullet list." > "$notes_file" 2>/dev/null || echo "$log" | sed 's/^[0-9a-f]* /- /' > "$notes_file"
+    else
+        echo "$log" | sed 's/^[0-9a-f]* /- /' > "$notes_file"
+    fi
+    echo "Release notes:"
+    cat "$notes_file"
+    git tag -a "v$new" -F "$notes_file"
+    rm -f "$notes_file"
     git push && git push --tags
+    echo "v$new released!"
+
+# Delete a GitHub release and re-tag to re-trigger release workflow.
+# Preserves the annotated tag message (release notes).
+# Usage: just retag 1.2.3
+retag version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tag="v{{version}}"
+    # Save existing tag annotation before deleting
+    notes=$(git tag -l --format='%(contents)' "$tag" 2>/dev/null || echo "$tag")
+    notes_file=$(mktemp)
+    trap 'rm -f "$notes_file"' EXIT
+    echo "$notes" > "$notes_file"
+    gh release delete "$tag" --yes || true
+    git push origin ":refs/tags/$tag" || true
+    git tag -d "$tag" || true
+    git tag -a "$tag" -F "$notes_file"
+    git push && git push --tags
+
+# Install git pre-commit hook that runs all checks before each commit
+install-hooks:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    hook=".git/hooks/pre-commit"
+    cat > "$hook" << 'HOOK'
+    #!/bin/sh
+    just check
+    HOOK
+    chmod +x "$hook"
+    echo "Installed pre-commit hook: $hook"
 
 # Regenerate examples/output.txt from the sample config and commands
 demo:

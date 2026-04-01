@@ -1,8 +1,8 @@
 name: Release
+
 on:
   push:
-    tags:
-      - 'v*'
+    tags: ['v*']
 
 permissions:
   contents: write
@@ -46,22 +46,92 @@ jobs:
           name: veer-${{ matrix.target }}
           path: veer-${{ matrix.target }}.tar.gz
 
-  release:
+  publish:
     needs: build
     runs-on: ubuntu-latest
+    env:
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
         with:
-          path: artifacts
-
-      - name: Create release
-        uses: softprops/action-gh-release@v2
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: actions/download-artifact@v4
         with:
-          generate_release_notes: true
-          files: artifacts/*/veer-*.tar.gz
+          merge-multiple: true
+      - name: Ensure annotated tag is available
+        run: git fetch origin "refs/tags/${{ github.ref_name }}:refs/tags/${{ github.ref_name }}" --force
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create ${{ github.ref_name }} \
+            --title "${{ github.ref_name }}" \
+            --notes-from-tag \
+            veer-*.tar.gz
+
+      # -- Update Homebrew formula --
+
+      - name: Compute artifact SHA-256 values
+        if: env.HOMEBREW_TAP_TOKEN != ''
+        id: sha256
+        run: |
+          echo "macos_arm=$(shasum -a 256 veer-aarch64-macos.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "macos_intel=$(shasum -a 256 veer-x86_64-macos.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "linux=$(shasum -a 256 veer-x86_64-linux-musl.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+      - name: Update Homebrew formula
+        if: env.HOMEBREW_TAP_TOKEN != ''
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          SHA256_MACOS_ARM="${{ steps.sha256.outputs.macos_arm }}"
+          SHA256_MACOS_INTEL="${{ steps.sha256.outputs.macos_intel }}"
+          SHA256_LINUX="${{ steps.sha256.outputs.linux }}"
+
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/tednaleid/homebrew-veer.git" /tmp/homebrew-veer
+          cd /tmp/homebrew-veer
+
+          mkdir -p Formula
+          cat > Formula/veer.rb << FORMULA
+          class Veer < Formula
+            desc "Claude Code hook that redirects tool calls toward safer alternatives"
+            homepage "https://github.com/tednaleid/veer"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              on_arm do
+                url "https://github.com/tednaleid/veer/releases/download/v#{version}/veer-aarch64-macos.tar.gz"
+                sha256 "${SHA256_MACOS_ARM}"
+              end
+              on_intel do
+                url "https://github.com/tednaleid/veer/releases/download/v#{version}/veer-x86_64-macos.tar.gz"
+                sha256 "${SHA256_MACOS_INTEL}"
+              end
+            end
+            on_linux do
+              on_intel do
+                url "https://github.com/tednaleid/veer/releases/download/v#{version}/veer-x86_64-linux-musl.tar.gz"
+                sha256 "${SHA256_LINUX}"
+              end
+            end
+
+            def install
+              bin.install "veer"
+            end
+
+            test do
+              system "#{bin}/veer", "--version"
+            end
+          end
+          FORMULA
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/veer.rb
+          git diff --cached --quiet && echo "No formula changes" && exit 0
+          git commit -m "Update veer to ${VERSION}"
+          git push
 
   test:
     runs-on: ubuntu-latest

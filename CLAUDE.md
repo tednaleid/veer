@@ -7,9 +7,16 @@ agent tool calls toward safer alternatives.
 
 See `Justfile` for all build, test, and smoke test recipes. Key commands:
 
+- `just check` -- run all tests + linting (used by CI and pre-commit hook)
 - `just test` -- run all tests
 - `just test-summary` -- run all tests with summary
+- `just lint` -- check formatting
 - `just build` -- build debug binary
+- `just bump` -- bump version, generate release notes, tag, and push
+- `just retag` -- re-trigger release workflow for an existing version
+
+Red/green testing: write a failing test before implementing, then make it pass.
+All commits should pass `just check`.
 
 Requires Zig 0.15.2. The stdlib source is the best API reference:
 `/opt/homebrew/Cellar/zig/0.15.2/lib/zig/std/`
