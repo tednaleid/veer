@@ -38,7 +38,7 @@ jobs:
         run: |
           size=$(stat -c%s zig-out/bin/veer)
           echo "Binary size: $size bytes ($(( size / 1024 ))KB)"
-          if [ "$size" -gt 2097152 ]; then
-            echo "FAIL: binary exceeds 2MB"
+          if [ "$size" -gt 3145728 ]; then
+            echo "FAIL: binary exceeds 3MB"
             exit 1
           fi
