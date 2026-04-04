@@ -9,7 +9,9 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
-      - uses: extractions/setup-just@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
       - run: just check
       # Fuzz: disabled until Zig fixes stdlib fuzzer bug (Build/Fuzz.zig:429).
       # Fuzz test functions still run as regular tests above.
