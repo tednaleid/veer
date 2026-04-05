@@ -2,6 +2,7 @@
 // ABOUTME: agent tool calls toward safer, project-appropriate alternatives.
 
 const std = @import("std");
+const clap = @import("clap");
 const config_mod = @import("config/config.zig");
 
 // Keep in sync with build.zig.zon
@@ -18,43 +19,62 @@ const validate_cmd = @import("cli/validate_cmd.zig");
 const settings_mod = @import("claude/settings.zig");
 const SqliteStore = @import("store/sqlite_store.zig").SqliteStore;
 
+const Command = enum { check, install, uninstall, list, add, remove, stats, scan, @"test", validate };
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var args = std.process.args();
-    _ = args.skip(); // skip program name
+    const main_params = comptime clap.parseParamsComptime(
+        \\-h, --help     Display this help and exit.
+        \\-v, --version  Display version information and exit.
+        \\<command>
+        \\
+    );
+    const main_parsers = .{ .command = clap.parsers.enumeration(Command) };
 
-    const command = args.next() orelse {
-        printUsage();
+    var iter = try std.process.ArgIterator.initWithAllocator(allocator);
+    defer iter.deinit();
+    _ = iter.next(); // skip program name
+
+    var diag = clap.Diagnostic{};
+    var res = clap.parseEx(clap.Help, &main_params, main_parsers, &iter, .{
+        .diagnostic = &diag,
+        .allocator = allocator,
+        .terminating_positional = 0,
+    }) catch |err| {
+        diag.reportToFile(.stderr(), err) catch {};
+        std.debug.print("Try 'veer --help' for usage.\n", .{});
+        std.process.exit(1);
+    };
+    defer res.deinit();
+
+    if (res.args.help != 0) {
+        printMainHelp();
+        std.process.exit(0);
+    }
+    if (res.args.version != 0) {
+        std.debug.print("veer {s}\n", .{version});
+        std.process.exit(0);
+    }
+
+    const cmd = res.positionals[0] orelse {
+        printMainHelp();
         std.process.exit(1);
     };
 
-    if (std.mem.eql(u8, command, "--version") or std.mem.eql(u8, command, "-v")) {
-        std.debug.print("veer {s}\n", .{version});
-        std.process.exit(0);
-    } else if (std.mem.eql(u8, command, "check")) {
-        try runCheck(allocator, &args);
-    } else if (std.mem.eql(u8, command, "install")) {
-        try runInstall(allocator, &args);
-    } else if (std.mem.eql(u8, command, "list")) {
-        try runList(allocator, &args);
-    } else if (std.mem.eql(u8, command, "add")) {
-        try runAdd(allocator, &args);
-    } else if (std.mem.eql(u8, command, "remove")) {
-        try runRemove(allocator, &args);
-    } else if (std.mem.eql(u8, command, "stats")) {
-        try runStats(allocator);
-    } else if (std.mem.eql(u8, command, "scan")) {
-        try runScan(allocator, &args);
-    } else if (std.mem.eql(u8, command, "test")) {
-        try runTest(allocator, &args);
-    } else if (std.mem.eql(u8, command, "validate")) {
-        try runValidate(allocator, &args);
-    } else {
-        printUsage();
-        std.process.exit(1);
+    switch (cmd) {
+        .check => try runCheck(allocator, &iter),
+        .install => try runInstall(allocator, &iter),
+        .uninstall => try runUninstall(allocator, &iter),
+        .list => try runList(allocator, &iter),
+        .add => try runAdd(allocator, &iter),
+        .remove => try runRemove(allocator, &iter),
+        .stats => try runStats(allocator, &iter),
+        .scan => try runScan(allocator, &iter),
+        .@"test" => try runTest(allocator, &iter),
+        .validate => try runValidate(allocator, &iter),
     }
 }
 
@@ -98,6 +118,53 @@ fn loadConfig(allocator: std.mem.Allocator, config_path: ?[]const u8) LoadedConf
     }
 }
 
+/// Like loadConfig, but for the check hot-path: any failure exits 2 (reject)
+/// with a hook-oriented message that reaches the LLM via Claude Code's
+/// exit-2 semantics. Silently allowing on misconfiguration would defeat the
+/// purpose of the hook.
+fn loadConfigForCheck(allocator: std.mem.Allocator, config_path: ?[]const u8) LoadedConfig {
+    if (config_path) |path| {
+        if (config_mod.loadFile(allocator, path)) |result| {
+            return .{
+                .rules = result.value.rule,
+                .settings = result.value.settings,
+                .parsed_file = result,
+                .merged = null,
+            };
+        } else |_| {
+            std.debug.print(
+                \\veer: failed to load config at {s}
+                \\Fix the file or run 'veer uninstall' to remove the hook.
+                \\
+            , .{path});
+            std.process.exit(2);
+        }
+    }
+
+    if (config_mod.loadMerged(allocator)) |result| {
+        return .{
+            .rules = result.config.rule,
+            .settings = result.config.settings,
+            .parsed_file = null,
+            .merged = result,
+        };
+    } else |err| {
+        if (err == error.NoConfigFound) {
+            std.debug.print(
+                \\veer: no config at .veer/config.toml
+                \\The veer PreToolUse hook is installed but has no rules loaded, so every Bash
+                \\tool call is being blocked. Fix with:
+                \\  veer install            # create a starter config in this repo
+                \\  veer uninstall          # remove the veer hook entirely
+                \\
+            , .{});
+        } else {
+            std.debug.print("veer: failed to load config: {}\n", .{err});
+        }
+        std.process.exit(2);
+    }
+}
+
 /// Create a heap-allocated SqliteStore. Returns null on any failure.
 fn initStore(allocator: std.mem.Allocator) ?*SqliteStore {
     const s = allocator.create(SqliteStore) catch return null;
@@ -113,15 +180,37 @@ fn initStore(allocator: std.mem.Allocator) ?*SqliteStore {
     return s;
 }
 
-fn runCheck(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !void {
-    var config_path: ?[]const u8 = null;
-    while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--config")) {
-            config_path = args.next();
-        }
-    }
+/// Handle a subcommand parse error by reporting it and exiting nonzero.
+fn subcommandParseFail(diag: *clap.Diagnostic, err: anyerror, name: []const u8) noreturn {
+    diag.reportToFile(.stderr(), err) catch {};
+    std.debug.print("Try 'veer {s} --help' for usage.\n", .{name});
+    std.process.exit(1);
+}
 
-    var loaded = loadConfig(allocator, config_path);
+/// Print per-subcommand help to stdout and exit 0.
+fn printSubHelp(comptime params: []const clap.Param(clap.Help)) noreturn {
+    clap.helpToFile(.stdout(), clap.Help, params, .{}) catch {};
+    std.process.exit(0);
+}
+
+fn runCheck(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
+    const params = comptime clap.parseParamsComptime(
+        \\-h, --help          Display this help and exit.
+        \\    --config <str>  Path to config file.
+        \\
+    );
+    var diag = clap.Diagnostic{};
+    var res = clap.parseEx(clap.Help, &params, clap.parsers.default, iter, .{
+        .diagnostic = &diag,
+        .allocator = allocator,
+    }) catch |err| subcommandParseFail(&diag, err, "check");
+    defer res.deinit();
+
+    if (res.args.help != 0) printSubHelp(&params);
+
+    const config_path: ?[]const u8 = res.args.config;
+
+    var loaded = loadConfigForCheck(allocator, config_path);
     defer if (loaded.parsed_file) |*pf| pf.deinit();
     defer if (loaded.merged) |*m| m.deinit(allocator);
 
@@ -176,18 +265,34 @@ fn runCheck(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !void 
     std.process.exit(exit_code);
 }
 
-fn runInstall(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !void {
-    var opts = install_cmd.InstallOptions{};
-    while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--global")) opts.global = true;
-        if (std.mem.eql(u8, arg, "--force")) opts.force = true;
-        if (std.mem.eql(u8, arg, "--uninstall")) opts.uninstall = true;
-    }
+fn runInstall(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
+    const params = comptime clap.parseParamsComptime(
+        \\-h, --help    Display this help and exit.
+        \\    --local   Install hook into .claude/settings.local.json (user-private, gitignored).
+        \\    --global  Install hook globally in ~/.claude/settings.json.
+        \\
+    );
+    var diag = clap.Diagnostic{};
+    var res = clap.parseEx(clap.Help, &params, clap.parsers.default, iter, .{
+        .diagnostic = &diag,
+        .allocator = allocator,
+    }) catch |err| subcommandParseFail(&diag, err, "install");
+    defer res.deinit();
 
-    var buf: [1024]u8 = undefined;
+    if (res.args.help != 0) printSubHelp(&params);
+
+    const scope = resolveScope(res.args.local != 0, res.args.global != 0, "install");
+
+    const paths = install_cmd.resolvePaths(allocator, scope) catch |err| {
+        std.debug.print("veer install: {}\n", .{err});
+        std.process.exit(1);
+    };
+    defer install_cmd.freePaths(allocator, paths, scope);
+
+    var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = install_cmd.run(allocator, opts, stream.writer()) catch {
-        std.debug.print("veer install: internal error\n", .{});
+    const exit_code = install_cmd.install(allocator, paths, stream.writer()) catch |err| {
+        std.debug.print("veer install: {}\n", .{err});
         std.process.exit(1);
     };
 
@@ -196,11 +301,68 @@ fn runInstall(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !voi
     std.process.exit(exit_code);
 }
 
-fn runList(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !void {
-    var config_path: ?[]const u8 = null;
-    while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--config")) config_path = args.next();
+fn runUninstall(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
+    const params = comptime clap.parseParamsComptime(
+        \\-h, --help    Display this help and exit.
+        \\    --local   Uninstall from .claude/settings.local.json.
+        \\    --global  Uninstall from ~/.claude/settings.json and ~/.config/veer/.
+        \\
+    );
+    var diag = clap.Diagnostic{};
+    var res = clap.parseEx(clap.Help, &params, clap.parsers.default, iter, .{
+        .diagnostic = &diag,
+        .allocator = allocator,
+    }) catch |err| subcommandParseFail(&diag, err, "uninstall");
+    defer res.deinit();
+
+    if (res.args.help != 0) printSubHelp(&params);
+
+    const scope = resolveScope(res.args.local != 0, res.args.global != 0, "uninstall");
+
+    const paths = install_cmd.resolvePaths(allocator, scope) catch |err| {
+        std.debug.print("veer uninstall: {}\n", .{err});
+        std.process.exit(1);
+    };
+    defer install_cmd.freePaths(allocator, paths, scope);
+
+    var buf: [4096]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    const exit_code = install_cmd.uninstall(allocator, paths, stream.writer()) catch |err| {
+        std.debug.print("veer uninstall: {}\n", .{err});
+        std.process.exit(1);
+    };
+
+    const output = stream.getWritten();
+    if (output.len > 0) _ = std.fs.File.stdout().write(output) catch {};
+    std.process.exit(exit_code);
+}
+
+fn resolveScope(local: bool, global: bool, verb: []const u8) install_cmd.Scope {
+    if (local and global) {
+        std.debug.print("veer {s}: --local and --global are mutually exclusive\n", .{verb});
+        std.process.exit(1);
     }
+    if (global) return .global;
+    if (local) return .local;
+    return .project;
+}
+
+fn runList(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
+    const params = comptime clap.parseParamsComptime(
+        \\-h, --help          Display this help and exit.
+        \\    --config <str>  Path to config file.
+        \\
+    );
+    var diag = clap.Diagnostic{};
+    var res = clap.parseEx(clap.Help, &params, clap.parsers.default, iter, .{
+        .diagnostic = &diag,
+        .allocator = allocator,
+    }) catch |err| subcommandParseFail(&diag, err, "list");
+    defer res.deinit();
+
+    if (res.args.help != 0) printSubHelp(&params);
+
+    const config_path: ?[]const u8 = res.args.config;
 
     var loaded = loadConfig(allocator, config_path);
     defer if (loaded.parsed_file) |*pf| pf.deinit();
@@ -218,17 +380,36 @@ fn runList(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !void {
     std.process.exit(exit_code);
 }
 
-fn runAdd(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !void {
-    var opts = add_cmd.AddOptions{};
-    while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--action")) opts.action = args.next();
-        if (std.mem.eql(u8, arg, "--command")) opts.command = args.next();
-        if (std.mem.eql(u8, arg, "--id")) opts.id = args.next();
-        if (std.mem.eql(u8, arg, "--name")) opts.name = args.next();
-        if (std.mem.eql(u8, arg, "--message")) opts.message = args.next();
-        if (std.mem.eql(u8, arg, "--rewrite-to")) opts.rewrite_to = args.next();
-        if (std.mem.eql(u8, arg, "--config")) opts.config_path = args.next() orelse ".veer/config.toml";
-    }
+fn runAdd(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
+    const params = comptime clap.parseParamsComptime(
+        \\-h, --help              Display this help and exit.
+        \\    --action <str>      Rule action (allow, deny, rewrite, warn).
+        \\    --command <str>     Command pattern to match.
+        \\    --id <str>          Rule identifier.
+        \\    --name <str>        Rule name.
+        \\    --message <str>     Message to display.
+        \\    --rewrite-to <str>  Command to rewrite to.
+        \\    --config <str>      Path to config file (default: .veer/config.toml).
+        \\
+    );
+    var diag = clap.Diagnostic{};
+    var res = clap.parseEx(clap.Help, &params, clap.parsers.default, iter, .{
+        .diagnostic = &diag,
+        .allocator = allocator,
+    }) catch |err| subcommandParseFail(&diag, err, "add");
+    defer res.deinit();
+
+    if (res.args.help != 0) printSubHelp(&params);
+
+    const opts = add_cmd.AddOptions{
+        .action = res.args.action,
+        .command = res.args.command,
+        .id = res.args.id,
+        .name = res.args.name,
+        .message = res.args.message,
+        .rewrite_to = res.args.@"rewrite-to",
+        .config_path = res.args.config orelse ".veer/config.toml",
+    };
 
     var buf: [1024]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
@@ -242,16 +423,29 @@ fn runAdd(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !void {
     std.process.exit(exit_code);
 }
 
-fn runRemove(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !void {
-    const rule_id = args.next() orelse {
+fn runRemove(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
+    const params = comptime clap.parseParamsComptime(
+        \\-h, --help          Display this help and exit.
+        \\    --config <str>  Path to config file (default: .veer/config.toml).
+        \\<str>
+        \\
+    );
+    var diag = clap.Diagnostic{};
+    var res = clap.parseEx(clap.Help, &params, clap.parsers.default, iter, .{
+        .diagnostic = &diag,
+        .allocator = allocator,
+    }) catch |err| subcommandParseFail(&diag, err, "remove");
+    defer res.deinit();
+
+    if (res.args.help != 0) printSubHelp(&params);
+
+    const rule_id = res.positionals[0] orelse {
         std.debug.print("veer remove: rule ID required\n", .{});
+        std.debug.print("Try 'veer remove --help' for usage.\n", .{});
         std.process.exit(1);
     };
 
-    var config_path: []const u8 = ".veer/config.toml";
-    while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--config")) config_path = args.next() orelse ".veer/config.toml";
-    }
+    const config_path = res.args.config orelse ".veer/config.toml";
 
     var buf: [1024]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
@@ -265,7 +459,20 @@ fn runRemove(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !void
     std.process.exit(exit_code);
 }
 
-fn runStats(allocator: std.mem.Allocator) !void {
+fn runStats(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
+    const params = comptime clap.parseParamsComptime(
+        \\-h, --help  Display this help and exit.
+        \\
+    );
+    var diag = clap.Diagnostic{};
+    var res = clap.parseEx(clap.Help, &params, clap.parsers.default, iter, .{
+        .diagnostic = &diag,
+        .allocator = allocator,
+    }) catch |err| subcommandParseFail(&diag, err, "stats");
+    defer res.deinit();
+
+    if (res.args.help != 0) printSubHelp(&params);
+
     const s = initStore(allocator) orelse {
         std.debug.print("veer stats: no database found at .veer/veer.db\n", .{});
         std.process.exit(1);
@@ -287,27 +494,34 @@ fn runStats(allocator: std.mem.Allocator) !void {
     std.process.exit(exit_code);
 }
 
-fn runScan(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !void {
-    var opts = scan_cmd.ScanOptions{};
-    var settings_path: ?[]const u8 = null;
-    var transcript_path: ?[]const u8 = null;
+fn runScan(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
+    const params = comptime clap.parseParamsComptime(
+        \\-h, --help                Display this help and exit.
+        \\    --global              Scan global transcripts.
+        \\    --min-count <usize>   Minimum occurrence count to report.
+        \\    --output <str>        Output format (toml).
+        \\    --permissions         Include Claude Code permissions.
+        \\    --settings <str>      Path to settings.json.
+        \\    --transcript <str>    Path to transcript JSONL file.
+        \\
+    );
+    var diag = clap.Diagnostic{};
+    var res = clap.parseEx(clap.Help, &params, clap.parsers.default, iter, .{
+        .diagnostic = &diag,
+        .allocator = allocator,
+    }) catch |err| subcommandParseFail(&diag, err, "scan");
+    defer res.deinit();
 
-    while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--global")) opts.global = true;
-        if (std.mem.eql(u8, arg, "--min-count")) {
-            if (args.next()) |n| {
-                opts.min_count = std.fmt.parseInt(u32, n, 10) catch 1;
-            }
-        }
-        if (std.mem.eql(u8, arg, "--output")) {
-            if (args.next()) |fmt| {
-                opts.output_toml = std.mem.eql(u8, fmt, "toml");
-            }
-        }
-        if (std.mem.eql(u8, arg, "--permissions")) opts.permissions = true;
-        if (std.mem.eql(u8, arg, "--settings")) settings_path = args.next();
-        if (std.mem.eql(u8, arg, "--transcript")) transcript_path = args.next();
-    }
+    if (res.args.help != 0) printSubHelp(&params);
+
+    var opts = scan_cmd.ScanOptions{};
+    opts.global = res.args.global != 0;
+    if (res.args.@"min-count") |n| opts.min_count = @intCast(n);
+    if (res.args.output) |fmt| opts.output_toml = std.mem.eql(u8, fmt, "toml");
+    opts.permissions = res.args.permissions != 0;
+
+    const settings_path: ?[]const u8 = res.args.settings;
+    const transcript_path: ?[]const u8 = res.args.transcript;
 
     // Load transcript content
     const content = if (transcript_path) |path|
@@ -325,7 +539,7 @@ fn runScan(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !void {
 
     // Load settings if requested
     var settings: ?settings_mod.SettingsReader = null;
-    defer if (settings) |*s| s.deinit();
+    defer if (settings) |*sr| sr.deinit();
     if (opts.permissions) {
         if (settings_path) |path| {
             settings = settings_mod.SettingsReader.loadFile(allocator, path) catch null;
@@ -344,18 +558,28 @@ fn runScan(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !void {
     std.process.exit(exit_code);
 }
 
-fn runTest(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !void {
-    var opts = test_cmd.TestOptions{};
-    var config_path: ?[]const u8 = null;
-    while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--config")) {
-            config_path = args.next();
-        } else if (std.mem.eql(u8, arg, "--file")) {
-            opts.file_path = args.next();
-        } else if (arg.len > 0 and arg[0] != '-') {
-            opts.command = arg;
-        }
-    }
+fn runTest(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
+    const params = comptime clap.parseParamsComptime(
+        \\-h, --help          Display this help and exit.
+        \\    --config <str>  Path to config file.
+        \\    --file <str>    File containing commands to test (one per line).
+        \\<str>
+        \\
+    );
+    var diag = clap.Diagnostic{};
+    var res = clap.parseEx(clap.Help, &params, clap.parsers.default, iter, .{
+        .diagnostic = &diag,
+        .allocator = allocator,
+    }) catch |err| subcommandParseFail(&diag, err, "test");
+    defer res.deinit();
+
+    if (res.args.help != 0) printSubHelp(&params);
+
+    const opts = test_cmd.TestOptions{
+        .command = res.positionals[0],
+        .file_path = res.args.file,
+    };
+    const config_path: ?[]const u8 = res.args.config;
 
     var loaded = loadConfig(allocator, config_path);
     defer if (loaded.parsed_file) |*pf| pf.deinit();
@@ -373,13 +597,22 @@ fn runTest(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !void {
     std.process.exit(exit_code);
 }
 
-fn runValidate(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !void {
-    var config_path: []const u8 = ".veer/config.toml";
-    while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--config")) {
-            config_path = args.next() orelse ".veer/config.toml";
-        }
-    }
+fn runValidate(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
+    const params = comptime clap.parseParamsComptime(
+        \\-h, --help          Display this help and exit.
+        \\    --config <str>  Path to config file (default: .veer/config.toml).
+        \\
+    );
+    var diag = clap.Diagnostic{};
+    var res = clap.parseEx(clap.Help, &params, clap.parsers.default, iter, .{
+        .diagnostic = &diag,
+        .allocator = allocator,
+    }) catch |err| subcommandParseFail(&diag, err, "validate");
+    defer res.deinit();
+
+    if (res.args.help != 0) printSubHelp(&params);
+
+    const config_path = res.args.config orelse ".veer/config.toml";
 
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
@@ -393,13 +626,18 @@ fn runValidate(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !vo
     std.process.exit(exit_code);
 }
 
-fn printUsage() void {
+fn printMainHelp() void {
     std.debug.print(
-        \\Usage: veer <command>
+        \\Usage: veer [--help|--version] <command> [<args>]
+        \\
+        \\Options:
+        \\  -h, --help     Display this help and exit.
+        \\  -v, --version  Display version information and exit.
         \\
         \\Commands:
         \\  check      Evaluate a tool call against rules (PreToolUse hook)
         \\  install    Register veer as a Claude Code hook
+        \\  uninstall  Remove the veer hook, config, and skill
         \\  list       Display current rules
         \\  add        Add a rule to config
         \\  remove     Remove a rule by ID
@@ -408,15 +646,7 @@ fn printUsage() void {
         \\  test       Test a command against rules
         \\  validate   Validate config file
         \\
-        \\Options:
-        \\  check    --config <path>     Use a specific config file
-        \\  install  --global --force --uninstall
-        \\  list     --config <path>
-        \\  add      --action <action> --command <cmd> [--message <msg>] [--rewrite-to <cmd>]
-        \\  remove   <rule-id> [--config <path>]
-        \\  scan     --transcript <path> [--min-count <n>] [--output toml] [--permissions --settings <path>]
-        \\  test     "<command>" [--config <path>] [--file <path>]
-        \\  validate [--config <path>]
+        \\Run 'veer <command> --help' for details on a specific command.
         \\
     , .{});
 }

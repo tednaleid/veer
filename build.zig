@@ -14,6 +14,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const clap_dep = b.dependency("clap", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
     // -- Main executable --
 
@@ -25,6 +29,7 @@ pub fn build(b: *std.Build) void {
     });
     exe_mod.addImport("tree_sitter", ts_dep.module("tree_sitter"));
     exe_mod.addImport("toml", toml_dep.module("toml"));
+    exe_mod.addImport("clap", clap_dep.module("clap"));
 
     const exe = b.addExecutable(.{
         .name = "veer",
