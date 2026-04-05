@@ -193,6 +193,21 @@ fn printSubHelp(comptime params: []const clap.Param(clap.Help)) noreturn {
     std.process.exit(0);
 }
 
+/// Print a prose description followed by the flag list, then exit 0.
+/// Uses a single buffered writer so description and flags stay in order
+/// (clap.helpToFile uses a positioned-write writer that would overwrite
+/// anything already written to the file).
+fn printSubHelpWithDesc(desc: []const u8, comptime params: []const clap.Param(clap.Help)) noreturn {
+    var buf: [2048]u8 = undefined;
+    var file_writer = std.fs.File.stdout().writer(&buf);
+    const w = &file_writer.interface;
+    w.writeAll(desc) catch {};
+    w.writeAll("\n") catch {};
+    clap.help(w, clap.Help, params, .{}) catch {};
+    w.flush() catch {};
+    std.process.exit(0);
+}
+
 fn runCheck(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
     const params = comptime clap.parseParamsComptime(
         \\-h, --help          Display this help and exit.
@@ -268,10 +283,29 @@ fn runCheck(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void 
 fn runInstall(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
     const params = comptime clap.parseParamsComptime(
         \\-h, --help    Display this help and exit.
-        \\    --local   Install hook into .claude/settings.local.json (user-private, gitignored).
-        \\    --global  Install hook globally in ~/.claude/settings.json.
+        \\    --local   Write hook into .claude/settings.local.json instead of .claude/settings.json.
+        \\    --global  Install into your home directory (all projects) instead of the current one.
         \\
     );
+    const install_desc =
+        \\Install veer as a Claude Code PreToolUse hook.
+        \\
+        \\By default, installs into the CURRENT directory:
+        \\  - merges the 'veer check' hook into .claude/settings.json (preserves other hooks)
+        \\  - creates .veer/config.toml with a starter rule if it does not already exist
+        \\  - writes .claude/skills/veer/SKILL.md (guides Claude on reading and adding veer rules)
+        \\
+        \\With --local, the hook goes into .claude/settings.local.json (user-private,
+        \\typically gitignored); config and skill still go to the project paths.
+        \\
+        \\With --global, files are written to your home directory:
+        \\  - ~/.claude/settings.json (hook)
+        \\  - ~/.config/veer/config.toml (if missing)
+        \\  - ~/.claude/skills/veer/SKILL.md
+        \\
+        \\Re-running is idempotent: an existing veer entry is not duplicated.
+        \\
+    ;
     var diag = clap.Diagnostic{};
     var res = clap.parseEx(clap.Help, &params, clap.parsers.default, iter, .{
         .diagnostic = &diag,
@@ -279,7 +313,7 @@ fn runInstall(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !voi
     }) catch |err| subcommandParseFail(&diag, err, "install");
     defer res.deinit();
 
-    if (res.args.help != 0) printSubHelp(&params);
+    if (res.args.help != 0) printSubHelpWithDesc(install_desc, &params);
 
     const scope = resolveScope(res.args.local != 0, res.args.global != 0, "install");
 
@@ -304,10 +338,29 @@ fn runInstall(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !voi
 fn runUninstall(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
     const params = comptime clap.parseParamsComptime(
         \\-h, --help    Display this help and exit.
-        \\    --local   Uninstall from .claude/settings.local.json.
-        \\    --global  Uninstall from ~/.claude/settings.json and ~/.config/veer/.
+        \\    --local   Uninstall from .claude/settings.local.json instead of .claude/settings.json.
+        \\    --global  Uninstall from your home directory (all projects) instead of the current one.
         \\
     );
+    const uninstall_desc =
+        \\Remove the veer PreToolUse hook and its supporting files.
+        \\
+        \\By default, removes from the CURRENT directory:
+        \\  - removes the 'veer check' entry from .claude/settings.json (preserves other hooks)
+        \\  - deletes .veer/config.toml
+        \\  - deletes .claude/skills/veer/SKILL.md
+        \\
+        \\With --local, the same cleanup runs but the hook is removed from
+        \\.claude/settings.local.json.
+        \\
+        \\With --global, files are removed from your home directory:
+        \\  - ~/.claude/settings.json (veer entry)
+        \\  - ~/.config/veer/config.toml
+        \\  - ~/.claude/skills/veer/SKILL.md
+        \\
+        \\Re-running is safe: if nothing is installed, nothing is removed.
+        \\
+    ;
     var diag = clap.Diagnostic{};
     var res = clap.parseEx(clap.Help, &params, clap.parsers.default, iter, .{
         .diagnostic = &diag,
@@ -315,7 +368,7 @@ fn runUninstall(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !v
     }) catch |err| subcommandParseFail(&diag, err, "uninstall");
     defer res.deinit();
 
-    if (res.args.help != 0) printSubHelp(&params);
+    if (res.args.help != 0) printSubHelpWithDesc(uninstall_desc, &params);
 
     const scope = resolveScope(res.args.local != 0, res.args.global != 0, "uninstall");
 
