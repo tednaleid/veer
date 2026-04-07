@@ -23,8 +23,9 @@ const config_stub =
     \\
 ;
 
-/// Gitignore content for the .veer/ directory. Excludes the SQLite database.
-const gitignore_content = "veer.db\n";
+/// Gitignore content for the .veer/ directory. Excludes the SQLite database
+/// and its WAL/journal files (veer.db-wal, veer.db-shm, veer.db-journal).
+const gitignore_content = "veer.db*\n";
 
 /// The hook command registered in settings.json.
 const hook_command = "veer check";
@@ -650,7 +651,7 @@ test "install creates .veer/.gitignore" {
     const gi_path = try std.fmt.bufPrint(&gi_buf, "{s}/.veer/.gitignore", .{tmp_root});
     const content = try readFileAlloc(testing.allocator, gi_path);
     defer testing.allocator.free(content);
-    try testing.expectEqualStrings("veer.db\n", content);
+    try testing.expectEqualStrings("veer.db*\n", content);
 }
 
 test "uninstall removes gitignore and veer.db" {
