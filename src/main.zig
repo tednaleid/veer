@@ -303,7 +303,7 @@ fn runInstall(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !voi
         \\  - ~/.config/veer/config.toml (if missing)
         \\  - ~/.claude/skills/veer/SKILL.md
         \\
-        \\Re-running is idempotent: an existing veer entry is not duplicated.
+        \\Re-running updates the hook entry to match the current version.
         \\
     ;
     var diag = clap.Diagnostic{};

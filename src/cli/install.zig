@@ -23,6 +23,9 @@ const config_stub =
     \\
 ;
 
+/// Gitignore content for the .veer/ directory. Excludes the SQLite database.
+const gitignore_content = "veer.db\n";
+
 /// The hook command registered in settings.json.
 const hook_command = "veer check";
 
@@ -70,24 +73,33 @@ pub fn freePaths(allocator: std.mem.Allocator, paths: Paths, scope: Scope) void 
 /// Install the veer hook:
 ///   1. Merge veer entry into settings.json (never overwrite unrelated hooks).
 ///   2. Create config.toml stub if missing.
-///   3. Write SKILL.md (always overwrite).
+///   3. Write .gitignore in config dir (excludes veer.db).
+///   4. Write SKILL.md (always overwrite).
 /// Returns process exit code (0 on success, 1 on user-facing error).
 pub fn install(allocator: std.mem.Allocator, paths: Paths, writer: anytype) !u8 {
     const hook_code = try installHook(allocator, paths.settings, writer);
     if (hook_code != 0) return hook_code;
     try ensureConfigStub(paths.config, writer);
+    try writeConfigDirGitignore(paths.config, writer);
     try writeSkillFile(paths.skill, writer);
     return 0;
 }
 
 /// Uninstall the veer hook:
 ///   1. Remove veer entry from settings.json (preserve unrelated hooks).
-///   2. Delete config.toml.
-///   3. Delete SKILL.md and parent veer/ dir if empty.
+///   2. Delete config.toml, .gitignore, and veer.db from config dir.
+///   3. Try to remove the config dir if empty.
+///   4. Delete SKILL.md and parent veer/ skill dir if empty.
 pub fn uninstall(allocator: std.mem.Allocator, paths: Paths, writer: anytype) !u8 {
     const hook_code = try uninstallHook(allocator, paths.settings, writer);
     if (hook_code != 0) return hook_code;
     try deleteIfExists(paths.config, "config", writer);
+    // Clean up .gitignore and veer.db from the config directory.
+    if (configDir(paths.config)) |dir| {
+        try deleteInDir(dir, ".gitignore", writer);
+        try deleteInDir(dir, "veer.db", writer);
+        std.fs.cwd().deleteDir(dir) catch {};
+    }
     try deleteIfExists(paths.skill, "skill", writer);
     // Remove parent veer/ skill dir if empty
     if (std.mem.lastIndexOfScalar(u8, paths.skill, '/')) |sep| {
@@ -117,6 +129,9 @@ fn installHook(allocator: std.mem.Allocator, path: []const u8, writer: anytype) 
         return 1;
     }
 
+    // Remove any existing veer entry first (enables updating stale entries).
+    const was_present = removeVeerEntries(&parsed.value.object);
+
     const arena = parsed.arena.allocator();
 
     // Navigate / create hooks.PreToolUse array.
@@ -145,14 +160,6 @@ fn installHook(allocator: std.mem.Allocator, path: []const u8, writer: anytype) 
     // Get or create the nested "hooks" array on that matcher entry.
     const matcher_hooks = try getOrCreateArray(arena, &star_entry.object, "hooks");
 
-    // Idempotency: if a veer-check command entry already exists, done.
-    for (matcher_hooks.array.items) |*entry| {
-        if (isVeerHookEntry(entry)) {
-            try writer.print("veer hook already installed in {s}\n", .{path});
-            return 0;
-        }
-    }
-
     // Append {"type":"command","command":"veer check"}.
     var hook_obj: std.json.ObjectMap = .init(arena);
     try hook_obj.put("type", .{ .string = "command" });
@@ -160,7 +167,8 @@ fn installHook(allocator: std.mem.Allocator, path: []const u8, writer: anytype) 
     try matcher_hooks.array.append(.{ .object = hook_obj });
 
     try writeJsonAtomic(allocator, path, parsed.value);
-    try writer.print("veer hook installed in {s}\n", .{path});
+    const verb: []const u8 = if (was_present) "updated" else "installed";
+    try writer.print("veer hook {s} in {s}\n", .{ verb, path });
     return 0;
 }
 
@@ -295,12 +303,40 @@ fn writeSkillFile(path: []const u8, writer: anytype) !void {
     try writer.print("wrote skill {s}\n", .{path});
 }
 
+fn writeConfigDirGitignore(config_path: []const u8, writer: anytype) !void {
+    const dir = configDir(config_path) orelse return;
+    var path_buf: [1024]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/.gitignore", .{dir}) catch return;
+    const f = try std.fs.cwd().createFile(path, .{ .truncate = true });
+    defer f.close();
+    try f.writeAll(gitignore_content);
+    try writer.print("wrote {s}\n", .{path});
+}
+
+/// Return the parent directory of config_path (e.g. ".veer" from ".veer/config.toml").
+fn configDir(config_path: []const u8) ?[]const u8 {
+    return if (std.mem.lastIndexOfScalar(u8, config_path, '/')) |sep|
+        if (sep > 0) config_path[0..sep] else null
+    else
+        null;
+}
+
 fn deleteIfExists(path: []const u8, label: []const u8, writer: anytype) !void {
     std.fs.cwd().deleteFile(path) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };
     try writer.print("removed {s} {s}\n", .{ label, path });
+}
+
+fn deleteInDir(dir: []const u8, name: []const u8, writer: anytype) !void {
+    var path_buf: [1024]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir, name }) catch return;
+    std.fs.cwd().deleteFile(path) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    try writer.print("removed {s}\n", .{path});
 }
 
 fn fileExistsAbs(path: []const u8) bool {
@@ -595,6 +631,58 @@ test "uninstall is idempotent (nothing to remove)" {
     var stream = std.io.fixedBufferStream(&buf);
     const code = try uninstall(testing.allocator, paths, stream.writer());
     try testing.expectEqual(@as(u8, 0), code);
+}
+
+test "install creates .veer/.gitignore" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_root = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(tmp_root);
+
+    const paths = try testPaths(testing.allocator, tmp_root);
+    defer freeTestPaths(testing.allocator, paths);
+
+    var buf: [4096]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    _ = try install(testing.allocator, paths, stream.writer());
+
+    var gi_buf: [1024]u8 = undefined;
+    const gi_path = try std.fmt.bufPrint(&gi_buf, "{s}/.veer/.gitignore", .{tmp_root});
+    const content = try readFileAlloc(testing.allocator, gi_path);
+    defer testing.allocator.free(content);
+    try testing.expectEqualStrings("veer.db\n", content);
+}
+
+test "uninstall removes gitignore and veer.db" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_root = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(tmp_root);
+
+    const paths = try testPaths(testing.allocator, tmp_root);
+    defer freeTestPaths(testing.allocator, paths);
+
+    // Create the files that install would create, plus a veer.db
+    try testWriteFile(paths.config, "# rules\n");
+    try testWriteFile(paths.settings, "{}");
+    var gi_buf: [1024]u8 = undefined;
+    const gi_path = try std.fmt.bufPrint(&gi_buf, "{s}/.veer/.gitignore", .{tmp_root});
+    try testWriteFile(gi_path, gitignore_content);
+    var db_buf: [1024]u8 = undefined;
+    const db_path = try std.fmt.bufPrint(&db_buf, "{s}/.veer/veer.db", .{tmp_root});
+    try testWriteFile(db_path, "fake db");
+
+    var buf: [4096]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    _ = try uninstall(testing.allocator, paths, stream.writer());
+
+    try testing.expect(!fileExistsAbs(gi_path));
+    try testing.expect(!fileExistsAbs(db_path));
+    try testing.expect(!fileExistsAbs(paths.config));
+    // .veer/ dir should be gone (was empty after deletions)
+    var dir_buf: [1024]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&dir_buf, "{s}/.veer", .{tmp_root});
+    try testing.expect(!fileExistsAbs(dir_path));
 }
 
 test "uninstall removes empty PreToolUse/hooks after veer entry removal" {
