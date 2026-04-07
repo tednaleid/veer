@@ -1,0 +1,67 @@
+# veer rules - evaluated in order, first match wins.
+# Run 'veer list' to see active rules, 'veer test "<cmd>"' to preview behavior.
+# See .claude/skills/veer/SKILL.md for a guide on adding rules.
+
+[[rule]]
+id = "no-curl-pipe-shell"
+name = "Block curl piped to a shell"
+action = "reject"
+message = "Don't pipe curl to bash/sh -- download, inspect, then execute."
+[rule.match]
+command_all = ["curl", "bash"]
+
+[[rule]]
+id = "use-just-fuzz"
+name = "Redirect zig fuzz to just fuzz"
+action = "reject"
+message = "Use 'just fuzz' instead of invoking zig build test --fuzz directly."
+[rule.match]
+command = "zig"
+arg_all = ["build", "test"]
+flag = "fuzz"
+
+[[rule]]
+id = "use-just-test"
+name = "Redirect zig test to just test"
+action = "reject"
+message = "Use 'just test' instead of invoking zig build test directly."
+[rule.match]
+command = "zig"
+arg_all = ["build", "test"]
+
+[[rule]]
+id = "use-just-bench"
+name = "Redirect zig bench to just bench"
+action = "reject"
+message = "Use 'just bench' instead of invoking zig build bench directly."
+[rule.match]
+command = "zig"
+arg_all = ["build", "bench"]
+
+[[rule]]
+id = "use-just-lint"
+name = "Redirect zig fmt --check to just lint"
+action = "reject"
+message = "Use 'just lint' instead of invoking zig fmt --check directly."
+[rule.match]
+command = "zig"
+arg = "fmt"
+flag = "check"
+
+[[rule]]
+id = "use-just-fmt"
+name = "Redirect zig fmt to just fmt"
+action = "reject"
+message = "Use 'just fmt' instead of invoking zig fmt directly."
+[rule.match]
+command = "zig"
+arg = "fmt"
+
+[[rule]]
+id = "use-just-build"
+name = "Redirect zig build to just build"
+action = "reject"
+message = "Use 'just build' instead of invoking zig build directly."
+[rule.match]
+command = "zig"
+arg = "build"

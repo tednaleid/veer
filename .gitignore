@@ -1,5 +1,4 @@
 zig-out/
 zig-cache/
 .zig-cache/
-.veer/
 .llm/
