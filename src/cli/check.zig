@@ -148,11 +148,13 @@ test "end-to-end: rewrite rule returns updatedInput on stdout" {
     try std.testing.expectEqual(@as(u8, 0), exit_code);
 
     const stdout_output = stdout_stream.getWritten();
-    // Verify it's valid JSON with updatedInput
+    // Verify it's valid JSON with hookSpecificOutput.updatedInput (modern envelope).
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, stdout_output, .{});
     defer parsed.deinit();
-    const updated = parsed.value.object.get("updatedInput").?;
-    const cmd = updated.object.get("command").?;
+    const hso = parsed.value.object.get("hookSpecificOutput").?;
+    try std.testing.expectEqualStrings("PreToolUse", hso.object.get("hookEventName").?.string);
+    try std.testing.expectEqualStrings("allow", hso.object.get("permissionDecision").?.string);
+    const cmd = hso.object.get("updatedInput").?.object.get("command").?;
     try std.testing.expectEqualStrings("just test", cmd.string);
 }
 
@@ -304,7 +306,7 @@ test "end-to-end: surgical rewrite in compound command" {
     const stdout_output = stdout_stream.getWritten();
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, stdout_output, .{});
     defer parsed.deinit();
-    const cmd = parsed.value.object.get("updatedInput").?.object.get("command").?.string;
+    const cmd = parsed.value.object.get("hookSpecificOutput").?.object.get("updatedInput").?.object.get("command").?.string;
     // Should preserve surrounding commands
     try std.testing.expect(std.mem.indexOf(u8, cmd, "echo starting") != null);
     try std.testing.expect(std.mem.indexOf(u8, cmd, "echo done") != null);
@@ -349,6 +351,9 @@ test "verbose allow: emits systemMessage for Bash (just the command, no prefix)"
     // we intentionally emit ONLY the command in backticks, no "veer: Bash"
     // prefix.
     try std.testing.expectEqualStrings("`ls -la`", msg);
+    // Allow path: no decision fields, just the banner. Claude Code falls through
+    // to its default "allow" behavior when no hookSpecificOutput is present.
+    try std.testing.expect(parsed.value.object.get("hookSpecificOutput") == null);
     try std.testing.expect(parsed.value.object.get("updatedInput") == null);
 }
 
@@ -415,7 +420,10 @@ test "verbose rewrite: emits systemMessage alongside updatedInput" {
     // (Claude Code's transcript prepends the tool identifier).
     try std.testing.expectEqualStrings("`pytest tests/ -v` -> `just test`", msg);
 
-    const cmd = parsed.value.object.get("updatedInput").?.object.get("command").?.string;
+    const hso = parsed.value.object.get("hookSpecificOutput").?;
+    try std.testing.expectEqualStrings("PreToolUse", hso.object.get("hookEventName").?.string);
+    try std.testing.expectEqualStrings("allow", hso.object.get("permissionDecision").?.string);
+    const cmd = hso.object.get("updatedInput").?.object.get("command").?.string;
     try std.testing.expectEqualStrings("just test", cmd);
 }
 

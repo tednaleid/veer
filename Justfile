@@ -54,11 +54,18 @@ check-verbose:
         || { echo "FAIL: verbose non-Bash allow should emit nothing"; echo "got: $out"; exit 1; }
     echo "check-verbose non-Bash-allow: PASS"
 
-    # Rewrite path: systemMessage AND updatedInput, banner is "`old` -> `new`".
+    # Rewrite path: systemMessage AND hookSpecificOutput.updatedInput, banner
+    # is "`old` -> `new`". The modern envelope (hookSpecificOutput with
+    # permissionDecision:"allow") is what actually causes Claude Code to apply
+    # the rewrite -- legacy top-level updatedInput is ignored.
     out=$(echo '{"tool_name":"Bash","tool_input":{"command":"pytest tests/"}}' \
         | "$bin" check --verbose --config "$cfg")
     echo "$out" | grep -q '"systemMessage"' \
         || { echo "FAIL: verbose rewrite missing systemMessage"; echo "got: $out"; exit 1; }
+    echo "$out" | grep -q '"hookSpecificOutput"' \
+        || { echo "FAIL: verbose rewrite missing hookSpecificOutput envelope"; echo "got: $out"; exit 1; }
+    echo "$out" | grep -q '"permissionDecision":"allow"' \
+        || { echo "FAIL: verbose rewrite missing permissionDecision:allow"; echo "got: $out"; exit 1; }
     echo "$out" | grep -q '"updatedInput"' \
         || { echo "FAIL: verbose rewrite missing updatedInput"; echo "got: $out"; exit 1; }
     echo "$out" | grep -q '`pytest tests/` -> `just test`' \
@@ -71,6 +78,21 @@ check-verbose:
     [ -z "$out" ] \
         || { echo "FAIL: non-verbose allow should emit nothing"; echo "got: $out"; exit 1; }
     echo "check-verbose non-verbose-allow: PASS"
+
+    # Non-verbose rewrite: MUST use the modern hookSpecificOutput envelope with
+    # permissionDecision:"allow" so Claude Code actually applies the rewrite.
+    # (Legacy top-level updatedInput is ignored by the decision path.)
+    out=$(echo '{"tool_name":"Bash","tool_input":{"command":"pytest tests/"}}' \
+        | "$bin" check --config "$cfg")
+    echo "$out" | grep -q '"hookSpecificOutput"' \
+        || { echo "FAIL: non-verbose rewrite missing hookSpecificOutput envelope"; echo "got: $out"; exit 1; }
+    echo "$out" | grep -q '"permissionDecision":"allow"' \
+        || { echo "FAIL: non-verbose rewrite missing permissionDecision:allow"; echo "got: $out"; exit 1; }
+    echo "$out" | grep -q '"updatedInput"' \
+        || { echo "FAIL: non-verbose rewrite missing updatedInput"; echo "got: $out"; exit 1; }
+    echo "$out" | grep -q '"systemMessage"' \
+        && { echo "FAIL: non-verbose rewrite should not emit systemMessage"; echo "got: $out"; exit 1; }
+    echo "check-verbose non-verbose-rewrite: PASS"
 
 # Smoke test: no config -> exit 2 (reject) with helpful message
 check-no-config:

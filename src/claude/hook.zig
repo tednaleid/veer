@@ -60,11 +60,20 @@ pub fn freeInput(allocator: std.mem.Allocator, input: *HookInput) void {
     if (input.session_id) |sid| allocator.free(sid);
 }
 
-/// Format a rewrite result for stdout.
-/// Output: {"updatedInput":{"command":"<rewrite_to>"}}
-/// When system_message is non-null, the output also includes a
-/// "systemMessage" field (shown to the user in Claude Code's transcript,
-/// not visible to the LLM): {"systemMessage":"...","updatedInput":{...}}
+/// Format a rewrite result for stdout using the modern hook response envelope.
+/// Claude Code expects `updatedInput` under `hookSpecificOutput` with an
+/// explicit `permissionDecision: "allow"` to actually apply the rewrite; the
+/// legacy top-level `updatedInput` is NOT honored (the decision path ignores
+/// it, even though the display path still reads the banner). See
+/// https://code.claude.com/docs/en/hooks for the schema.
+///
+/// Base output:
+///   {"hookSpecificOutput":{"hookEventName":"PreToolUse",
+///    "permissionDecision":"allow","updatedInput":{"command":"<rewrite_to>"}}}
+///
+/// When system_message is non-null, a top-level `systemMessage` is prepended
+/// so the user sees the transformation in the transcript (the LLM does not):
+///   {"systemMessage":"...","hookSpecificOutput":{...}}
 pub fn formatRewrite(writer: anytype, rewrite_to: []const u8, system_message: ?[]const u8) !void {
     try writer.writeAll("{");
     if (system_message) |msg| {
@@ -72,9 +81,11 @@ pub fn formatRewrite(writer: anytype, rewrite_to: []const u8, system_message: ?[
         try writeJsonString(writer, msg);
         try writer.writeAll(",");
     }
+    try writer.writeAll("\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",");
+    try writer.writeAll("\"permissionDecision\":\"allow\",");
     try writer.writeAll("\"updatedInput\":{\"command\":");
     try writeJsonString(writer, rewrite_to);
-    try writer.writeAll("}}");
+    try writer.writeAll("}}}");
 }
 
 /// Format an allow result for stdout. Only emitted when verbose mode is on;
@@ -142,42 +153,50 @@ test "parseInput invalid JSON fails" {
     try std.testing.expectError(error.SyntaxError, parseInput(std.testing.allocator, "not json{{{"));
 }
 
-test "formatRewrite produces correct JSON" {
+test "formatRewrite produces modern hookSpecificOutput envelope" {
     var buf: [256]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
     try formatRewrite(stream.writer(), "just test", null);
     const output = stream.getWritten();
-    try std.testing.expectEqualStrings("{\"updatedInput\":{\"command\":\"just test\"}}", output);
-}
-
-test "formatRewrite with systemMessage includes both fields" {
-    var buf: [256]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    try formatRewrite(stream.writer(), "just test", "veer: Bash `pytest` -> `just test`");
-    const output = stream.getWritten();
     try std.testing.expectEqualStrings(
-        "{\"systemMessage\":\"veer: Bash `pytest` -> `just test`\",\"updatedInput\":{\"command\":\"just test\"}}",
+        "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\"," ++
+            "\"permissionDecision\":\"allow\"," ++
+            "\"updatedInput\":{\"command\":\"just test\"}}}",
         output,
     );
 }
 
-test "formatRewrite escapes quotes and backslashes" {
+test "formatRewrite with systemMessage prepends top-level field" {
+    var buf: [256]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    try formatRewrite(stream.writer(), "just test", "`pytest` -> `just test`");
+    const output = stream.getWritten();
+    try std.testing.expectEqualStrings(
+        "{\"systemMessage\":\"`pytest` -> `just test`\"," ++
+            "\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\"," ++
+            "\"permissionDecision\":\"allow\"," ++
+            "\"updatedInput\":{\"command\":\"just test\"}}}",
+        output,
+    );
+}
+
+test "formatRewrite escapes quotes and backslashes in both fields" {
     var buf: [256]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
     // Both fields must be escaped; otherwise a command containing `"` or `\`
     // would produce invalid JSON.
-    try formatRewrite(stream.writer(), "echo \"hi\"", "veer: Bash `x\\y`");
+    try formatRewrite(stream.writer(), "echo \"hi\"", "`x\\y`");
     const output = stream.getWritten();
-    try std.testing.expectEqualStrings(
-        "{\"systemMessage\":\"veer: Bash `x\\\\y`\",\"updatedInput\":{\"command\":\"echo \\\"hi\\\"\"}}",
-        output,
-    );
-    // And the output must be valid JSON parseable by std.json.
+    // Output must be valid JSON, and updatedInput.command must round-trip.
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, output, .{});
     defer parsed.deinit();
     try std.testing.expectEqualStrings(
         "echo \"hi\"",
-        parsed.value.object.get("updatedInput").?.object.get("command").?.string,
+        parsed.value.object.get("hookSpecificOutput").?.object.get("updatedInput").?.object.get("command").?.string,
+    );
+    try std.testing.expectEqualStrings(
+        "`x\\y`",
+        parsed.value.object.get("systemMessage").?.string,
     );
 }
 

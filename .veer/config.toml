@@ -65,3 +65,15 @@ message = "Use 'just build' instead of invoking zig build directly."
 [rule.match]
 command = "zig"
 arg = "build"
+
+# Deliberate test probe: won't match any real command. Use the unique
+# string `veer-rewrite-probe` to verify rewrite behavior end-to-end in
+# Claude Code (the verbose banner should show the transformation).
+[[rule]]
+id = "echo-rewrite-probe"
+name = "Rewrite a specific echo probe for manual verification"
+action = "rewrite"
+rewrite_to = "echo \"veer rewrote the probe successfully\""
+[rule.match]
+command = "echo"
+arg = "veer-rewrite-probe"
