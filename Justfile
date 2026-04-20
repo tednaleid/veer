@@ -35,28 +35,34 @@ check-verbose:
     bin="$(pwd)/zig-out/bin/veer"
     cfg="$(pwd)/test/configs/basic.toml"
 
-    # Allow path: non-matching command still gets a banner when --verbose is set.
+    # Allow path, Bash: banner is the command in backticks (no "veer: Bash"
+    # prefix -- Claude Code's transcript already shows the tool).
     out=$(echo '{"tool_name":"Bash","tool_input":{"command":"ls -la"}}' \
         | "$bin" check --verbose --config "$cfg")
     echo "$out" | grep -q '"systemMessage"' \
-        || { echo "FAIL: verbose allow missing systemMessage"; echo "got: $out"; exit 1; }
-    echo "$out" | grep -q 'veer: Bash' \
-        || { echo "FAIL: verbose allow missing 'veer: Bash' prefix"; echo "got: $out"; exit 1; }
+        || { echo "FAIL: verbose Bash allow missing systemMessage"; echo "got: $out"; exit 1; }
+    echo "$out" | grep -q '`ls -la`' \
+        || { echo "FAIL: verbose Bash allow missing backticked command"; echo "got: $out"; exit 1; }
     echo "$out" | grep -q '"updatedInput"' \
         && { echo "FAIL: verbose allow should not emit updatedInput"; echo "got: $out"; exit 1; }
-    echo "check-verbose allow: PASS"
+    echo "check-verbose Bash-allow: PASS"
 
-    # Rewrite path: systemMessage AND updatedInput, separated by the -> arrow.
+    # Allow path, non-Bash: no banner (no useful content to show).
+    out=$(echo '{"tool_name":"Read","tool_input":{"file_path":"/etc/hosts"}}' \
+        | "$bin" check --verbose --config "$cfg")
+    [ -z "$out" ] \
+        || { echo "FAIL: verbose non-Bash allow should emit nothing"; echo "got: $out"; exit 1; }
+    echo "check-verbose non-Bash-allow: PASS"
+
+    # Rewrite path: systemMessage AND updatedInput, banner is "`old` -> `new`".
     out=$(echo '{"tool_name":"Bash","tool_input":{"command":"pytest tests/"}}' \
         | "$bin" check --verbose --config "$cfg")
     echo "$out" | grep -q '"systemMessage"' \
         || { echo "FAIL: verbose rewrite missing systemMessage"; echo "got: $out"; exit 1; }
     echo "$out" | grep -q '"updatedInput"' \
         || { echo "FAIL: verbose rewrite missing updatedInput"; echo "got: $out"; exit 1; }
-    echo "$out" | grep -q 'just test' \
-        || { echo "FAIL: verbose rewrite missing rewrite target"; echo "got: $out"; exit 1; }
-    echo "$out" | grep -q -- '->' \
-        || { echo "FAIL: verbose rewrite missing -> arrow"; echo "got: $out"; exit 1; }
+    echo "$out" | grep -q '`pytest tests/` -> `just test`' \
+        || { echo "FAIL: verbose rewrite missing '\\`old\\` -> \\`new\\`' shape"; echo "got: $out"; exit 1; }
     echo "check-verbose rewrite: PASS"
 
     # Non-verbose allow stays silent (backward compat).

@@ -41,7 +41,7 @@ pub fn run(
                     const rewritten = spliceRewrite(allocator, input.command, target, result.match_start, result.match_end);
                     defer if (rewritten.allocated) allocator.free(rewritten.command);
                     const system_msg: ?[]u8 = if (verbose)
-                        try buildToolSummary(allocator, input.tool_name, input.command, rewritten.command)
+                        try buildToolSummary(allocator, input.command, rewritten.command)
                     else
                         null;
                     defer if (system_msg) |m| allocator.free(m);
@@ -58,35 +58,37 @@ pub fn run(
         }
     }
 
-    // No match: allow. Emit a banner only in verbose mode; otherwise stay silent
-    // so existing non-verbose installs are byte-for-byte unchanged.
+    // No match: allow. In verbose mode, emit a banner IF we have content worth
+    // showing. Claude Code already prefixes every systemMessage with
+    // "PreToolUse:<ToolName> says: ", so a non-Bash tool (no command to show)
+    // would render as just that prefix with nothing after it -- pure noise.
+    // Non-verbose installs stay byte-for-byte silent as before.
     if (verbose) {
-        const msg = try buildToolSummary(allocator, input.tool_name, input.command, null);
-        defer allocator.free(msg);
-        try hook.formatAllow(stdout_writer, msg);
+        if (try buildToolSummary(allocator, input.command, null)) |msg| {
+            defer allocator.free(msg);
+            try hook.formatAllow(stdout_writer, msg);
+        }
     }
     return hook.ExitCode.allow;
 }
 
-/// Build the user-visible banner text for a tool call.
-/// Shapes:
-///   Bash allow:    "veer: Bash `pytest tests/`"
-///   Bash rewrite:  "veer: Bash `pytest tests/` -> `just test`"
-///   Non-Bash:      "veer: Read"
-/// Caller owns the returned slice.
+/// Build the user-visible banner text for a Bash tool call.
+/// Claude Code's transcript already shows "PreToolUse:<ToolName> says: " as a
+/// prefix, so the banner is just the command (and the rewrite target, if any):
+///   Bash allow:    "`pytest tests/`"
+///   Bash rewrite:  "`pytest tests/` -> `just test`"
+///   Non-Bash:      null (caller skips the banner entirely)
+/// Caller owns the returned slice when non-null.
 fn buildToolSummary(
     allocator: std.mem.Allocator,
-    tool_name: []const u8,
     command: ?[]const u8,
     rewrite_to: ?[]const u8,
-) ![]u8 {
-    if (command) |cmd| {
-        if (rewrite_to) |target| {
-            return try std.fmt.allocPrint(allocator, "veer: {s} `{s}` -> `{s}`", .{ tool_name, cmd, target });
-        }
-        return try std.fmt.allocPrint(allocator, "veer: {s} `{s}`", .{ tool_name, cmd });
+) !?[]u8 {
+    const cmd = command orelse return null;
+    if (rewrite_to) |target| {
+        return try std.fmt.allocPrint(allocator, "`{s}` -> `{s}`", .{ cmd, target });
     }
-    return try std.fmt.allocPrint(allocator, "veer: {s}", .{tool_name});
+    return try std.fmt.allocPrint(allocator, "`{s}`", .{cmd});
 }
 
 const SpliceResult = struct {
@@ -312,7 +314,7 @@ test "end-to-end: surgical rewrite in compound command" {
     try std.testing.expect(std.mem.indexOf(u8, cmd, "pytest") == null);
 }
 
-test "verbose allow: emits systemMessage for Bash" {
+test "verbose allow: emits systemMessage for Bash (just the command, no prefix)" {
     const rules = [_]Rule{.{
         .id = "use-just-test",
         .rewrite_to = "just test",
@@ -343,12 +345,14 @@ test "verbose allow: emits systemMessage for Bash" {
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, stdout_output, .{});
     defer parsed.deinit();
     const msg = parsed.value.object.get("systemMessage").?.string;
-    try std.testing.expectEqualStrings("veer: Bash `ls -la`", msg);
-    // Allow must not emit updatedInput.
+    // Claude Code's transcript already prepends "PreToolUse:Bash says: ", so
+    // we intentionally emit ONLY the command in backticks, no "veer: Bash"
+    // prefix.
+    try std.testing.expectEqualStrings("`ls -la`", msg);
     try std.testing.expect(parsed.value.object.get("updatedInput") == null);
 }
 
-test "verbose allow: non-Bash tool shows just the tool name" {
+test "verbose allow: non-Bash tool emits no banner (empty stdout)" {
     const rules = [_]Rule{};
 
     const input =
@@ -370,10 +374,10 @@ test "verbose allow: non-Bash tool shows just the tool name" {
         true,
     );
 
+    // Non-Bash tools have no interesting content to show beyond the tool name,
+    // which Claude Code's transcript already includes. Skip the banner entirely.
     try std.testing.expectEqual(@as(u8, 0), exit_code);
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, stdout_stream.getWritten(), .{});
-    defer parsed.deinit();
-    try std.testing.expectEqualStrings("veer: Read", parsed.value.object.get("systemMessage").?.string);
+    try std.testing.expectEqual(@as(usize, 0), stdout_stream.getWritten().len);
 }
 
 test "verbose rewrite: emits systemMessage alongside updatedInput" {
@@ -407,10 +411,9 @@ test "verbose rewrite: emits systemMessage alongside updatedInput" {
     defer parsed.deinit();
 
     const msg = parsed.value.object.get("systemMessage").?.string;
-    // Banner shows the ORIGINAL command and the REWRITTEN form (post-splice).
-    try std.testing.expect(std.mem.indexOf(u8, msg, "pytest tests/ -v") != null);
-    try std.testing.expect(std.mem.indexOf(u8, msg, "just test") != null);
-    try std.testing.expect(std.mem.indexOf(u8, msg, "->") != null);
+    // Banner is "`<original>` -> `<rewritten>`" with no "veer: Bash" prefix
+    // (Claude Code's transcript prepends the tool identifier).
+    try std.testing.expectEqualStrings("`pytest tests/ -v` -> `just test`", msg);
 
     const cmd = parsed.value.object.get("updatedInput").?.object.get("command").?.string;
     try std.testing.expectEqualStrings("just test", cmd);

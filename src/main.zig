@@ -212,8 +212,10 @@ fn runCheck(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void 
     const params = comptime clap.parseParamsComptime(
         \\-h, --help          Display this help and exit.
         \\    --config <str>  Path to config file.
-        \\    --verbose       Emit a systemMessage banner for each tool call (user-visible,
-        \\                    not sent to the LLM). Set by 'veer install --verbose'.
+        \\    --verbose       Emit a systemMessage banner showing each Bash command
+        \\                    (and its rewrite target, if any). User-visible in the
+        \\                    Claude Code transcript; not sent to the LLM. Set by
+        \\                    'veer install --verbose'.
         \\
     );
     var diag = clap.Diagnostic{};
@@ -289,8 +291,9 @@ fn runInstall(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !voi
         \\-h, --help     Display this help and exit.
         \\    --local    Write hook into .claude/settings.local.json instead of .claude/settings.json.
         \\    --global   Install into your home directory (all projects) instead of the current one.
-        \\    --verbose  Install in verbose mode: each tool call shows a systemMessage banner
-        \\               in the Claude Code transcript (user-visible, not sent to the LLM).
+        \\    --verbose  Install in verbose mode: each Bash command (and its rewrite target)
+        \\               shows as a systemMessage banner in the Claude Code transcript.
+        \\               User-visible, not sent to the LLM.
         \\
     );
     const install_desc =
@@ -309,10 +312,11 @@ fn runInstall(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !voi
         \\  - ~/.config/veer/config.toml (if missing)
         \\  - ~/.claude/skills/veer/SKILL.md
         \\
-        \\With --verbose, the installed hook is 'veer check --verbose', which emits a
-        \\systemMessage banner for every tool call. The banner is visible to you in the
-        \\transcript but is not added to Claude's context. Re-run without --verbose to
-        \\switch back.
+        \\With --verbose, the installed hook is 'veer check --verbose'. Each Bash
+        \\command (and its rewrite target, if any) appears as a systemMessage banner
+        \\in the transcript. The banner is visible to you but is not added to
+        \\Claude's context. Non-Bash tools produce no banner. Re-run without
+        \\--verbose to switch back.
         \\
         \\Re-running updates the hook entry to match the current version and flags.
         \\

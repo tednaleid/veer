@@ -103,6 +103,30 @@ veer returns: "Piping curl to bash is not permitted. Download the script first."
 Exit code:    2
 ```
 
+### Verbose mode
+
+By default, veer is silent on the allow and rewrite paths -- the agent's command simply runs (or runs in rewritten form) and you see nothing from veer. Install with `--verbose` to surface each Bash command as a transcript banner:
+
+```bash
+veer install --verbose              # project scope
+veer install --verbose --local      # user-private, gitignored
+veer install --verbose --global     # all projects
+```
+
+The registered hook becomes `veer check --verbose`, and every Bash tool call produces a `systemMessage` banner that Claude Code renders in the transcript:
+
+```
+Agent tries:  echo "hello"
+Banner:       `echo "hello"`                         (allow)
+
+Agent tries:  pytest tests/
+Banner:       `pytest tests/` -> `just test`          (rewrite; command still gets rewritten)
+```
+
+The banner is shown to you but is **not** added to Claude's conversation context, so it doesn't bloat the LLM's working memory or influence later decisions. Non-Bash tools produce no banner -- Claude Code's transcript already shows the tool name and arguments, so there's nothing useful for veer to add. Rejects are unchanged; they already surface via the hook error channel.
+
+Re-run `veer install` (without `--verbose`) to switch back to silent mode. The two forms are mutually exclusive in `settings.json`, so toggling cleanly replaces the entry.
+
 ## Config Reference
 
 ### File Locations
@@ -338,20 +362,30 @@ command = "Write"
 The hot-path command called by the PreToolUse hook. Reads JSON from stdin, evaluates against rules, outputs result. Auto-discovers `.veer/config.toml` and `~/.config/veer/config.toml` when `--config` is not specified.
 
 ```
-Usage: veer check [--config <path>]
+Usage: veer check [--config <path>] [--verbose]
+
+  --config   Path to config file (auto-discovered otherwise)
+  --verbose  Emit a systemMessage banner per Bash tool call (see "Verbose mode").
+             This flag is set automatically when you install with
+             'veer install --verbose' -- you don't invoke 'veer check' yourself.
 ```
 
 ### veer install
 
-Register veer as a Claude Code PreToolUse hook.
+Register veer as a Claude Code PreToolUse hook, plus a starter `.veer/config.toml` and a SKILL.md to teach the agent about veer. Re-running updates the hook entry to match current flags.
 
 ```
-Usage: veer install [--global] [--force] [--uninstall]
+Usage: veer install [--local | --global] [--verbose]
 
-  --global     Install in ~/.claude/settings.json (default: .claude/settings.json)
-  --force      Overwrite existing hook
-  --uninstall  Remove the hook
+  --local    Write hook into .claude/settings.local.json (user-private,
+             typically gitignored). Default: .claude/settings.json (shared).
+  --global   Install into ~/.claude/settings.json (applies to all projects).
+  --verbose  Install in verbose mode. Each Bash command (and its rewrite
+             target) appears as a systemMessage banner in the transcript.
+             See "Verbose mode".
 ```
+
+To remove, use `veer uninstall` (same scope flags).
 
 ### veer list
 
