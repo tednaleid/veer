@@ -18,8 +18,12 @@ See `Justfile` for all build, test, and smoke test recipes. Key commands:
 Red/green testing: write a failing test before implementing, then make it pass.
 All commits should pass `just check`.
 
-Requires Zig 0.15.2. The stdlib source is the best API reference:
-`/opt/homebrew/Cellar/zig/0.15.2/lib/zig/std/`
+Requires **Zig 0.15.2** (install via `brew install zig@0.15`). The stdlib source
+is the best API reference:
+`/opt/homebrew/Cellar/zig@0.15/0.15.2/lib/zig/std/`
+
+Does not build on Zig 0.16 -- see README "Zig 0.16 compatibility" for the
+upstream blocker (`zig-tree-sitter` using removed/relocated Build APIs).
 
 Zig 0.15 has breaking changes from 0.14 -- do not trust code examples from
 earlier versions. Key differences:

@@ -510,7 +510,15 @@ See [docs/fuzzing.md](docs/fuzzing.md) for details and status.
 
 ## Building
 
-Requires Zig 0.15+.
+Requires **Zig 0.15.2**. On macOS:
+
+```bash
+brew install zig@0.15
+# if a newer zig is already linked:
+brew unlink zig && brew link zig@0.15
+```
+
+Then:
 
 ```bash
 just install                       # Build release + symlink to ~/.local/bin
@@ -519,6 +527,15 @@ zig build -Doptimize=ReleaseSmall  # Optimized release build
 ```
 
 See the `Justfile` for all recipes: `just check`, `just bench`, `just fmt`, `just demo`, `just fuzz`.
+
+### Zig 0.16 compatibility
+
+veer does **not** build on Zig 0.16 yet. Upgrading is blocked upstream, not in this repo:
+
+- `zig-tree-sitter` (our only direct dep with its own `build.zig`) calls `addCSourceFile` on a `Compile` step and uses `std.process.argsWithAllocator`. In 0.16, `addCSourceFile`/`addCSourceFiles` moved from `Compile` to `Module`, and `argsWithAllocator` was removed. Both 0.25.0 and 0.26.0 of `zig-tree-sitter` have this issue as of 2026-04-20.
+- Our own `build.zig` uses the same `addCSourceFile(...)` API on `Compile`. That's a trivial fix on our side (call through `exe.root_module` / the per-step `Module` we already create) and will be done in the same change that bumps the dep.
+
+**Tracking:** watch `tree-sitter/zig-tree-sitter` for a release that compiles under Zig 0.16. Once that lands, bumping the dep in `build.zig.zon` and switching our own `addCSourceFile` calls to the Module variants is a ~15-minute change.
 
 ## License
 
