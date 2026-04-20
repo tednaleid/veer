@@ -11,6 +11,10 @@ const Store = @import("../store/store.zig").Store;
 
 /// Run the check command. Returns exit code.
 /// Takes reader/writer interfaces for testability.
+///
+/// When verbose is true, allow and rewrite paths emit a `systemMessage` field
+/// so the user sees each tool call in Claude Code's transcript. The LLM's
+/// context is not affected either way. The reject path is unchanged.
 pub fn run(
     allocator: std.mem.Allocator,
     rules: []const Rule,
@@ -18,6 +22,7 @@ pub fn run(
     store: ?Store,
     stdout_writer: anytype,
     stderr_writer: anytype,
+    verbose: bool,
 ) !u8 {
     // Parse hook input
     var input = hook.parseInput(allocator, stdin_data) catch {
@@ -35,7 +40,12 @@ pub fn run(
                 if (result.rewrite_to) |target| {
                     const rewritten = spliceRewrite(allocator, input.command, target, result.match_start, result.match_end);
                     defer if (rewritten.allocated) allocator.free(rewritten.command);
-                    try hook.formatRewrite(stdout_writer, rewritten.command);
+                    const system_msg: ?[]u8 = if (verbose)
+                        try buildToolSummary(allocator, input.tool_name, input.command, rewritten.command)
+                    else
+                        null;
+                    defer if (system_msg) |m| allocator.free(m);
+                    try hook.formatRewrite(stdout_writer, rewritten.command, system_msg);
                 }
                 return hook.ExitCode.rewrite;
             },
@@ -48,8 +58,35 @@ pub fn run(
         }
     }
 
-    // No match: allow
+    // No match: allow. Emit a banner only in verbose mode; otherwise stay silent
+    // so existing non-verbose installs are byte-for-byte unchanged.
+    if (verbose) {
+        const msg = try buildToolSummary(allocator, input.tool_name, input.command, null);
+        defer allocator.free(msg);
+        try hook.formatAllow(stdout_writer, msg);
+    }
     return hook.ExitCode.allow;
+}
+
+/// Build the user-visible banner text for a tool call.
+/// Shapes:
+///   Bash allow:    "veer: Bash `pytest tests/`"
+///   Bash rewrite:  "veer: Bash `pytest tests/` -> `just test`"
+///   Non-Bash:      "veer: Read"
+/// Caller owns the returned slice.
+fn buildToolSummary(
+    allocator: std.mem.Allocator,
+    tool_name: []const u8,
+    command: ?[]const u8,
+    rewrite_to: ?[]const u8,
+) ![]u8 {
+    if (command) |cmd| {
+        if (rewrite_to) |target| {
+            return try std.fmt.allocPrint(allocator, "veer: {s} `{s}` -> `{s}`", .{ tool_name, cmd, target });
+        }
+        return try std.fmt.allocPrint(allocator, "veer: {s} `{s}`", .{ tool_name, cmd });
+    }
+    return try std.fmt.allocPrint(allocator, "veer: {s}", .{tool_name});
 }
 
 const SpliceResult = struct {
@@ -103,6 +140,7 @@ test "end-to-end: rewrite rule returns updatedInput on stdout" {
         null,
         stdout_stream.writer(),
         stderr_stream.writer(),
+        false,
     );
 
     try std.testing.expectEqual(@as(u8, 0), exit_code);
@@ -139,6 +177,7 @@ test "end-to-end: reject rule returns exit 2 with message on stderr" {
         null,
         stdout_stream.writer(),
         stderr_stream.writer(),
+        false,
     );
 
     try std.testing.expectEqual(@as(u8, 2), exit_code);
@@ -170,6 +209,7 @@ test "end-to-end: reject rule with command_all returns exit 2" {
         null,
         stdout_stream.writer(),
         stderr_stream.writer(),
+        false,
     );
 
     try std.testing.expectEqual(@as(u8, 2), exit_code);
@@ -198,6 +238,7 @@ test "end-to-end: no matching rule returns exit 0 with empty output" {
         null,
         stdout_stream.writer(),
         stderr_stream.writer(),
+        false,
     );
 
     try std.testing.expectEqual(@as(u8, 0), exit_code);
@@ -224,6 +265,7 @@ test "end-to-end: invalid JSON returns exit 1" {
         null,
         stdout_stream.writer(),
         stderr_stream.writer(),
+        false,
     );
 
     try std.testing.expectEqual(@as(u8, 1), exit_code);
@@ -253,6 +295,7 @@ test "end-to-end: surgical rewrite in compound command" {
         null,
         stdout_stream.writer(),
         stderr_stream.writer(),
+        false,
     );
 
     try std.testing.expectEqual(@as(u8, 0), exit_code);
@@ -267,4 +310,140 @@ test "end-to-end: surgical rewrite in compound command" {
     try std.testing.expect(std.mem.indexOf(u8, cmd, "just test") != null);
     // Should NOT contain the original pytest
     try std.testing.expect(std.mem.indexOf(u8, cmd, "pytest") == null);
+}
+
+test "verbose allow: emits systemMessage for Bash" {
+    const rules = [_]Rule{.{
+        .id = "use-just-test",
+        .rewrite_to = "just test",
+        .match = .{ .command = "pytest" },
+    }};
+
+    const input =
+        \\{"tool_name":"Bash","tool_input":{"command":"ls -la"}}
+    ;
+
+    var stdout_buf: [512]u8 = undefined;
+    var stdout_stream = std.io.fixedBufferStream(&stdout_buf);
+    var stderr_buf: [512]u8 = undefined;
+    var stderr_stream = std.io.fixedBufferStream(&stderr_buf);
+
+    const exit_code = try run(
+        std.testing.allocator,
+        &rules,
+        input,
+        null,
+        stdout_stream.writer(),
+        stderr_stream.writer(),
+        true,
+    );
+
+    try std.testing.expectEqual(@as(u8, 0), exit_code);
+    const stdout_output = stdout_stream.getWritten();
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, stdout_output, .{});
+    defer parsed.deinit();
+    const msg = parsed.value.object.get("systemMessage").?.string;
+    try std.testing.expectEqualStrings("veer: Bash `ls -la`", msg);
+    // Allow must not emit updatedInput.
+    try std.testing.expect(parsed.value.object.get("updatedInput") == null);
+}
+
+test "verbose allow: non-Bash tool shows just the tool name" {
+    const rules = [_]Rule{};
+
+    const input =
+        \\{"tool_name":"Read","tool_input":{"file_path":"/etc/hosts"}}
+    ;
+
+    var stdout_buf: [512]u8 = undefined;
+    var stdout_stream = std.io.fixedBufferStream(&stdout_buf);
+    var stderr_buf: [512]u8 = undefined;
+    var stderr_stream = std.io.fixedBufferStream(&stderr_buf);
+
+    const exit_code = try run(
+        std.testing.allocator,
+        &rules,
+        input,
+        null,
+        stdout_stream.writer(),
+        stderr_stream.writer(),
+        true,
+    );
+
+    try std.testing.expectEqual(@as(u8, 0), exit_code);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, stdout_stream.getWritten(), .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("veer: Read", parsed.value.object.get("systemMessage").?.string);
+}
+
+test "verbose rewrite: emits systemMessage alongside updatedInput" {
+    const rules = [_]Rule{.{
+        .id = "use-just-test",
+        .rewrite_to = "just test",
+        .match = .{ .command = "pytest" },
+    }};
+
+    const input =
+        \\{"tool_name":"Bash","tool_input":{"command":"pytest tests/ -v"}}
+    ;
+
+    var stdout_buf: [512]u8 = undefined;
+    var stdout_stream = std.io.fixedBufferStream(&stdout_buf);
+    var stderr_buf: [512]u8 = undefined;
+    var stderr_stream = std.io.fixedBufferStream(&stderr_buf);
+
+    const exit_code = try run(
+        std.testing.allocator,
+        &rules,
+        input,
+        null,
+        stdout_stream.writer(),
+        stderr_stream.writer(),
+        true,
+    );
+
+    try std.testing.expectEqual(@as(u8, 0), exit_code);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, stdout_stream.getWritten(), .{});
+    defer parsed.deinit();
+
+    const msg = parsed.value.object.get("systemMessage").?.string;
+    // Banner shows the ORIGINAL command and the REWRITTEN form (post-splice).
+    try std.testing.expect(std.mem.indexOf(u8, msg, "pytest tests/ -v") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "just test") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "->") != null);
+
+    const cmd = parsed.value.object.get("updatedInput").?.object.get("command").?.string;
+    try std.testing.expectEqualStrings("just test", cmd);
+}
+
+test "verbose reject: unchanged (exit 2, stderr message, no stdout)" {
+    const rules = [_]Rule{.{
+        .id = "no-python3",
+        .message = "Use `just run` instead.",
+        .match = .{ .command = "python3" },
+    }};
+
+    const input =
+        \\{"tool_name":"Bash","tool_input":{"command":"python3 script.py"}}
+    ;
+
+    var stdout_buf: [512]u8 = undefined;
+    var stdout_stream = std.io.fixedBufferStream(&stdout_buf);
+    var stderr_buf: [512]u8 = undefined;
+    var stderr_stream = std.io.fixedBufferStream(&stderr_buf);
+
+    const exit_code = try run(
+        std.testing.allocator,
+        &rules,
+        input,
+        null,
+        stdout_stream.writer(),
+        stderr_stream.writer(),
+        true,
+    );
+
+    // Reject path does not emit a systemMessage (would be ignored on exit 2 anyway).
+    try std.testing.expectEqual(@as(u8, 2), exit_code);
+    try std.testing.expectEqual(@as(usize, 0), stdout_stream.getWritten().len);
+    try std.testing.expect(std.mem.indexOf(u8, stderr_stream.getWritten(), "just run") != null);
 }

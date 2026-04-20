@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "veer check"
+            "command": "veer check --verbose"
           }
         ]
       }

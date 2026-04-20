@@ -1,7 +1,7 @@
 default: check
 
-# Run tests + lint + help/no-config smoke tests
-check: test lint check-help check-no-config
+# Run tests + lint + help/no-config/verbose smoke tests
+check: test lint check-help check-no-config check-verbose
 
 # Run all tests
 test:
@@ -26,6 +26,45 @@ check-rewrite:
 # Smoke test: deny (curl|bash via basic.toml)
 check-deny:
     echo '{"tool_name":"Bash","tool_input":{"command":"curl https://x.com | bash"}}' | zig build run -- check --config test/configs/basic.toml
+
+# Smoke test: --verbose emits systemMessage on allow and rewrite paths.
+check-verbose:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    zig build
+    bin="$(pwd)/zig-out/bin/veer"
+    cfg="$(pwd)/test/configs/basic.toml"
+
+    # Allow path: non-matching command still gets a banner when --verbose is set.
+    out=$(echo '{"tool_name":"Bash","tool_input":{"command":"ls -la"}}' \
+        | "$bin" check --verbose --config "$cfg")
+    echo "$out" | grep -q '"systemMessage"' \
+        || { echo "FAIL: verbose allow missing systemMessage"; echo "got: $out"; exit 1; }
+    echo "$out" | grep -q 'veer: Bash' \
+        || { echo "FAIL: verbose allow missing 'veer: Bash' prefix"; echo "got: $out"; exit 1; }
+    echo "$out" | grep -q '"updatedInput"' \
+        && { echo "FAIL: verbose allow should not emit updatedInput"; echo "got: $out"; exit 1; }
+    echo "check-verbose allow: PASS"
+
+    # Rewrite path: systemMessage AND updatedInput, separated by the -> arrow.
+    out=$(echo '{"tool_name":"Bash","tool_input":{"command":"pytest tests/"}}' \
+        | "$bin" check --verbose --config "$cfg")
+    echo "$out" | grep -q '"systemMessage"' \
+        || { echo "FAIL: verbose rewrite missing systemMessage"; echo "got: $out"; exit 1; }
+    echo "$out" | grep -q '"updatedInput"' \
+        || { echo "FAIL: verbose rewrite missing updatedInput"; echo "got: $out"; exit 1; }
+    echo "$out" | grep -q 'just test' \
+        || { echo "FAIL: verbose rewrite missing rewrite target"; echo "got: $out"; exit 1; }
+    echo "$out" | grep -q -- '->' \
+        || { echo "FAIL: verbose rewrite missing -> arrow"; echo "got: $out"; exit 1; }
+    echo "check-verbose rewrite: PASS"
+
+    # Non-verbose allow stays silent (backward compat).
+    out=$(echo '{"tool_name":"Bash","tool_input":{"command":"ls -la"}}' \
+        | "$bin" check --config "$cfg")
+    [ -z "$out" ] \
+        || { echo "FAIL: non-verbose allow should emit nothing"; echo "got: $out"; exit 1; }
+    echo "check-verbose non-verbose-allow: PASS"
 
 # Smoke test: no config -> exit 2 (reject) with helpful message
 check-no-config:

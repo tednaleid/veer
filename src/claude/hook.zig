@@ -62,8 +62,48 @@ pub fn freeInput(allocator: std.mem.Allocator, input: *HookInput) void {
 
 /// Format a rewrite result for stdout.
 /// Output: {"updatedInput":{"command":"<rewrite_to>"}}
-pub fn formatRewrite(writer: anytype, rewrite_to: []const u8) !void {
-    try writer.print("{{\"updatedInput\":{{\"command\":\"{s}\"}}}}", .{rewrite_to});
+/// When system_message is non-null, the output also includes a
+/// "systemMessage" field (shown to the user in Claude Code's transcript,
+/// not visible to the LLM): {"systemMessage":"...","updatedInput":{...}}
+pub fn formatRewrite(writer: anytype, rewrite_to: []const u8, system_message: ?[]const u8) !void {
+    try writer.writeAll("{");
+    if (system_message) |msg| {
+        try writer.writeAll("\"systemMessage\":");
+        try writeJsonString(writer, msg);
+        try writer.writeAll(",");
+    }
+    try writer.writeAll("\"updatedInput\":{\"command\":");
+    try writeJsonString(writer, rewrite_to);
+    try writer.writeAll("}}");
+}
+
+/// Format an allow result for stdout. Only emitted when verbose mode is on;
+/// non-verbose allow writes nothing.
+/// Output: {"systemMessage":"<message>"}
+pub fn formatAllow(writer: anytype, system_message: []const u8) !void {
+    try writer.writeAll("{\"systemMessage\":");
+    try writeJsonString(writer, system_message);
+    try writer.writeAll("}");
+}
+
+/// Write a JSON-encoded string (including surrounding quotes).
+/// Escapes the characters JSON requires: `"`, `\`, and control chars < 0x20.
+fn writeJsonString(writer: anytype, str: []const u8) !void {
+    try writer.writeByte('"');
+    for (str) |c| {
+        switch (c) {
+            '"' => try writer.writeAll("\\\""),
+            '\\' => try writer.writeAll("\\\\"),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            8 => try writer.writeAll("\\b"),
+            12 => try writer.writeAll("\\f"),
+            0...7, 11, 14...31 => try writer.print("\\u{x:0>4}", .{@as(u16, c)}),
+            else => try writer.writeByte(c),
+        }
+    }
+    try writer.writeByte('"');
 }
 
 // -- Tests --
@@ -105,7 +145,61 @@ test "parseInput invalid JSON fails" {
 test "formatRewrite produces correct JSON" {
     var buf: [256]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    try formatRewrite(stream.writer(), "just test");
+    try formatRewrite(stream.writer(), "just test", null);
     const output = stream.getWritten();
     try std.testing.expectEqualStrings("{\"updatedInput\":{\"command\":\"just test\"}}", output);
+}
+
+test "formatRewrite with systemMessage includes both fields" {
+    var buf: [256]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    try formatRewrite(stream.writer(), "just test", "veer: Bash `pytest` -> `just test`");
+    const output = stream.getWritten();
+    try std.testing.expectEqualStrings(
+        "{\"systemMessage\":\"veer: Bash `pytest` -> `just test`\",\"updatedInput\":{\"command\":\"just test\"}}",
+        output,
+    );
+}
+
+test "formatRewrite escapes quotes and backslashes" {
+    var buf: [256]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    // Both fields must be escaped; otherwise a command containing `"` or `\`
+    // would produce invalid JSON.
+    try formatRewrite(stream.writer(), "echo \"hi\"", "veer: Bash `x\\y`");
+    const output = stream.getWritten();
+    try std.testing.expectEqualStrings(
+        "{\"systemMessage\":\"veer: Bash `x\\\\y`\",\"updatedInput\":{\"command\":\"echo \\\"hi\\\"\"}}",
+        output,
+    );
+    // And the output must be valid JSON parseable by std.json.
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, output, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(
+        "echo \"hi\"",
+        parsed.value.object.get("updatedInput").?.object.get("command").?.string,
+    );
+}
+
+test "formatAllow produces systemMessage-only JSON" {
+    var buf: [256]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    try formatAllow(stream.writer(), "veer: Read");
+    const output = stream.getWritten();
+    try std.testing.expectEqualStrings("{\"systemMessage\":\"veer: Read\"}", output);
+}
+
+test "formatAllow escapes control characters" {
+    var buf: [256]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    try formatAllow(stream.writer(), "veer: Bash `echo\nhi`");
+    const output = stream.getWritten();
+    try std.testing.expectEqualStrings("{\"systemMessage\":\"veer: Bash `echo\\nhi`\"}", output);
+    // Parse round-trip.
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, output, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(
+        "veer: Bash `echo\nhi`",
+        parsed.value.object.get("systemMessage").?.string,
+    );
 }

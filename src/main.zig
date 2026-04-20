@@ -212,6 +212,8 @@ fn runCheck(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void 
     const params = comptime clap.parseParamsComptime(
         \\-h, --help          Display this help and exit.
         \\    --config <str>  Path to config file.
+        \\    --verbose       Emit a systemMessage banner for each tool call (user-visible,
+        \\                    not sent to the LLM). Set by 'veer install --verbose'.
         \\
     );
     var diag = clap.Diagnostic{};
@@ -224,6 +226,7 @@ fn runCheck(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void 
     if (res.args.help != 0) printSubHelp(&params);
 
     const config_path: ?[]const u8 = res.args.config;
+    const verbose: bool = res.args.verbose != 0;
 
     var loaded = loadConfigForCheck(allocator, config_path);
     defer if (loaded.parsed_file) |*pf| pf.deinit();
@@ -260,6 +263,7 @@ fn runCheck(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void 
         store,
         stdout_stream.writer(),
         stderr_stream.writer(),
+        verbose,
     ) catch {
         std.debug.print("veer: internal error during check\n", .{});
         std.process.exit(1);
@@ -282,9 +286,11 @@ fn runCheck(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void 
 
 fn runInstall(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
     const params = comptime clap.parseParamsComptime(
-        \\-h, --help    Display this help and exit.
-        \\    --local   Write hook into .claude/settings.local.json instead of .claude/settings.json.
-        \\    --global  Install into your home directory (all projects) instead of the current one.
+        \\-h, --help     Display this help and exit.
+        \\    --local    Write hook into .claude/settings.local.json instead of .claude/settings.json.
+        \\    --global   Install into your home directory (all projects) instead of the current one.
+        \\    --verbose  Install in verbose mode: each tool call shows a systemMessage banner
+        \\               in the Claude Code transcript (user-visible, not sent to the LLM).
         \\
     );
     const install_desc =
@@ -303,7 +309,12 @@ fn runInstall(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !voi
         \\  - ~/.config/veer/config.toml (if missing)
         \\  - ~/.claude/skills/veer/SKILL.md
         \\
-        \\Re-running updates the hook entry to match the current version.
+        \\With --verbose, the installed hook is 'veer check --verbose', which emits a
+        \\systemMessage banner for every tool call. The banner is visible to you in the
+        \\transcript but is not added to Claude's context. Re-run without --verbose to
+        \\switch back.
+        \\
+        \\Re-running updates the hook entry to match the current version and flags.
         \\
     ;
     var diag = clap.Diagnostic{};
@@ -316,6 +327,7 @@ fn runInstall(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !voi
     if (res.args.help != 0) printSubHelpWithDesc(install_desc, &params);
 
     const scope = resolveScope(res.args.local != 0, res.args.global != 0, "install");
+    const verbose: bool = res.args.verbose != 0;
 
     const paths = install_cmd.resolvePaths(allocator, scope) catch |err| {
         std.debug.print("veer install: {}\n", .{err});
@@ -325,7 +337,7 @@ fn runInstall(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !voi
 
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = install_cmd.install(allocator, paths, stream.writer()) catch |err| {
+    const exit_code = install_cmd.install(allocator, paths, verbose, stream.writer()) catch |err| {
         std.debug.print("veer install: {}\n", .{err});
         std.process.exit(1);
     };

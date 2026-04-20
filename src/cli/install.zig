@@ -27,8 +27,21 @@ const config_stub =
 /// and its WAL/journal files (veer.db-wal, veer.db-shm, veer.db-journal).
 const gitignore_content = "veer.db*\n";
 
-/// The hook command registered in settings.json.
-const hook_command = "veer check";
+/// Hook command strings. `veer install` writes the plain form; `veer install
+/// --verbose` writes the verbose form (which adds user-visible systemMessage
+/// banners to each tool call). Both are recognized on uninstall and on
+/// re-install so users can toggle between modes without orphan entries.
+const hook_command_plain = "veer check";
+const hook_command_verbose = "veer check --verbose";
+
+fn hookCommandFor(verbose: bool) []const u8 {
+    return if (verbose) hook_command_verbose else hook_command_plain;
+}
+
+fn isVeerCommandString(cmd: []const u8) bool {
+    return std.mem.eql(u8, cmd, hook_command_plain) or
+        std.mem.eql(u8, cmd, hook_command_verbose);
+}
 
 pub const Scope = enum { project, local, global };
 
@@ -76,9 +89,11 @@ pub fn freePaths(allocator: std.mem.Allocator, paths: Paths, scope: Scope) void 
 ///   2. Create config.toml stub if missing.
 ///   3. Write .gitignore in config dir (excludes veer.db).
 ///   4. Write SKILL.md (always overwrite).
+/// When `verbose` is true, the registered command is `veer check --verbose`,
+/// which causes each tool call to emit a user-visible systemMessage banner.
 /// Returns process exit code (0 on success, 1 on user-facing error).
-pub fn install(allocator: std.mem.Allocator, paths: Paths, writer: anytype) !u8 {
-    const hook_code = try installHook(allocator, paths.settings, writer);
+pub fn install(allocator: std.mem.Allocator, paths: Paths, verbose: bool, writer: anytype) !u8 {
+    const hook_code = try installHook(allocator, paths.settings, verbose, writer);
     if (hook_code != 0) return hook_code;
     try ensureConfigStub(paths.config, writer);
     try writeConfigDirGitignore(paths.config, writer);
@@ -111,7 +126,7 @@ pub fn uninstall(allocator: std.mem.Allocator, paths: Paths, writer: anytype) !u
 
 // -- internal helpers --
 
-fn installHook(allocator: std.mem.Allocator, path: []const u8, writer: anytype) !u8 {
+fn installHook(allocator: std.mem.Allocator, path: []const u8, verbose: bool, writer: anytype) !u8 {
     // Read existing file or start with {}
     const content = readFileAlloc(allocator, path) catch |err| switch (err) {
         error.FileNotFound => try allocator.dupe(u8, "{}"),
@@ -161,10 +176,10 @@ fn installHook(allocator: std.mem.Allocator, path: []const u8, writer: anytype) 
     // Get or create the nested "hooks" array on that matcher entry.
     const matcher_hooks = try getOrCreateArray(arena, &star_entry.object, "hooks");
 
-    // Append {"type":"command","command":"veer check"}.
+    // Append {"type":"command","command":"veer check"} or the --verbose variant.
     var hook_obj: std.json.ObjectMap = .init(arena);
     try hook_obj.put("type", .{ .string = "command" });
-    try hook_obj.put("command", .{ .string = hook_command });
+    try hook_obj.put("command", .{ .string = hookCommandFor(verbose) });
     try matcher_hooks.array.append(.{ .object = hook_obj });
 
     try writeJsonAtomic(allocator, path, parsed.value);
@@ -268,7 +283,7 @@ fn isVeerHookEntry(v: *const std.json.Value) bool {
     if (t != .string or !std.mem.eql(u8, t.string, "command")) return false;
     const c = v.object.get("command") orelse return false;
     if (c != .string) return false;
-    return std.mem.eql(u8, c.string, hook_command);
+    return isVeerCommandString(c.string);
 }
 
 fn getOrCreateObject(arena: std.mem.Allocator, obj: *std.json.ObjectMap, key: []const u8) !*std.json.Value {
@@ -414,7 +429,7 @@ test "install merges into empty settings.json" {
 
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    const code = try install(testing.allocator, paths, stream.writer());
+    const code = try install(testing.allocator, paths, false, stream.writer());
     try testing.expectEqual(@as(u8, 0), code);
 
     const content = try readFileAlloc(testing.allocator, paths.settings);
@@ -446,7 +461,7 @@ test "install preserves existing non-veer PreToolUse hook" {
 
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    _ = try install(testing.allocator, paths, stream.writer());
+    _ = try install(testing.allocator, paths, false, stream.writer());
 
     const content = try readFileAlloc(testing.allocator, paths.settings);
     defer testing.allocator.free(content);
@@ -466,9 +481,9 @@ test "install is idempotent (no duplicate veer entries)" {
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
 
-    _ = try install(testing.allocator, paths, stream.writer());
+    _ = try install(testing.allocator, paths, false, stream.writer());
     stream.reset();
-    _ = try install(testing.allocator, paths, stream.writer());
+    _ = try install(testing.allocator, paths, false, stream.writer());
 
     const content = try readFileAlloc(testing.allocator, paths.settings);
     defer testing.allocator.free(content);
@@ -496,7 +511,7 @@ test "install rejects invalid JSON in settings.json" {
 
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    const code = try install(testing.allocator, paths, stream.writer());
+    const code = try install(testing.allocator, paths, false, stream.writer());
     try testing.expectEqual(@as(u8, 1), code);
 
     // Original file must be untouched
@@ -516,7 +531,7 @@ test "install creates .veer/config.toml stub when missing" {
 
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    _ = try install(testing.allocator, paths, stream.writer());
+    _ = try install(testing.allocator, paths, false, stream.writer());
 
     const content = try readFileAlloc(testing.allocator, paths.config);
     defer testing.allocator.free(content);
@@ -538,7 +553,7 @@ test "install preserves existing config.toml" {
 
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    _ = try install(testing.allocator, paths, stream.writer());
+    _ = try install(testing.allocator, paths, false, stream.writer());
 
     const content = try readFileAlloc(testing.allocator, paths.config);
     defer testing.allocator.free(content);
@@ -559,7 +574,7 @@ test "install always overwrites skill file" {
 
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    _ = try install(testing.allocator, paths, stream.writer());
+    _ = try install(testing.allocator, paths, false, stream.writer());
 
     const content = try readFileAlloc(testing.allocator, paths.skill);
     defer testing.allocator.free(content);
@@ -645,7 +660,7 @@ test "install creates .veer/.gitignore" {
 
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    _ = try install(testing.allocator, paths, stream.writer());
+    _ = try install(testing.allocator, paths, false, stream.writer());
 
     var gi_buf: [1024]u8 = undefined;
     const gi_path = try std.fmt.bufPrint(&gi_buf, "{s}/.veer/.gitignore", .{tmp_root});
@@ -713,5 +728,118 @@ test "uninstall removes empty PreToolUse/hooks after veer entry removal" {
 
     // File should be deleted (only contained veer's hook which is now removed,
     // leaving {}).
+    try testing.expect(!fileExistsAbs(paths.settings));
+}
+
+test "install --verbose writes 'veer check --verbose' into settings.json" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_root = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(tmp_root);
+
+    const paths = try testPaths(testing.allocator, tmp_root);
+    defer freeTestPaths(testing.allocator, paths);
+
+    var buf: [4096]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    _ = try install(testing.allocator, paths, true, stream.writer());
+
+    const content = try readFileAlloc(testing.allocator, paths.settings);
+    defer testing.allocator.free(content);
+    try testing.expect(std.mem.indexOf(u8, content, "veer check --verbose") != null);
+    // And the plain form must not also be present.
+    const plain_count = blk: {
+        var count: usize = 0;
+        var i: usize = 0;
+        while (std.mem.indexOfPos(u8, content, i, "\"veer check\"")) |pos| {
+            count += 1;
+            i = pos + 1;
+        }
+        break :blk count;
+    };
+    try testing.expectEqual(@as(usize, 0), plain_count);
+}
+
+test "install then install --verbose replaces the entry (one entry total)" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_root = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(tmp_root);
+
+    const paths = try testPaths(testing.allocator, tmp_root);
+    defer freeTestPaths(testing.allocator, paths);
+
+    var buf: [4096]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+
+    _ = try install(testing.allocator, paths, false, stream.writer());
+    stream.reset();
+    _ = try install(testing.allocator, paths, true, stream.writer());
+
+    const content = try readFileAlloc(testing.allocator, paths.settings);
+    defer testing.allocator.free(content);
+
+    // Exactly one veer entry, in verbose form. Use the JSON-quoted form to
+    // avoid accidentally counting the verbose entry twice (it contains both
+    // "veer check" and "veer check --verbose" as substrings).
+    var verbose_count: usize = 0;
+    {
+        var i: usize = 0;
+        while (std.mem.indexOfPos(u8, content, i, "\"veer check --verbose\"")) |pos| {
+            verbose_count += 1;
+            i = pos + 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), verbose_count);
+
+    var plain_count: usize = 0;
+    {
+        var i: usize = 0;
+        while (std.mem.indexOfPos(u8, content, i, "\"veer check\"")) |pos| {
+            plain_count += 1;
+            i = pos + 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 0), plain_count);
+}
+
+test "install --verbose then install (plain) switches back" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_root = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(tmp_root);
+
+    const paths = try testPaths(testing.allocator, tmp_root);
+    defer freeTestPaths(testing.allocator, paths);
+
+    var buf: [4096]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+
+    _ = try install(testing.allocator, paths, true, stream.writer());
+    stream.reset();
+    _ = try install(testing.allocator, paths, false, stream.writer());
+
+    const content = try readFileAlloc(testing.allocator, paths.settings);
+    defer testing.allocator.free(content);
+    try testing.expect(std.mem.indexOf(u8, content, "\"veer check\"") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "veer check --verbose") == null);
+}
+
+test "uninstall removes a verbose-form veer entry" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_root = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(tmp_root);
+
+    const paths = try testPaths(testing.allocator, tmp_root);
+    defer freeTestPaths(testing.allocator, paths);
+
+    var buf: [4096]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    _ = try install(testing.allocator, paths, true, stream.writer());
+    stream.reset();
+    _ = try uninstall(testing.allocator, paths, stream.writer());
+
+    // Whole settings.json removed (it only contained the veer hook).
     try testing.expect(!fileExistsAbs(paths.settings));
 }
