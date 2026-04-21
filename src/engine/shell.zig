@@ -153,10 +153,17 @@ fn extractCommand(allocator: std.mem.Allocator, node: ts.Node, source: []const u
             std.mem.eql(u8, child_kind, "concatenation") or
             std.mem.eql(u8, child_kind, "number"))
         {
-            const text = nodeText(child, source);
+            // Strip surrounding quotes on string nodes so `echo "foo"` and
+            // `echo foo` classify identically (both positional "foo"). Without
+            // this, `arg = "foo"` would match the unquoted form only.
+            const raw = nodeText(child, source);
+            const text = stripQuotes(raw);
             try cmd.args.append(allocator, text);
 
-            if (text.len > 0 and text[0] == '-') {
+            // Any `-`-prefixed token is a flag EXCEPT pure-dash tokens like
+            // `-` (stdin/stdout placeholder, e.g. `cat -`) or `---` (often
+            // a separator in `echo ---`). Those are semantically positional.
+            if (text.len > 0 and text[0] == '-' and !isAllDashes(text)) {
                 try cmd.flags.append(allocator, text);
             } else {
                 try cmd.positional.append(allocator, text);
@@ -178,6 +185,25 @@ fn nodeText(node: ts.Node, source: []const u8) []const u8 {
     return source[start..end];
 }
 
+fn isAllDashes(text: []const u8) bool {
+    if (text.len == 0) return false;
+    for (text) |c| if (c != '-') return false;
+    return true;
+}
+
+/// Strip a single layer of matching outer quotes (`"..."` or `'...'`).
+/// Leaves un-quoted text unchanged.
+fn stripQuotes(text: []const u8) []const u8 {
+    if (text.len >= 2) {
+        const first = text[0];
+        const last = text[text.len - 1];
+        if ((first == '"' and last == '"') or (first == '\'' and last == '\'')) {
+            return text[1 .. text.len - 1];
+        }
+    }
+    return text;
+}
+
 // -- Tests --
 
 test "parse simple command" {
@@ -197,6 +223,42 @@ test "parse bare command" {
     try std.testing.expectEqual(@as(usize, 1), info.commands.items.len);
     try std.testing.expectEqualStrings("ls", info.commands.items[0].name);
     try std.testing.expectEqual(@as(usize, 0), info.commands.items[0].flags.items.len);
+}
+
+test "pure-dash tokens are positional, not flags" {
+    // Any token that is ALL dashes (`-`, `--`, `---`, ...) is semantically
+    // positional, not a flag. `-` is the common stdin/stdout placeholder;
+    // `---` shows up as an echo separator. Misclassifying them as flags
+    // makes `arg = "---"` rules unmatchable.
+    inline for (&.{
+        .{ "cat -", "cat", "-" },
+        .{ "echo ---", "echo", "---" },
+        .{ "echo \"---\"", "echo", "---" },
+    }) |tc| {
+        var info = try parse(std.testing.allocator, tc[0]);
+        defer info.deinit(std.testing.allocator);
+
+        try std.testing.expectEqual(@as(usize, 1), info.commands.items.len);
+        const cmd = info.commands.items[0];
+        try std.testing.expectEqualStrings(tc[1], cmd.name);
+        try std.testing.expectEqual(@as(usize, 0), cmd.flags.items.len);
+        try std.testing.expectEqual(@as(usize, 1), cmd.positional.items.len);
+        try std.testing.expectEqualStrings(tc[2], cmd.positional.items[0]);
+    }
+}
+
+test "mixed pure-dash and real flags keep their lanes" {
+    // `rm -rf -- file` has one real flag (-rf) and one pure-dash token (--).
+    var info = try parse(std.testing.allocator, "rm -rf -- file");
+    defer info.deinit(std.testing.allocator);
+
+    const cmd = info.commands.items[0];
+    try std.testing.expectEqual(@as(usize, 1), cmd.flags.items.len);
+    try std.testing.expectEqualStrings("-rf", cmd.flags.items[0]);
+    // `--` goes to positional, alongside `file`.
+    try std.testing.expectEqual(@as(usize, 2), cmd.positional.items.len);
+    try std.testing.expectEqualStrings("--", cmd.positional.items[0]);
+    try std.testing.expectEqualStrings("file", cmd.positional.items[1]);
 }
 
 test "parse pipeline" {

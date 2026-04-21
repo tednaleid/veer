@@ -66,6 +66,20 @@ message = "Use 'just build' instead of invoking zig build directly."
 command = "zig"
 arg = "build"
 
+# Rewrite `echo "---"` to `echo ---` (no quotes). Claude Code treats the
+# quoted form as "quoted characters in flag names" and prompts for approval;
+# the unquoted form is identical at the shell level and approval-free. Works
+# standalone and inside compound statements -- veer splices the replacement
+# into the matched subcommand and preserves everything around it.
+[[rule]]
+id = "echo-separator-unquote"
+name = "Drop quotes around --- separators to skip approval prompts"
+action = "rewrite"
+rewrite_to = "echo ---"
+[rule.match]
+command = "echo"
+arg = "---"
+
 # Deliberate test probe: won't match any real command. Use the unique
 # string `veer-rewrite-probe` to verify rewrite behavior end-to-end in
 # Claude Code (the verbose banner should show the transformation).
