@@ -6,7 +6,7 @@ const clap = @import("clap");
 const config_mod = @import("config/config.zig");
 
 // Keep in sync with build.zig.zon
-const version = "0.1.6";
+const version = "0.1.7";
 const check_cmd = @import("cli/check.zig");
 const install_cmd = @import("cli/install.zig");
 const list_cmd = @import("cli/list.zig");
