@@ -39,11 +39,15 @@ pub const MergedConfig = struct {
     project_parsed: ?toml.Parsed(Config) = null,
     global_parsed: ?toml.Parsed(Config) = null,
     merged_rules: ?[]Rule = null,
+    /// Absolute path of the project config that was loaded, if any.
+    /// Owned by this struct; freed in deinit.
+    project_config_path: ?[]const u8 = null,
 
     pub fn deinit(self: *MergedConfig, allocator: std.mem.Allocator) void {
         if (self.merged_rules) |r| allocator.free(r);
         if (self.project_parsed) |*p| p.deinit();
         if (self.global_parsed) |*g| g.deinit();
+        if (self.project_config_path) |p| allocator.free(p);
     }
 };
 
@@ -118,7 +122,7 @@ pub fn mergeSettings(global: Settings, project: Settings) Settings {
     };
 }
 
-const project_config_path = ".veer/config.toml";
+pub const project_config_relpath = ".veer/config.toml";
 
 /// Build the global config path: $XDG_CONFIG_HOME/veer/config.toml or ~/.config/veer/config.toml.
 /// Caller owns the returned string.
@@ -130,18 +134,72 @@ pub fn globalConfigPath(allocator: std.mem.Allocator) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{s}/.config/veer/config.toml", .{home});
 }
 
+/// Locate the project's `.veer/config.toml`.
+///
+/// Discovery order:
+///   1. If `project_dir_hint` is non-null, try `<hint>/.veer/config.toml`.
+///      Used by `loadMerged` to forward `$CLAUDE_PROJECT_DIR` (set by Claude
+///      Code for every PreToolUse hook invocation), making discovery
+///      deterministic for the hook case regardless of cwd drift.
+///   2. Walk up from `cwd_abs` toward filesystem root, checking
+///      `<dir>/.veer/config.toml` at each level. Same algorithm git uses
+///      for `.git/`. Handles CLI usage (`veer test` from a subdirectory).
+///
+/// Returns the absolute path of the first match, or null if none exists.
+/// Caller owns the returned slice.
+pub fn findProjectConfigPath(
+    allocator: std.mem.Allocator,
+    cwd_abs: []const u8,
+    project_dir_hint: ?[]const u8,
+) !?[]u8 {
+    if (project_dir_hint) |hint| {
+        if (hint.len > 0) {
+            const candidate = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ hint, project_config_relpath });
+            if (fileExists(candidate)) return candidate;
+            allocator.free(candidate);
+        }
+    }
+
+    var current: []const u8 = cwd_abs;
+    while (true) {
+        const candidate = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ current, project_config_relpath });
+        if (fileExists(candidate)) return candidate;
+        allocator.free(candidate);
+
+        const parent = std.fs.path.dirname(current) orelse return null;
+        if (parent.ptr == current.ptr and parent.len == current.len) return null;
+        current = parent;
+    }
+}
+
+fn fileExists(path: []const u8) bool {
+    const file = std.fs.openFileAbsolute(path, .{}) catch return false;
+    file.close();
+    return true;
+}
+
 /// Auto-discover and merge project + global configs.
-/// Tries .veer/config.toml (project) and ~/.config/veer/config.toml (global).
+/// Project config is found via `findProjectConfigPath` (honors
+/// `$CLAUDE_PROJECT_DIR`, then walks up from cwd). Global config is
+/// `~/.config/veer/config.toml` (or `$XDG_CONFIG_HOME/veer/config.toml`).
 /// Returns error.NoConfigFound if neither exists.
 pub fn loadMerged(allocator: std.mem.Allocator) !MergedConfig {
     var result = MergedConfig{};
     errdefer result.deinit(allocator);
 
-    // Try project config
-    result.project_parsed = loadFile(allocator, project_config_path) catch |err| blk: {
-        if (err == error.FileNotFound) break :blk null;
-        return err;
-    };
+    const cwd_abs = std.fs.cwd().realpathAlloc(allocator, ".") catch null;
+    defer if (cwd_abs) |c| allocator.free(c);
+
+    if (cwd_abs) |cwd| {
+        const hint = std.posix.getenv("CLAUDE_PROJECT_DIR");
+        if (try findProjectConfigPath(allocator, cwd, hint)) |project_path| {
+            result.project_config_path = project_path;
+            result.project_parsed = loadFile(allocator, project_path) catch |err| blk: {
+                if (err == error.FileNotFound) break :blk null;
+                return err;
+            };
+        }
+    }
 
     // Try global config
     const global_path = globalConfigPath(allocator) catch null;
@@ -353,6 +411,111 @@ test "loadMerged finds project config when present" {
     } else |_| {
         // If no config exists, that's also OK for this test
     }
+}
+
+test "findProjectConfigPath finds config at cwd when present" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath(".veer");
+    var f = try tmp.dir.createFile(".veer/config.toml", .{});
+    f.close();
+
+    const tmp_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(tmp_abs);
+
+    const path = try findProjectConfigPath(std.testing.allocator, tmp_abs, null);
+    defer if (path) |p| std.testing.allocator.free(p);
+
+    try std.testing.expect(path != null);
+    const expected = try std.fmt.allocPrint(std.testing.allocator, "{s}/.veer/config.toml", .{tmp_abs});
+    defer std.testing.allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, path.?);
+}
+
+test "findProjectConfigPath walks up from a subdir" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath(".veer");
+    var f = try tmp.dir.createFile(".veer/config.toml", .{});
+    f.close();
+    try tmp.dir.makePath("sub/sub2");
+
+    const tmp_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(tmp_abs);
+    const subdir_abs = try std.fmt.allocPrint(std.testing.allocator, "{s}/sub/sub2", .{tmp_abs});
+    defer std.testing.allocator.free(subdir_abs);
+
+    const path = try findProjectConfigPath(std.testing.allocator, subdir_abs, null);
+    defer if (path) |p| std.testing.allocator.free(p);
+
+    try std.testing.expect(path != null);
+    const expected = try std.fmt.allocPrint(std.testing.allocator, "{s}/.veer/config.toml", .{tmp_abs});
+    defer std.testing.allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, path.?);
+}
+
+test "findProjectConfigPath returns null when no config up the tree" {
+    // A synthetic absolute path with no .veer/config.toml at any level.
+    // Walk-up traverses dirname components without touching the filesystem
+    // for nonexistent ancestors -- only the candidate file open touches FS.
+    const path = try findProjectConfigPath(
+        std.testing.allocator,
+        "/nonexistent-veer-test-path-aaa/bbb/ccc",
+        null,
+    );
+    defer if (path) |p| std.testing.allocator.free(p);
+    try std.testing.expect(path == null);
+}
+
+test "findProjectConfigPath honors project_dir_hint over cwd walk-up" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath(".veer");
+    var f = try tmp.dir.createFile(".veer/config.toml", .{});
+    f.close();
+
+    const tmp_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(tmp_abs);
+
+    // cwd points at a nonexistent path, so only the hint can produce a hit.
+    const path = try findProjectConfigPath(
+        std.testing.allocator,
+        "/nonexistent-veer-test-path-aaa/bbb/ccc",
+        tmp_abs,
+    );
+    defer if (path) |p| std.testing.allocator.free(p);
+
+    try std.testing.expect(path != null);
+    const expected = try std.fmt.allocPrint(std.testing.allocator, "{s}/.veer/config.toml", .{tmp_abs});
+    defer std.testing.allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, path.?);
+}
+
+test "findProjectConfigPath falls back to walk-up when hint dir has no config" {
+    var hint_tmp = std.testing.tmpDir(.{});
+    defer hint_tmp.cleanup();
+    var cwd_tmp = std.testing.tmpDir(.{});
+    defer cwd_tmp.cleanup();
+
+    try cwd_tmp.dir.makePath(".veer");
+    var f = try cwd_tmp.dir.createFile(".veer/config.toml", .{});
+    f.close();
+
+    const hint_abs = try hint_tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(hint_abs);
+    const cwd_abs = try cwd_tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(cwd_abs);
+
+    const path = try findProjectConfigPath(std.testing.allocator, cwd_abs, hint_abs);
+    defer if (path) |p| std.testing.allocator.free(p);
+
+    try std.testing.expect(path != null);
+    const expected = try std.fmt.allocPrint(std.testing.allocator, "{s}/.veer/config.toml", .{cwd_abs});
+    defer std.testing.allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, path.?);
 }
 
 test "globalConfigPath uses XDG_CONFIG_HOME" {

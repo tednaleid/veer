@@ -110,11 +110,26 @@ fn loadConfig(allocator: std.mem.Allocator, config_path: ?[]const u8) LoadedConf
         };
     } else |err| {
         if (err == error.NoConfigFound) {
-            std.debug.print("veer: no config found. Create .veer/config.toml or run `veer install`.\n", .{});
+            printNoConfigSearchPath(allocator);
+            std.debug.print("Create .veer/config.toml or run `veer install`.\n", .{});
         } else {
             std.debug.print("veer: failed to load config: {}\n", .{err});
         }
         std.process.exit(1);
+    }
+}
+
+/// Print "no .veer/config.toml found" plus the cwd that was searched and
+/// `$CLAUDE_PROJECT_DIR` if it was set. Best-effort: if cwd resolution fails
+/// we still print a useful header.
+fn printNoConfigSearchPath(allocator: std.mem.Allocator) void {
+    std.debug.print("veer: no .veer/config.toml found\n", .{});
+    if (std.fs.cwd().realpathAlloc(allocator, ".")) |cwd| {
+        defer allocator.free(cwd);
+        std.debug.print("  cwd: {s} (walked up to /, no config)\n", .{cwd});
+    } else |_| {}
+    if (std.posix.getenv("CLAUDE_PROJECT_DIR")) |dir| {
+        std.debug.print("  CLAUDE_PROJECT_DIR: {s} (no .veer/config.toml there either)\n", .{dir});
     }
 }
 
@@ -150,8 +165,8 @@ fn loadConfigForCheck(allocator: std.mem.Allocator, config_path: ?[]const u8) Lo
         };
     } else |err| {
         if (err == error.NoConfigFound) {
+            printNoConfigSearchPath(allocator);
             std.debug.print(
-                \\veer: no config at .veer/config.toml
                 \\The veer PreToolUse hook is installed but has no rules loaded, so every Bash
                 \\tool call is being blocked. Fix with:
                 \\  veer install            # create a starter config in this repo

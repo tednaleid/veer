@@ -1,7 +1,7 @@
 default: check
 
-# Run tests + lint + help/no-config/verbose smoke tests
-check: test lint check-help check-no-config check-verbose
+# Run tests + lint + help/no-config/verbose/from-subdir smoke tests
+check: test lint check-help check-no-config check-verbose check-from-subdir
 
 # Run all tests
 test:
@@ -94,6 +94,49 @@ check-verbose:
         && { echo "FAIL: non-verbose rewrite should not emit systemMessage"; echo "got: $out"; exit 1; }
     echo "check-verbose non-verbose-rewrite: PASS"
 
+# Smoke test: cwd in a subdir of a project that has .veer/config.toml.
+# Verifies (1) walk-up discovery from cwd and (2) CLAUDE_PROJECT_DIR honored
+# even when cwd is unrelated. Both paths must produce the configured rewrite.
+check-from-subdir:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    zig build
+    bin="$(pwd)/zig-out/bin/veer"
+    tmp=$(mktemp -d) ; trap 'rm -rf "$tmp"' EXIT
+
+    # Project layout: tmp/.veer/config.toml + tmp/sub/sub2/
+    mkdir -p "$tmp/.veer" "$tmp/sub/sub2"
+    cat > "$tmp/.veer/config.toml" <<'TOML'
+    [[rule]]
+    id = "use-just-test"
+    action = "rewrite"
+    rewrite_to = "just test"
+    [rule.match]
+    command = "pytest"
+    TOML
+
+    # (1) cwd in subdir, no env hint -- walk-up must find it.
+    # env -u CLAUDE_PROJECT_DIR strips any value leaked from an outer
+    # Claude Code session so we exercise the walk-up path cleanly.
+    out=$(cd "$tmp/sub/sub2" && \
+        echo '{"tool_name":"Bash","tool_input":{"command":"pytest tests/"}}' \
+        | env -u CLAUDE_PROJECT_DIR HOME="$tmp" "$bin" check)
+    echo "$out" | grep -q '"updatedInput"' \
+        || { echo "FAIL: walk-up did not produce rewrite"; echo "got: $out"; exit 1; }
+    echo "$out" | grep -q '"command":"just test"' \
+        || { echo "FAIL: walk-up rewrite has wrong target"; echo "got: $out"; exit 1; }
+    echo "check-from-subdir walk-up: PASS"
+
+    # (2) cwd unrelated, CLAUDE_PROJECT_DIR points at the project root.
+    out=$(cd / && \
+        echo '{"tool_name":"Bash","tool_input":{"command":"pytest tests/"}}' \
+        | HOME="$tmp" CLAUDE_PROJECT_DIR="$tmp" "$bin" check)
+    echo "$out" | grep -q '"updatedInput"' \
+        || { echo "FAIL: CLAUDE_PROJECT_DIR did not produce rewrite"; echo "got: $out"; exit 1; }
+    echo "$out" | grep -q '"command":"just test"' \
+        || { echo "FAIL: CLAUDE_PROJECT_DIR rewrite has wrong target"; echo "got: $out"; exit 1; }
+    echo "check-from-subdir CLAUDE_PROJECT_DIR: PASS"
+
 # Smoke test: no config -> exit 2 (reject) with helpful message
 check-no-config:
     #!/usr/bin/env bash
@@ -103,12 +146,15 @@ check-no-config:
     tmp=$(mktemp -d) ; trap 'rm -rf "$tmp"' EXIT
     cd "$tmp"  # no .veer/ here, isolate HOME too
     set +e
+    # env -u CLAUDE_PROJECT_DIR strips any leaked value from an outer Claude
+    # Code session that would otherwise point at a real project with a config.
     echo '{"tool_name":"Bash","tool_input":{"command":"ls -la"}}' \
-        | HOME="$tmp" "$bin" check > stdout.txt 2> stderr.txt
+        | env -u CLAUDE_PROJECT_DIR HOME="$tmp" "$bin" check > stdout.txt 2> stderr.txt
     code=$?
     set -e
     [ "$code" = "2" ] || { echo "FAIL: expected exit 2, got $code"; cat stderr.txt; exit 1; }
-    grep -q "no config" stderr.txt || { echo "FAIL: missing help text"; cat stderr.txt; exit 1; }
+    grep -q "no .veer/config.toml found" stderr.txt || { echo "FAIL: missing 'no config' header"; cat stderr.txt; exit 1; }
+    grep -q "cwd:" stderr.txt || { echo "FAIL: missing cwd in error"; cat stderr.txt; exit 1; }
     echo "check-no-config: PASS"
 
 # Smoke test: --help works for all commands, exits 0, no side effects

@@ -196,11 +196,27 @@ Signals that a veer rule would help:
 When suggesting rules, show the user the exact TOML or `veer add` command,
 then run `veer test` on a representative input to demonstrate.
 
+## Common pitfalls
+
+- **Running tools from a subdirectory.** Claude Code's Bash tool persists
+  cwd between calls -- a chained command ending in `cd assets/foo` shifts
+  cwd for every subsequent tool call (Bash, Read, Edit -- the hook fires
+  for all of them). veer handles this by honoring `$CLAUDE_PROJECT_DIR`
+  (Claude Code sets this for every hook invocation) and by walking up the
+  directory tree from cwd looking for `.veer/config.toml`, the same way
+  git looks for `.git/`. As long as `.veer/config.toml` exists at the
+  project root, the hook works regardless of cwd drift.
+- **No-config error includes the search path.** If you ever see "veer: no
+  .veer/config.toml found", the message prints the absolute cwd that was
+  searched plus `$CLAUDE_PROJECT_DIR` if set -- check both, and put a
+  config at one of them or at any ancestor.
+
 ## Troubleshooting
 
-- **"veer: no config at .veer/config.toml"** -- the hook is installed but
-  has no rules. Run `veer install` to create a starter config, or `veer
-  uninstall` to remove the hook.
+- **"veer: no .veer/config.toml found"** -- the hook is installed but has
+  no rules. The error message prints the cwd that was searched. Run
+  `veer install` to create a starter config, or `veer uninstall` to
+  remove the hook.
 - **Rule doesn't match what you expect** -- run `veer test "<cmd>"` and
   iterate. Matchers operate on the parsed AST, so quoting and compound
   commands sometimes behave differently than they look.
