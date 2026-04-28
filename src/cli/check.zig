@@ -31,7 +31,7 @@ pub fn run(
     };
     defer hook.freeInput(allocator, &input);
 
-    const result = engine.check(allocator, rules, input.tool_name, input.command, store);
+    const result = engine.check(allocator, rules, input.tool_name, input.command, input.content, store);
 
     // Output based on action
     if (result.action) |action| {
@@ -425,6 +425,128 @@ test "verbose rewrite: emits systemMessage alongside updatedInput" {
     try std.testing.expectEqualStrings("allow", hso.object.get("permissionDecision").?.string);
     const cmd = hso.object.get("updatedInput").?.object.get("command").?.string;
     try std.testing.expectEqualStrings("just test", cmd);
+}
+
+test "end-to-end: ExitPlanMode rejected when plan contains 'actually'" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(tmp_root);
+
+    const plan_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/plan.md", .{tmp_root});
+    defer std.testing.allocator.free(plan_path);
+    {
+        const f = try std.fs.cwd().createFile(plan_path, .{});
+        defer f.close();
+        try f.writeAll("# Plan\n\nFirst we do X. Actually, let's do Y instead.\n");
+    }
+
+    const transcript_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/session.jsonl", .{tmp_root});
+    defer std.testing.allocator.free(transcript_path);
+    const transcript_line = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{{\"attachment\":{{\"type\":\"plan_mode\",\"planFilePath\":\"{s}\"}},\"type\":\"attachment\"}}\n",
+        .{plan_path},
+    );
+    defer std.testing.allocator.free(transcript_line);
+    {
+        const f = try std.fs.cwd().createFile(transcript_path, .{});
+        defer f.close();
+        try f.writeAll(transcript_line);
+    }
+
+    const rules = [_]Rule{.{
+        .id = "no-actually-in-plans",
+        .tool = "ExitPlanMode",
+        .message = "Plans must not contain 'actually'.",
+        .match = .{ .content_regex = "[Aa]ctually" },
+    }};
+
+    const input = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{{\"tool_name\":\"ExitPlanMode\",\"tool_input\":{{}},\"transcript_path\":\"{s}\"}}",
+        .{transcript_path},
+    );
+    defer std.testing.allocator.free(input);
+
+    var stdout_buf: [512]u8 = undefined;
+    var stdout_stream = std.io.fixedBufferStream(&stdout_buf);
+    var stderr_buf: [512]u8 = undefined;
+    var stderr_stream = std.io.fixedBufferStream(&stderr_buf);
+
+    const exit_code = try run(
+        std.testing.allocator,
+        &rules,
+        input,
+        null,
+        stdout_stream.writer(),
+        stderr_stream.writer(),
+        false,
+    );
+
+    try std.testing.expectEqual(@as(u8, 2), exit_code);
+    try std.testing.expect(std.mem.indexOf(u8, stderr_stream.getWritten(), "actually") != null);
+}
+
+test "end-to-end: ExitPlanMode allowed when plan is clean" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(tmp_root);
+
+    const plan_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/plan.md", .{tmp_root});
+    defer std.testing.allocator.free(plan_path);
+    {
+        const f = try std.fs.cwd().createFile(plan_path, .{});
+        defer f.close();
+        try f.writeAll("# Plan\n\nStep 1: do X. Step 2: do Y.\n");
+    }
+
+    const transcript_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/session.jsonl", .{tmp_root});
+    defer std.testing.allocator.free(transcript_path);
+    const transcript_line = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{{\"attachment\":{{\"type\":\"plan_mode\",\"planFilePath\":\"{s}\"}},\"type\":\"attachment\"}}\n",
+        .{plan_path},
+    );
+    defer std.testing.allocator.free(transcript_line);
+    {
+        const f = try std.fs.cwd().createFile(transcript_path, .{});
+        defer f.close();
+        try f.writeAll(transcript_line);
+    }
+
+    const rules = [_]Rule{.{
+        .id = "no-actually-in-plans",
+        .tool = "ExitPlanMode",
+        .message = "Plans must not contain 'actually'.",
+        .match = .{ .content_regex = "[Aa]ctually" },
+    }};
+
+    const input = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{{\"tool_name\":\"ExitPlanMode\",\"tool_input\":{{}},\"transcript_path\":\"{s}\"}}",
+        .{transcript_path},
+    );
+    defer std.testing.allocator.free(input);
+
+    var stdout_buf: [512]u8 = undefined;
+    var stdout_stream = std.io.fixedBufferStream(&stdout_buf);
+    var stderr_buf: [512]u8 = undefined;
+    var stderr_stream = std.io.fixedBufferStream(&stderr_buf);
+
+    const exit_code = try run(
+        std.testing.allocator,
+        &rules,
+        input,
+        null,
+        stdout_stream.writer(),
+        stderr_stream.writer(),
+        false,
+    );
+
+    try std.testing.expectEqual(@as(u8, 0), exit_code);
+    try std.testing.expectEqual(@as(usize, 0), stderr_stream.getWritten().len);
 }
 
 test "verbose reject: unchanged (exit 2, stderr message, no stdout)" {

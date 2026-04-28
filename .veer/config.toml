@@ -91,3 +91,17 @@ rewrite_to = "echo \"veer rewrote the probe successfully\""
 [rule.match]
 command = "echo"
 arg = "veer-rewrite-probe"
+
+# Plan-quality rule: reject ExitPlanMode when the plan body contains
+# "actually". The word almost always indicates the agent changed direction
+# mid-plan, leaving the document with a contradiction that confuses whoever
+# implements it. veer locates the plan file via the session's transcript
+# and matches against its body.
+[[rule]]
+id = "no-actually-in-plans"
+name = "Reject plans that contain 'actually'"
+tool = "ExitPlanMode"
+action = "reject"
+message = "Plans must not contain 'actually' -- it usually means you changed direction mid-plan. Rewrite so the plan reads as one coherent direction."
+[rule.match]
+content_regex = "[Aa]ctually"

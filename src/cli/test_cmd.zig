@@ -49,7 +49,7 @@ fn runFile(allocator: std.mem.Allocator, rules: []const Rule, path: []const u8, 
 }
 
 fn checkOne(allocator: std.mem.Allocator, rules: []const Rule, command: []const u8, writer: anytype) !u8 {
-    const result = engine.check(allocator, rules, "Bash", command, null);
+    const result = engine.check(allocator, rules, "Bash", command, null, null);
 
     // TSV: result, return_code, input, id, output
     if (result.action) |action| {

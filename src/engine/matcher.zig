@@ -207,6 +207,50 @@ fn isOnlyCrossField(m: MatchConfig) bool {
     return !hasPerCommandFields(m);
 }
 
+/// Match a rule's content matchers (content_regex, content_contains) against
+/// a string. Used by non-Bash tool rules. Returns true when all configured
+/// content matchers match. If the rule has no content matchers, returns true
+/// (the rule's tool-name match is sufficient on its own).
+///
+/// When the rule has content matchers but `content` is null, returns false:
+/// a content rule cannot match without content to inspect.
+///
+/// Takes an allocator because content (e.g., a plan file) can be larger than
+/// the fixed stack buffer used by the command-line `regexMatch`.
+pub fn matchContent(allocator: std.mem.Allocator, rule: Rule, content: ?[]const u8) bool {
+    const m = rule.match;
+    const has_matchers = m.content_regex != null or m.content_contains != null;
+    if (!has_matchers) return true;
+
+    const text = content orelse return false;
+
+    if (m.content_regex) |pattern| {
+        if (!regexMatchAlloc(allocator, pattern, text)) return false;
+    }
+    if (m.content_contains) |needle| {
+        if (std.mem.indexOf(u8, text, needle) == null) return false;
+    }
+    return true;
+}
+
+/// regexMatch variant that handles arbitrarily-large text via heap allocation.
+/// Used for content matching where the stack-buffer `regexMatch` would
+/// silently bail at >1KB. Patterns are still bounded to 256 bytes since
+/// regex patterns rarely need to be larger.
+fn regexMatchAlloc(allocator: std.mem.Allocator, pattern: []const u8, text: []const u8) bool {
+    var pat_buf: [256]u8 = undefined;
+    if (pattern.len >= pat_buf.len) return false;
+    @memcpy(pat_buf[0..pattern.len], pattern);
+    pat_buf[pattern.len] = 0;
+
+    const txt_buf = allocator.alloc(u8, text.len + 1) catch return false;
+    defer allocator.free(txt_buf);
+    @memcpy(txt_buf[0..text.len], text);
+    txt_buf[text.len] = 0;
+
+    return c.veer_regex_match(&pat_buf, txt_buf.ptr) == 1;
+}
+
 /// Simple glob matching supporting *, ?, and {a,b,c} brace expansion.
 pub fn globMatch(pattern: []const u8, text: []const u8) bool {
     // Handle brace expansion first
@@ -596,6 +640,100 @@ test "flag long glob matching" {
     try std.testing.expect(matchRule(rule, info1) != null);
     try std.testing.expect(matchRule(rule, info2) != null);
     try std.testing.expect(matchRule(rule, info3) == null);
+}
+
+// -- matchContent tests --
+
+test "matchContent: no content matchers returns true (tool-name match suffices)" {
+    const rule = Rule{ .id = "t", .tool = "ExitPlanMode", .message = "m", .match = .{} };
+    try std.testing.expect(matchContent(std.testing.allocator, rule, "any content"));
+    try std.testing.expect(matchContent(std.testing.allocator, rule, null));
+}
+
+test "matchContent: content_contains matches substring" {
+    const rule = Rule{
+        .id = "no-actually",
+        .tool = "ExitPlanMode",
+        .message = "m",
+        .match = .{ .content_contains = "actually" },
+    };
+    try std.testing.expect(matchContent(std.testing.allocator, rule, "the plan actually changed mid-document"));
+    try std.testing.expect(!matchContent(std.testing.allocator, rule, "a clean plan"));
+}
+
+test "matchContent: content_contains is case-sensitive" {
+    const rule = Rule{
+        .id = "t",
+        .tool = "ExitPlanMode",
+        .message = "m",
+        .match = .{ .content_contains = "actually" },
+    };
+    try std.testing.expect(!matchContent(std.testing.allocator, rule, "Actually capitalized"));
+}
+
+test "matchContent: content_regex matches pattern" {
+    const rule = Rule{
+        .id = "t",
+        .tool = "ExitPlanMode",
+        .message = "m",
+        .match = .{ .content_regex = "TODO|FIXME" },
+    };
+    try std.testing.expect(matchContent(std.testing.allocator, rule, "step 1 TODO finish later"));
+    try std.testing.expect(matchContent(std.testing.allocator, rule, "FIXME the auth"));
+    try std.testing.expect(!matchContent(std.testing.allocator, rule, "all done"));
+}
+
+test "matchContent: content_regex case-insensitive via character classes" {
+    const rule = Rule{
+        .id = "t",
+        .tool = "ExitPlanMode",
+        .message = "m",
+        .match = .{ .content_regex = "[Aa]ctually" },
+    };
+    try std.testing.expect(matchContent(std.testing.allocator, rule, "Actually capitalized"));
+    try std.testing.expect(matchContent(std.testing.allocator, rule, "lowercase actually"));
+}
+
+test "matchContent: both matchers must match (AND)" {
+    const rule = Rule{
+        .id = "t",
+        .tool = "ExitPlanMode",
+        .message = "m",
+        .match = .{ .content_contains = "actually", .content_regex = "TODO" },
+    };
+    try std.testing.expect(matchContent(std.testing.allocator, rule, "actually TODO finish"));
+    try std.testing.expect(!matchContent(std.testing.allocator, rule, "actually nothing left"));
+    try std.testing.expect(!matchContent(std.testing.allocator, rule, "TODO without the other word"));
+}
+
+test "matchContent: rule with content matchers but null content does not match" {
+    const rule = Rule{
+        .id = "t",
+        .tool = "ExitPlanMode",
+        .message = "m",
+        .match = .{ .content_contains = "actually" },
+    };
+    try std.testing.expect(!matchContent(std.testing.allocator, rule, null));
+}
+
+test "matchContent: content larger than 1KB still matches (heap allocation)" {
+    // Build a >2KB string with the target word at the end so we exercise the
+    // heap path that the stack-buffer regexMatch would silently fail on.
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    defer buf.deinit(std.testing.allocator);
+    var i: usize = 0;
+    while (i < 300) : (i += 1) {
+        try buf.appendSlice(std.testing.allocator, "lorem ipsum dolor sit amet, ");
+    }
+    try buf.appendSlice(std.testing.allocator, "and then actually we changed direction");
+
+    const rule = Rule{
+        .id = "t",
+        .tool = "ExitPlanMode",
+        .message = "m",
+        .match = .{ .content_regex = "actually" },
+    };
+    try std.testing.expect(matchContent(std.testing.allocator, rule, buf.items));
 }
 
 // -- Fuzz tests --

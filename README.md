@@ -188,6 +188,10 @@ arg_regex = "\\.py$"                  # Regex on positional args
 # Whole-input matching
 raw_regex = "curl.*\\|.*bash"         # Regex against entire command string
 
+# Content matching (non-Bash tools that carry text content; e.g. ExitPlanMode)
+content_regex = "[Aa]ctually"         # POSIX regex against tool content
+content_contains = "TODO"             # Case-sensitive substring
+
 # AST structural matching
 ast = { has_node = "pipeline", min_count = 4 }
 ```
@@ -208,6 +212,8 @@ ast = { has_node = "pipeline", min_count = 4 }
 | `arg_all` | Positional args | AND: all present. |
 | `arg_regex` | Positional args | Regex against positional args. |
 | `raw_regex` | Full command string | POSIX regex against the entire raw input, before parsing. |
+| `content_regex` | Tool text content | POSIX regex against tool content (e.g., the plan body for `ExitPlanMode`). Non-Bash tools only. |
+| `content_contains` | Tool text content | Case-sensitive substring match against tool content. Non-Bash tools only. |
 | `ast` | AST structure | Match node types, depth, or count. For advanced structural patterns. |
 
 Rules are evaluated in definition order. The first matching rule wins. If no rule matches, the tool call is allowed (exit 0, empty output).
@@ -354,6 +360,32 @@ message = "Check if this write is intended before proceeding."
 [rule.match]
 command = "Write"
 ```
+
+### Reject plans that change direction mid-document
+
+`ExitPlanMode` is the tool Claude Code calls to surface a plan for your
+approval. The plan content lives in a file under `~/.claude/plans/`; veer
+locates it via the session's `transcript_path` (which Claude Code passes in
+the hook envelope) and matches `content_regex` / `content_contains` against
+the plan body.
+
+When a plan contains "actually" it usually means the agent reversed itself
+mid-write -- step 3 contradicts step 1. Reject the plan and the agent will
+revise.
+
+```toml
+[[rule]]
+id = "no-actually-in-plans"
+tool = "ExitPlanMode"
+action = "reject"
+message = "Plans must not contain 'actually' -- it usually means you changed direction mid-plan. Rewrite so the plan reads as one coherent direction."
+[rule.match]
+content_regex = "[Aa]ctually"
+```
+
+The same pattern works for other plan-quality rules: ban `TODO` placeholders
+with `content_contains = "TODO"`, ban hedging language with
+`content_regex = "(maybe|might|could)"`, etc.
 
 ## Commands
 

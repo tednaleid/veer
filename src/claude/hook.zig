@@ -2,11 +2,18 @@
 // ABOUTME: Parses stdin JSON and formats output per the hook contract.
 
 const std = @import("std");
+const transcript = @import("transcript.zig");
 
 pub const HookInput = struct {
     tool_name: []const u8,
     command: ?[]const u8, // Extracted from tool_input.command for Bash tools
     session_id: ?[]const u8,
+    transcript_path: ?[]const u8,
+    /// Tool-specific text content for content_regex / content_contains
+    /// matching. For ExitPlanMode, this is the resolved plan file body. Null
+    /// for tools where no content extractor is wired up (or where extraction
+    /// failed -- callers must treat null as "no match" rather than "match").
+    content: ?[]const u8,
 };
 
 pub const ExitCode = struct {
@@ -17,6 +24,7 @@ pub const ExitCode = struct {
 
 /// Parse hook input from a JSON string (read from stdin).
 /// Extracts tool_name and command (for Bash tools) from the JSON.
+/// For ExitPlanMode, also resolves the plan file content via the transcript.
 pub fn parseInput(allocator: std.mem.Allocator, json_str: []const u8) !HookInput {
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_str, .{});
     defer parsed.deinit();
@@ -41,16 +49,55 @@ pub fn parseInput(allocator: std.mem.Allocator, json_str: []const u8) !HookInput
     errdefer if (command) |cmd| allocator.free(cmd);
 
     const session_id: ?[]const u8 = blk: {
-        const val = root.object.get("sessionId") orelse break :blk null;
+        const val = root.object.get("session_id") orelse break :blk null;
         if (val != .string) break :blk null;
         break :blk try allocator.dupe(u8, val.string);
     };
+    errdefer if (session_id) |sid| allocator.free(sid);
+
+    const transcript_path: ?[]const u8 = blk: {
+        const val = root.object.get("transcript_path") orelse break :blk null;
+        if (val != .string) break :blk null;
+        break :blk try allocator.dupe(u8, val.string);
+    };
+    errdefer if (transcript_path) |tp| allocator.free(tp);
+
+    // Tool-specific content extraction. Fail-open: any error producing
+    // content yields null, which the engine treats as "rule does not match"
+    // for content rules. We don't want a transient FS or parse glitch to
+    // block the agent from making progress.
+    const content: ?[]const u8 = if (std.mem.eql(u8, tool_name, "ExitPlanMode")) blk: {
+        const tp = transcript_path orelse break :blk null;
+        break :blk resolveExitPlanModeContent(allocator, tp) catch null;
+    } else null;
 
     return .{
         .tool_name = tool_name,
         .command = command,
         .session_id = session_id,
+        .transcript_path = transcript_path,
+        .content = content,
     };
+}
+
+/// Read the transcript at `transcript_path`, locate the most recent
+/// plan_mode attachment, then read and return that plan file's contents.
+/// Returns null on any I/O or parse failure.
+fn resolveExitPlanModeContent(allocator: std.mem.Allocator, transcript_path: []const u8) !?[]u8 {
+    const transcript_content = readFileBounded(allocator, transcript_path, 64 * 1024 * 1024) catch return null;
+    defer allocator.free(transcript_content);
+
+    const plan_path_opt = transcript.findLatestPlanFilePath(allocator, transcript_content) catch null;
+    const plan_path = plan_path_opt orelse return null;
+    defer allocator.free(plan_path);
+
+    return readFileBounded(allocator, plan_path, 4 * 1024 * 1024) catch null;
+}
+
+fn readFileBounded(allocator: std.mem.Allocator, path: []const u8, max_bytes: usize) ![]u8 {
+    const f = try std.fs.cwd().openFile(path, .{});
+    defer f.close();
+    return try f.readToEndAlloc(allocator, max_bytes);
 }
 
 /// Free a HookInput's owned strings.
@@ -58,6 +105,8 @@ pub fn freeInput(allocator: std.mem.Allocator, input: *HookInput) void {
     allocator.free(input.tool_name);
     if (input.command) |cmd| allocator.free(cmd);
     if (input.session_id) |sid| allocator.free(sid);
+    if (input.transcript_path) |tp| allocator.free(tp);
+    if (input.content) |c| allocator.free(c);
 }
 
 /// Format a rewrite result for stdout using the modern hook response envelope.
@@ -121,7 +170,7 @@ fn writeJsonString(writer: anytype, str: []const u8) !void {
 
 test "parseInput Bash tool with command" {
     const json =
-        \\{"tool_name":"Bash","tool_input":{"command":"pytest tests/"},"sessionId":"abc-123"}
+        \\{"tool_name":"Bash","tool_input":{"command":"pytest tests/"},"session_id":"abc-123"}
     ;
     var input = try parseInput(std.testing.allocator, json);
     defer freeInput(std.testing.allocator, &input);
@@ -140,6 +189,87 @@ test "parseInput non-Bash tool" {
 
     try std.testing.expectEqualStrings("Write", input.tool_name);
     try std.testing.expect(input.command == null);
+    try std.testing.expect(input.content == null);
+}
+
+test "parseInput extracts transcript_path" {
+    const json =
+        \\{"tool_name":"Bash","tool_input":{"command":"ls"},"transcript_path":"/tmp/session.jsonl"}
+    ;
+    var input = try parseInput(std.testing.allocator, json);
+    defer freeInput(std.testing.allocator, &input);
+
+    try std.testing.expectEqualStrings("/tmp/session.jsonl", input.transcript_path.?);
+    // Bash tool: content is not extracted regardless of transcript_path
+    try std.testing.expect(input.content == null);
+}
+
+test "parseInput resolves ExitPlanMode plan content from transcript" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(tmp_root);
+
+    // Write a fake plan file
+    const plan_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/plan.md", .{tmp_root});
+    defer std.testing.allocator.free(plan_path);
+    {
+        const f = try std.fs.cwd().createFile(plan_path, .{});
+        defer f.close();
+        try f.writeAll("# Plan\n\nWe will do X but actually let's do Y.\n");
+    }
+
+    // Write a transcript that references that plan path
+    const transcript_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/session.jsonl", .{tmp_root});
+    defer std.testing.allocator.free(transcript_path);
+    const transcript_line = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{{\"attachment\":{{\"type\":\"plan_mode\",\"planFilePath\":\"{s}\"}},\"type\":\"attachment\"}}\n",
+        .{plan_path},
+    );
+    defer std.testing.allocator.free(transcript_line);
+    {
+        const f = try std.fs.cwd().createFile(transcript_path, .{});
+        defer f.close();
+        try f.writeAll(transcript_line);
+    }
+
+    // Build the hook input pointing at our fake transcript
+    const json = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{{\"tool_name\":\"ExitPlanMode\",\"tool_input\":{{}},\"transcript_path\":\"{s}\"}}",
+        .{transcript_path},
+    );
+    defer std.testing.allocator.free(json);
+
+    var input = try parseInput(std.testing.allocator, json);
+    defer freeInput(std.testing.allocator, &input);
+
+    try std.testing.expectEqualStrings("ExitPlanMode", input.tool_name);
+    try std.testing.expect(input.content != null);
+    try std.testing.expect(std.mem.indexOf(u8, input.content.?, "actually") != null);
+}
+
+test "parseInput ExitPlanMode with missing transcript_path leaves content null" {
+    const json =
+        \\{"tool_name":"ExitPlanMode","tool_input":{}}
+    ;
+    var input = try parseInput(std.testing.allocator, json);
+    defer freeInput(std.testing.allocator, &input);
+
+    try std.testing.expectEqualStrings("ExitPlanMode", input.tool_name);
+    try std.testing.expect(input.content == null);
+}
+
+test "parseInput ExitPlanMode with non-existent transcript path leaves content null" {
+    const json =
+        \\{"tool_name":"ExitPlanMode","tool_input":{},"transcript_path":"/nonexistent/transcript.jsonl"}
+    ;
+    var input = try parseInput(std.testing.allocator, json);
+    defer freeInput(std.testing.allocator, &input);
+
+    try std.testing.expect(input.content == null);
+    try std.testing.expectEqualStrings("/nonexistent/transcript.jsonl", input.transcript_path.?);
 }
 
 test "parseInput missing tool_name fails" {

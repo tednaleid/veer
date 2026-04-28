@@ -37,6 +37,11 @@ pub const MatchConfig = struct {
     // Whole-input matching (before parsing)
     raw_regex: ?[]const u8 = null,
 
+    // Content matching (for non-Bash tools that carry text content -- e.g.
+    // ExitPlanMode plan body). Both AND together when set on the same rule.
+    content_regex: ?[]const u8 = null,
+    content_contains: ?[]const u8 = null,
+
     // AST structural matching
     ast: ?AstMatch = null,
 };
@@ -121,6 +126,8 @@ fn hasAnyMatch(m: MatchConfig) bool {
         m.arg_all != null or
         m.arg_regex != null or
         m.raw_regex != null or
+        m.content_regex != null or
+        m.content_contains != null or
         m.ast != null;
 }
 
@@ -276,6 +283,8 @@ test "hasAnyMatch with each field type" {
         MatchConfig{ .arg_all = &.{"x"} },
         MatchConfig{ .arg_regex = "x" },
         MatchConfig{ .raw_regex = "x" },
+        MatchConfig{ .content_regex = "x" },
+        MatchConfig{ .content_contains = "x" },
         MatchConfig{ .ast = .{} },
     };
     inline for (cases) |m| {
@@ -283,4 +292,24 @@ test "hasAnyMatch with each field type" {
     }
     // Empty match should fail
     try std.testing.expect(!hasAnyMatch(MatchConfig{}));
+}
+
+test "content_contains alone is a valid match" {
+    const rules = [_]Rule{.{
+        .id = "no-actually-in-plans",
+        .tool = "ExitPlanMode",
+        .message = "Plans should not contain 'actually'.",
+        .match = .{ .content_contains = "actually" },
+    }};
+    try validate(&rules);
+}
+
+test "content_regex alone is a valid match" {
+    const rules = [_]Rule{.{
+        .id = "no-todo-in-plans",
+        .tool = "ExitPlanMode",
+        .message = "Plans should not contain TODO placeholders.",
+        .match = .{ .content_regex = "TODO|FIXME" },
+    }};
+    try validate(&rules);
 }
