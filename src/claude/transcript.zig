@@ -158,8 +158,26 @@ const ToolUseInfo = struct {
 /// distinguishes rewrite from allow).
 ///
 /// Caller frees via `freeHookEvents`.
+///
+/// Performance: three layers of pre-filtering avoid the dominant cost
+/// (full JSON parse of every line in every transcript) for files that
+/// contain little or no veer activity.
+///   1. File-level: if the content lacks the literal "PreToolUse" hookEvent
+///      marker, return empty without parsing anything. Most ~/.claude/projects
+///      transcripts pre-date veer install and fall into this bucket.
+///   2. Line-level: only parse JSON for lines containing "tool_use" or
+///      "hook_success". User/assistant prose lines are skipped for free.
+///   3. Single-pass: build the toolUseID index AND collect raw hook records
+///      in one walk, resolving commands at the end via cheap hash lookups.
 pub fn extractHookEvents(allocator: std.mem.Allocator, content: []const u8) !std.ArrayListUnmanaged(HookEvent) {
-    // Pass 1: index tool_use blocks by their id.
+    var events = std.ArrayListUnmanaged(HookEvent).empty;
+    errdefer freeHookEvents(allocator, &events);
+
+    // File-level fast-skip: no PreToolUse marker means no relevant events.
+    if (std.mem.indexOf(u8, content, "\"hookEvent\":\"PreToolUse\"") == null) {
+        return events;
+    }
+
     var tool_uses = std.StringHashMapUnmanaged(ToolUseInfo){};
     defer {
         var it = tool_uses.iterator();
@@ -171,132 +189,174 @@ pub fn extractHookEvents(allocator: std.mem.Allocator, content: []const u8) !std
         tool_uses.deinit(allocator);
     }
 
-    var lines1 = std.mem.splitScalar(u8, content, '\n');
-    while (lines1.next()) |line| {
-        if (line.len == 0) continue;
-        const parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch continue;
-        defer parsed.deinit();
-        const root = parsed.value;
-        if (root != .object) continue;
-
-        const message = root.object.get("message") orelse continue;
-        if (message != .object) continue;
-        const content_arr = message.object.get("content") orelse continue;
-        if (content_arr != .array) continue;
-
-        for (content_arr.array.items) |block| {
-            if (block != .object) continue;
-            const block_type = getStr(block, "type") orelse continue;
-            if (!std.mem.eql(u8, block_type, "tool_use")) continue;
-
-            const id = getStr(block, "id") orelse continue;
-            const name = getStr(block, "name");
-            var cmd: ?[]const u8 = null;
-            if (block.object.get("input")) |input_val| {
-                if (input_val == .object) {
-                    cmd = getStr(input_val, "command");
-                }
-            }
-
-            const id_owned = try allocator.dupe(u8, id);
-            const info = ToolUseInfo{
-                .name = if (name) |n| try allocator.dupe(u8, n) else null,
-                .command = if (cmd) |c| try allocator.dupe(u8, c) else null,
-            };
-            const gop = try tool_uses.getOrPut(allocator, id_owned);
-            if (gop.found_existing) {
-                allocator.free(id_owned);
-                if (info.name) |n| allocator.free(n);
-                if (info.command) |c| allocator.free(c);
-            } else {
-                gop.value_ptr.* = info;
-            }
+    // Pending hook events: collected with their toolUseID, command resolved
+    // at the end against the now-complete tool_uses index. This handles the
+    // (rare) case of out-of-order writes where a hook_success line appears
+    // before its referenced tool_use line.
+    const PendingEvent = struct {
+        timestamp_ms: i64,
+        session_id: ?[]u8,
+        tool_use_id: ?[]u8,
+        tool_name: ?[]u8,
+        exit_code: i32,
+        duration_ms: u64,
+        rule_id: ?[]u8,
+        action: Action,
+    };
+    var pending = std.ArrayListUnmanaged(PendingEvent).empty;
+    defer {
+        for (pending.items) |p| {
+            if (p.session_id) |s| allocator.free(s);
+            if (p.tool_use_id) |t| allocator.free(t);
+            if (p.tool_name) |n| allocator.free(n);
+            if (p.rule_id) |r| allocator.free(r);
         }
+        pending.deinit(allocator);
     }
 
-    // Pass 2: collect hook_success attachments matching PreToolUse.
-    var events = std.ArrayListUnmanaged(HookEvent).empty;
-    errdefer freeHookEvents(allocator, &events);
-
-    var lines2 = std.mem.splitScalar(u8, content, '\n');
-    while (lines2.next()) |line| {
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |line| {
         if (line.len == 0) continue;
+
+        // Line-level fast-skip: only parse JSON for lines that could carry
+        // a tool_use block or a hook_success attachment. Prose lines (user
+        // messages, assistant text) miss both substrings and are free.
+        const has_tool_use = std.mem.indexOf(u8, line, "\"tool_use\"") != null;
+        const has_hook = std.mem.indexOf(u8, line, "\"hook_success\"") != null;
+        if (!has_tool_use and !has_hook) continue;
+
         const parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch continue;
         defer parsed.deinit();
         const root = parsed.value;
         if (root != .object) continue;
 
-        const attachment = root.object.get("attachment") orelse continue;
-        if (attachment != .object) continue;
+        if (has_tool_use) try indexToolUses(allocator, root, &tool_uses);
+        if (has_hook) try collectHookEvent(allocator, root, &pending, PendingEvent);
+    }
 
-        const att_type = getStr(attachment, "type") orelse continue;
-        if (!std.mem.eql(u8, att_type, "hook_success")) continue;
-        const hook_event_name = getStr(attachment, "hookEvent") orelse continue;
-        if (!std.mem.eql(u8, hook_event_name, "PreToolUse")) continue;
-
-        const exit_code: i32 = blk: {
-            const v = attachment.object.get("exitCode") orelse break :blk 0;
-            if (v != .integer) break :blk 0;
-            break :blk @intCast(v.integer);
-        };
-        const duration_ms: u64 = blk: {
-            const v = attachment.object.get("durationMs") orelse break :blk 0;
-            if (v != .integer) break :blk 0;
-            const i = v.integer;
-            break :blk if (i < 0) 0 else @intCast(i);
-        };
-
-        const stdout_str = getStr(attachment, "stdout") orelse "";
-        const tool_use_id = getStr(attachment, "toolUseID");
-        const hook_name = getStr(attachment, "hookName"); // "PreToolUse:Bash"
-
-        // Tool name comes from "PreToolUse:<name>" -- simpler than joining via
-        // tool_use_id, and works even if the tool_use line is missing.
-        const tool_name: ?[]const u8 = blk: {
-            const hn = hook_name orelse break :blk null;
-            const colon = std.mem.indexOfScalar(u8, hn, ':') orelse break :blk hn;
-            break :blk hn[colon + 1 ..];
-        };
-
-        // Command via tool_use lookup (Bash only carries this).
+    // Resolution pass: hash-lookup commands and finalize HookEvents.
+    for (pending.items) |p| {
         const command: ?[]const u8 = blk: {
-            const tu_id = tool_use_id orelse break :blk null;
+            const tu_id = p.tool_use_id orelse break :blk null;
             const info = tool_uses.get(tu_id) orelse break :blk null;
             break :blk info.command;
         };
-
-        // Action: exit_code 2 -> reject. Otherwise check stdout for
-        // hookSpecificOutput.updatedInput to distinguish rewrite from allow.
-        const action: Action = if (exit_code == 2)
-            .reject
-        else blk: {
-            if (stdoutHasUpdatedInput(allocator, stdout_str)) break :blk .rewrite;
-            break :blk .allow;
-        };
-
-        // Parse [<rule_id>] from stdout systemMessage prefix.
-        const rule_id = parseRuleIdFromStdout(allocator, stdout_str);
-
-        const session_id = getStr(root, "sessionId");
-        const timestamp_ms: i64 = blk: {
-            const ts = getStr(root, "timestamp") orelse break :blk 0;
-            break :blk parseIso8601Millis(ts);
-        };
-
         try events.append(allocator, .{
-            .timestamp_ms = timestamp_ms,
-            .session_id = if (session_id) |s| try allocator.dupe(u8, s) else null,
-            .tool_use_id = if (tool_use_id) |t| try allocator.dupe(u8, t) else null,
-            .tool_name = if (tool_name) |n| try allocator.dupe(u8, n) else null,
+            .timestamp_ms = p.timestamp_ms,
+            .session_id = if (p.session_id) |s| try allocator.dupe(u8, s) else null,
+            .tool_use_id = if (p.tool_use_id) |t| try allocator.dupe(u8, t) else null,
+            .tool_name = if (p.tool_name) |n| try allocator.dupe(u8, n) else null,
             .command = if (command) |c| try allocator.dupe(u8, c) else null,
-            .exit_code = exit_code,
-            .duration_ms = duration_ms,
-            .rule_id = rule_id,
-            .action = action,
+            .exit_code = p.exit_code,
+            .duration_ms = p.duration_ms,
+            .rule_id = if (p.rule_id) |r| try allocator.dupe(u8, r) else null,
+            .action = p.action,
         });
     }
 
     return events;
+}
+
+/// Walk a parsed JSON line's `message.content[]` array and add any tool_use
+/// blocks to the index. Idempotent on duplicate ids.
+fn indexToolUses(
+    allocator: std.mem.Allocator,
+    root: std.json.Value,
+    tool_uses: *std.StringHashMapUnmanaged(ToolUseInfo),
+) !void {
+    const message = root.object.get("message") orelse return;
+    if (message != .object) return;
+    const content_arr = message.object.get("content") orelse return;
+    if (content_arr != .array) return;
+
+    for (content_arr.array.items) |block| {
+        if (block != .object) continue;
+        const block_type = getStr(block, "type") orelse continue;
+        if (!std.mem.eql(u8, block_type, "tool_use")) continue;
+
+        const id = getStr(block, "id") orelse continue;
+        const name = getStr(block, "name");
+        var cmd: ?[]const u8 = null;
+        if (block.object.get("input")) |input_val| {
+            if (input_val == .object) cmd = getStr(input_val, "command");
+        }
+
+        const id_owned = try allocator.dupe(u8, id);
+        const info = ToolUseInfo{
+            .name = if (name) |n| try allocator.dupe(u8, n) else null,
+            .command = if (cmd) |c| try allocator.dupe(u8, c) else null,
+        };
+        const gop = try tool_uses.getOrPut(allocator, id_owned);
+        if (gop.found_existing) {
+            allocator.free(id_owned);
+            if (info.name) |n| allocator.free(n);
+            if (info.command) |c| allocator.free(c);
+        } else {
+            gop.value_ptr.* = info;
+        }
+    }
+}
+
+/// If the parsed line is a PreToolUse hook_success attachment, append a
+/// pending event (command resolved later via toolUseID lookup).
+fn collectHookEvent(
+    allocator: std.mem.Allocator,
+    root: std.json.Value,
+    pending: anytype,
+    comptime PendingEvent: type,
+) !void {
+    const attachment = root.object.get("attachment") orelse return;
+    if (attachment != .object) return;
+    const att_type = getStr(attachment, "type") orelse return;
+    if (!std.mem.eql(u8, att_type, "hook_success")) return;
+    const hook_event_name = getStr(attachment, "hookEvent") orelse return;
+    if (!std.mem.eql(u8, hook_event_name, "PreToolUse")) return;
+
+    const exit_code: i32 = blk: {
+        const v = attachment.object.get("exitCode") orelse break :blk 0;
+        if (v != .integer) break :blk 0;
+        break :blk @intCast(v.integer);
+    };
+    const duration_ms: u64 = blk: {
+        const v = attachment.object.get("durationMs") orelse break :blk 0;
+        if (v != .integer) break :blk 0;
+        const i = v.integer;
+        break :blk if (i < 0) 0 else @intCast(i);
+    };
+
+    const stdout_str = getStr(attachment, "stdout") orelse "";
+    const tool_use_id = getStr(attachment, "toolUseID");
+    const hook_name = getStr(attachment, "hookName");
+    const tool_name: ?[]const u8 = blk: {
+        const hn = hook_name orelse break :blk null;
+        const colon = std.mem.indexOfScalar(u8, hn, ':') orelse break :blk hn;
+        break :blk hn[colon + 1 ..];
+    };
+
+    const action: Action = if (exit_code == 2)
+        .reject
+    else blk: {
+        if (stdoutHasUpdatedInput(allocator, stdout_str)) break :blk .rewrite;
+        break :blk .allow;
+    };
+
+    const rule_id = parseRuleIdFromStdout(allocator, stdout_str);
+    const session_id = getStr(root, "sessionId");
+    const timestamp_ms: i64 = blk: {
+        const ts = getStr(root, "timestamp") orelse break :blk 0;
+        break :blk parseIso8601Millis(ts);
+    };
+
+    try pending.append(allocator, PendingEvent{
+        .timestamp_ms = timestamp_ms,
+        .session_id = if (session_id) |s| try allocator.dupe(u8, s) else null,
+        .tool_use_id = if (tool_use_id) |t| try allocator.dupe(u8, t) else null,
+        .tool_name = if (tool_name) |n| try allocator.dupe(u8, n) else null,
+        .exit_code = exit_code,
+        .duration_ms = duration_ms,
+        .rule_id = rule_id,
+        .action = action,
+    });
 }
 
 pub fn freeHookEvents(allocator: std.mem.Allocator, events: *std.ArrayListUnmanaged(HookEvent)) void {
@@ -324,7 +384,7 @@ fn stdoutHasUpdatedInput(allocator: std.mem.Allocator, stdout_str: []const u8) b
 
 /// Parse the leading `[<rule_id>] ` token from the systemMessage in the
 /// hook stdout, if present. Returns an owned slice (caller frees) or null.
-fn parseRuleIdFromStdout(allocator: std.mem.Allocator, stdout_str: []const u8) ?[]const u8 {
+fn parseRuleIdFromStdout(allocator: std.mem.Allocator, stdout_str: []const u8) ?[]u8 {
     if (stdout_str.len == 0) return null;
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, stdout_str, .{}) catch return null;
     defer parsed.deinit();
@@ -567,6 +627,19 @@ test "extractHookEvents joins hook_success with linked tool_use block" {
     try std.testing.expectEqualStrings("ExitPlanMode", reject_e.tool_name.?);
     try std.testing.expect(reject_e.command == null);
     try std.testing.expectEqual(@as(i32, 2), reject_e.exit_code);
+}
+
+test "extractHookEvents fast-skips files lacking the PreToolUse marker" {
+    // Files predating veer install (no hook_success entries at all) should
+    // return empty without paying the cost of full JSON parsing.
+    const content =
+        \\{"type":"user","message":{"role":"user","content":"hi"}}
+        \\{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}
+        \\{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"Read","input":{"file_path":"/tmp/x"}}]}}
+    ;
+    var events = try extractHookEvents(std.testing.allocator, content);
+    defer freeHookEvents(std.testing.allocator, &events);
+    try std.testing.expectEqual(@as(usize, 0), events.items.len);
 }
 
 test "extractHookEvents returns empty when no PreToolUse entries" {
