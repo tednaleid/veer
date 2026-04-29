@@ -101,9 +101,6 @@ test "remove existing rule" {
 
     // Write a config with two rules
     const config_content =
-        \\[settings]
-        \\stats = true
-        \\
         \\[[rule]]
         \\id = "keep-this"
         \\name = "Keep"
@@ -148,7 +145,7 @@ test "remove nonexistent rule fails" {
     defer std.testing.allocator.free(config_path);
 
     const file = try std.fs.cwd().createFile(config_path, .{});
-    try file.writeAll("[settings]\nstats = true\n");
+    try file.writeAll("[settings]\nlog_level = \"warn\"\n");
     file.close();
 
     var buf: [512]u8 = undefined;

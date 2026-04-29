@@ -123,11 +123,16 @@ pub fn freeInput(allocator: std.mem.Allocator, input: *HookInput) void {
 /// When system_message is non-null, a top-level `systemMessage` is prepended
 /// so the user sees the transformation in the transcript (the LLM does not):
 ///   {"systemMessage":"...","hookSpecificOutput":{...}}
-pub fn formatRewrite(writer: anytype, rewrite_to: []const u8, system_message: ?[]const u8) !void {
+///
+/// When rule_id is non-null, the systemMessage is prefixed with `[<rule_id>] `
+/// so the transcript is self-describing -- downstream tools (`veer stats`)
+/// parse this prefix to attribute hook fires to specific rules. If
+/// system_message is null, rule_id is ignored (no banner to prefix).
+pub fn formatRewrite(writer: anytype, rewrite_to: []const u8, system_message: ?[]const u8, rule_id: ?[]const u8) !void {
     try writer.writeAll("{");
     if (system_message) |msg| {
         try writer.writeAll("\"systemMessage\":");
-        try writeJsonString(writer, msg);
+        try writePrefixedJsonString(writer, msg, rule_id);
         try writer.writeAll(",");
     }
     try writer.writeAll("\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",");
@@ -139,17 +144,51 @@ pub fn formatRewrite(writer: anytype, rewrite_to: []const u8, system_message: ?[
 
 /// Format an allow result for stdout. Only emitted when verbose mode is on;
 /// non-verbose allow writes nothing.
-/// Output: {"systemMessage":"<message>"}
-pub fn formatAllow(writer: anytype, system_message: []const u8) !void {
+/// Output: {"systemMessage":"[<rule_id>] <message>"} if rule_id set,
+///         {"systemMessage":"<message>"} otherwise.
+pub fn formatAllow(writer: anytype, system_message: []const u8, rule_id: ?[]const u8) !void {
     try writer.writeAll("{\"systemMessage\":");
-    try writeJsonString(writer, system_message);
+    try writePrefixedJsonString(writer, system_message, rule_id);
     try writer.writeAll("}");
+}
+
+/// Format a reject systemMessage for stdout (paired with stderr message).
+/// Even on exit 2, Claude Code captures stdout into the transcript's
+/// hook_success record, so emitting a marker line keeps rejects discoverable
+/// via the same `[<rule_id>] ` prefix grammar as allows/rewrites.
+/// Output: {"systemMessage":"[<rule_id>] reject"}
+pub fn formatRejectMarker(writer: anytype, rule_id: []const u8) !void {
+    try writer.writeAll("{\"systemMessage\":\"[");
+    try writeJsonEscaped(writer, rule_id);
+    try writer.writeAll("] reject\"}");
+}
+
+/// Write a JSON string (with surrounding quotes), optionally prefixed by
+/// `[<rule_id>] `. Used so the prefix lands inside the JSON-quoted form.
+fn writePrefixedJsonString(writer: anytype, str: []const u8, rule_id: ?[]const u8) !void {
+    if (rule_id) |id| {
+        try writer.writeByte('"');
+        try writer.writeByte('[');
+        try writeJsonEscaped(writer, id);
+        try writer.writeAll("] ");
+        try writeJsonEscaped(writer, str);
+        try writer.writeByte('"');
+    } else {
+        try writeJsonString(writer, str);
+    }
 }
 
 /// Write a JSON-encoded string (including surrounding quotes).
 /// Escapes the characters JSON requires: `"`, `\`, and control chars < 0x20.
 fn writeJsonString(writer: anytype, str: []const u8) !void {
     try writer.writeByte('"');
+    try writeJsonEscaped(writer, str);
+    try writer.writeByte('"');
+}
+
+/// Write JSON-escaped chars only (no surrounding quotes). Lets callers
+/// concatenate multiple escaped fragments inside a single quoted string.
+fn writeJsonEscaped(writer: anytype, str: []const u8) !void {
     for (str) |c| {
         switch (c) {
             '"' => try writer.writeAll("\\\""),
@@ -163,7 +202,6 @@ fn writeJsonString(writer: anytype, str: []const u8) !void {
             else => try writer.writeByte(c),
         }
     }
-    try writer.writeByte('"');
 }
 
 // -- Tests --
@@ -286,7 +324,7 @@ test "parseInput invalid JSON fails" {
 test "formatRewrite produces modern hookSpecificOutput envelope" {
     var buf: [256]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    try formatRewrite(stream.writer(), "just test", null);
+    try formatRewrite(stream.writer(), "just test", null, null);
     const output = stream.getWritten();
     try std.testing.expectEqualStrings(
         "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\"," ++
@@ -299,7 +337,7 @@ test "formatRewrite produces modern hookSpecificOutput envelope" {
 test "formatRewrite with systemMessage prepends top-level field" {
     var buf: [256]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    try formatRewrite(stream.writer(), "just test", "`pytest` -> `just test`");
+    try formatRewrite(stream.writer(), "just test", "`pytest` -> `just test`", null);
     const output = stream.getWritten();
     try std.testing.expectEqualStrings(
         "{\"systemMessage\":\"`pytest` -> `just test`\"," ++
@@ -315,7 +353,7 @@ test "formatRewrite escapes quotes and backslashes in both fields" {
     var stream = std.io.fixedBufferStream(&buf);
     // Both fields must be escaped; otherwise a command containing `"` or `\`
     // would produce invalid JSON.
-    try formatRewrite(stream.writer(), "echo \"hi\"", "`x\\y`");
+    try formatRewrite(stream.writer(), "echo \"hi\"", "`x\\y`", null);
     const output = stream.getWritten();
     // Output must be valid JSON, and updatedInput.command must round-trip.
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, output, .{});
@@ -333,7 +371,7 @@ test "formatRewrite escapes quotes and backslashes in both fields" {
 test "formatAllow produces systemMessage-only JSON" {
     var buf: [256]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    try formatAllow(stream.writer(), "veer: Read");
+    try formatAllow(stream.writer(), "veer: Read", null);
     const output = stream.getWritten();
     try std.testing.expectEqualStrings("{\"systemMessage\":\"veer: Read\"}", output);
 }
@@ -341,7 +379,7 @@ test "formatAllow produces systemMessage-only JSON" {
 test "formatAllow escapes control characters" {
     var buf: [256]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    try formatAllow(stream.writer(), "veer: Bash `echo\nhi`");
+    try formatAllow(stream.writer(), "veer: Bash `echo\nhi`", null);
     const output = stream.getWritten();
     try std.testing.expectEqualStrings("{\"systemMessage\":\"veer: Bash `echo\\nhi`\"}", output);
     // Parse round-trip.
@@ -349,6 +387,84 @@ test "formatAllow escapes control characters" {
     defer parsed.deinit();
     try std.testing.expectEqualStrings(
         "veer: Bash `echo\nhi`",
+        parsed.value.object.get("systemMessage").?.string,
+    );
+}
+
+test "formatRewrite with rule_id prefixes systemMessage" {
+    var buf: [256]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    try formatRewrite(stream.writer(), "just test", "`pytest` -> `just test`", "use-just-test");
+    const output = stream.getWritten();
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, output, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(
+        "[use-just-test] `pytest` -> `just test`",
+        parsed.value.object.get("systemMessage").?.string,
+    );
+    // Rewrite envelope unchanged.
+    const cmd = parsed.value.object.get("hookSpecificOutput").?.object.get("updatedInput").?.object.get("command").?.string;
+    try std.testing.expectEqualStrings("just test", cmd);
+}
+
+test "formatRewrite with null rule_id leaves systemMessage unprefixed" {
+    var buf: [256]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    try formatRewrite(stream.writer(), "just test", "`pytest` -> `just test`", null);
+    const output = stream.getWritten();
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, output, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(
+        "`pytest` -> `just test`",
+        parsed.value.object.get("systemMessage").?.string,
+    );
+}
+
+test "formatAllow with rule_id prefixes message" {
+    var buf: [256]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    try formatAllow(stream.writer(), "`ls -la`", "use-just-test");
+    const output = stream.getWritten();
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, output, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(
+        "[use-just-test] `ls -la`",
+        parsed.value.object.get("systemMessage").?.string,
+    );
+}
+
+test "formatAllow with null rule_id leaves message unprefixed" {
+    var buf: [256]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    try formatAllow(stream.writer(), "`ls -la`", null);
+    const output = stream.getWritten();
+    try std.testing.expectEqualStrings("{\"systemMessage\":\"`ls -la`\"}", output);
+}
+
+test "formatRejectMarker emits parseable systemMessage with rule_id prefix" {
+    var buf: [256]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    try formatRejectMarker(stream.writer(), "no-curl-pipe-shell");
+    const output = stream.getWritten();
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, output, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(
+        "[no-curl-pipe-shell] reject",
+        parsed.value.object.get("systemMessage").?.string,
+    );
+}
+
+test "formatRejectMarker escapes special characters in rule_id" {
+    var buf: [256]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    // Pathological but legal-ish rule id with a quote (validation should catch
+    // this earlier, but the writer must still produce valid JSON).
+    try formatRejectMarker(stream.writer(), "weird\"id");
+    const output = stream.getWritten();
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, output, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(
+        "[weird\"id] reject",
         parsed.value.object.get("systemMessage").?.string,
     );
 }

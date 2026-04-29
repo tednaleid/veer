@@ -17,7 +17,6 @@ const scan_cmd = @import("cli/scan.zig");
 const test_cmd = @import("cli/test_cmd.zig");
 const validate_cmd = @import("cli/validate_cmd.zig");
 const settings_mod = @import("claude/settings.zig");
-const SqliteStore = @import("store/sqlite_store.zig").SqliteStore;
 
 const Command = enum { check, install, uninstall, list, add, remove, stats, scan, @"test", validate };
 
@@ -180,21 +179,6 @@ fn loadConfigForCheck(allocator: std.mem.Allocator, config_path: ?[]const u8) Lo
     }
 }
 
-/// Create a heap-allocated SqliteStore. Returns null on any failure.
-fn initStore(allocator: std.mem.Allocator) ?*SqliteStore {
-    const s = allocator.create(SqliteStore) catch return null;
-    s.* = SqliteStore.init(".veer/veer.db") catch {
-        allocator.destroy(s);
-        return null;
-    };
-    s.start() catch {
-        s.close();
-        allocator.destroy(s);
-        return null;
-    };
-    return s;
-}
-
 /// Handle a subcommand parse error by reporting it and exiting nonzero.
 fn subcommandParseFail(diag: *clap.Diagnostic, err: anyerror, name: []const u8) noreturn {
     diag.reportToFile(.stderr(), err) catch {};
@@ -249,19 +233,6 @@ fn runCheck(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void 
     defer if (loaded.parsed_file) |*pf| pf.deinit();
     defer if (loaded.merged) |*m| m.deinit(allocator);
 
-    // Wire SqliteStore if stats enabled (heap-allocated for stable thread pointer)
-    var sqlite_store: ?*SqliteStore = null;
-    defer if (sqlite_store) |s| {
-        s.close();
-        allocator.destroy(s);
-    };
-
-    if (loaded.settings.stats) {
-        sqlite_store = initStore(allocator);
-    }
-
-    const store = if (sqlite_store) |s| s.store() else null;
-
     const stdin_data = std.fs.File.stdin().readToEndAlloc(allocator, 1024 * 1024) catch {
         std.debug.print("veer: failed to read stdin\n", .{});
         std.process.exit(1);
@@ -277,7 +248,6 @@ fn runCheck(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void 
         allocator,
         loaded.rules,
         stdin_data,
-        store,
         stdout_stream.writer(),
         stderr_stream.writer(),
         verbose,
@@ -285,13 +255,6 @@ fn runCheck(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void 
         std.debug.print("veer: internal error during check\n", .{});
         std.process.exit(1);
     };
-
-    // Close store before exit (std.process.exit skips defers)
-    if (sqlite_store) |s| {
-        s.close();
-        allocator.destroy(s);
-        sqlite_store = null;
-    }
 
     const stdout_output = stdout_stream.getWritten();
     const stderr_output = stderr_stream.getWritten();
@@ -545,7 +508,9 @@ fn runRemove(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void
 
 fn runStats(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
     const params = comptime clap.parseParamsComptime(
-        \\-h, --help  Display this help and exit.
+        \\-h, --help              Display this help and exit.
+        \\    --since <str>       Time window (e.g. "1h", "24h", "7d"). Default: all time.
+        \\    --projects <str>    Override the Claude Code projects root (default: $HOME/.claude/projects).
         \\
     );
     var diag = clap.Diagnostic{};
@@ -557,23 +522,35 @@ fn runStats(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void 
 
     if (res.args.help != 0) printSubHelp(&params);
 
-    const s = initStore(allocator) orelse {
-        std.debug.print("veer stats: no database found at .veer/veer.db\n", .{});
-        std.process.exit(1);
-    };
-    defer {
-        s.close();
-        allocator.destroy(s);
-    }
+    const since_ms: ?u64 = if (res.args.since) |s| blk: {
+        const parsed = stats_cmd.parseSince(s) orelse {
+            std.debug.print("veer stats: invalid --since value '{s}' (try '24h', '7d', '30m')\n", .{s});
+            std.process.exit(1);
+        };
+        break :blk parsed;
+    } else null;
 
-    var buf: [4096]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = stats_cmd.run(allocator, s.store(), stream.writer()) catch {
+    const projects_root: []const u8 = if (res.args.projects) |p|
+        try allocator.dupe(u8, p)
+    else blk: {
+        const home = std.process.getEnvVarOwned(allocator, "HOME") catch {
+            std.debug.print("veer stats: $HOME not set; pass --projects <path>\n", .{});
+            std.process.exit(1);
+        };
+        defer allocator.free(home);
+        break :blk try std.fmt.allocPrint(allocator, "{s}/.claude/projects", .{home});
+    };
+    defer allocator.free(projects_root);
+
+    // Stream output to stdout directly; transcripts can produce > a few KB.
+    var stdout_buf: [16 * 1024]u8 = undefined;
+    var stdout_stream = std.io.fixedBufferStream(&stdout_buf);
+    const exit_code = stats_cmd.run(allocator, projects_root, since_ms, stdout_stream.writer()) catch {
         std.debug.print("veer stats: internal error\n", .{});
         std.process.exit(1);
     };
 
-    const output = stream.getWritten();
+    const output = stdout_stream.getWritten();
     if (output.len > 0) _ = std.fs.File.stdout().write(output) catch {};
     std.process.exit(exit_code);
 }

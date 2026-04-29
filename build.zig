@@ -36,22 +36,6 @@ pub fn build(b: *std.Build) void {
         .root_module = exe_mod,
     });
 
-    // SQLite amalgamation (vendored)
-    exe.addCSourceFile(.{
-        .file = b.path("vendor/sqlite3/sqlite3.c"),
-        .flags = &.{
-            "-DSQLITE_DQS=0",
-            "-DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1",
-            "-DSQLITE_THREADSAFE=1",
-            "-DSQLITE_TEMP_STORE=3",
-            "-DSQLITE_OMIT_LOAD_EXTENSION=1",
-            "-DSQLITE_OMIT_DEPRECATED=1",
-            "-DSQLITE_OMIT_TRACE=1",
-            "-DSQLITE_OMIT_SHARED_CACHE",
-        },
-    });
-    exe.addIncludePath(b.path("vendor/sqlite3"));
-
     // tree-sitter-bash grammar (vendored C sources)
     exe.addCSourceFiles(.{
         .root = b.path("vendor/tree-sitter-bash/src"),
@@ -89,12 +73,6 @@ pub fn build(b: *std.Build) void {
     test_mod.addImport("toml", toml_dep.module("toml"));
 
     const t = b.addTest(.{ .root_module = test_mod });
-
-    t.addCSourceFile(.{
-        .file = b.path("vendor/sqlite3/sqlite3.c"),
-        .flags = &.{ "-DSQLITE_DQS=0", "-DSQLITE_THREADSAFE=1" },
-    });
-    t.addIncludePath(b.path("vendor/sqlite3"));
 
     t.addCSourceFiles(.{
         .root = b.path("vendor/tree-sitter-bash/src"),

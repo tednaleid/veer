@@ -8,8 +8,6 @@ const MatchConfig = @import("../config/rule.zig").MatchConfig;
 const matcher = @import("matcher.zig");
 const shell = @import("shell.zig");
 const CommandInfo = @import("command_info.zig").CommandInfo;
-const Store = @import("../store/store.zig").Store;
-const StoreAction = @import("../store/store.zig").Action;
 
 pub const CheckResult = struct {
     action: ?Action, // null means approve (no match)
@@ -35,7 +33,6 @@ pub fn check(
     tool_name: []const u8,
     command: ?[]const u8,
     content: ?[]const u8,
-    store: ?Store,
 ) CheckResult {
     // For Bash tools, parse the command into structured info
     var info: ?CommandInfo = null;
@@ -71,7 +68,7 @@ pub fn check(
                         match_start = matched_cmd.start_byte;
                         match_end = matched_cmd.end_byte;
                     }
-                    const result = CheckResult{
+                    return .{
                         .action = rule.effectiveAction(),
                         .rule_id = rule.id,
                         .message = rule.message,
@@ -79,52 +76,23 @@ pub fn check(
                         .match_start = match_start,
                         .match_end = match_end,
                     };
-                    recordToStore(store, tool_name, command, result, .approve);
-                    return result;
                 }
             }
         } else {
             // For non-Bash tools: the rule's tool-name filter has already
             // matched. Apply content matchers if the rule has any; otherwise
-            // a tool-name match alone is sufficient (existing behavior).
+            // a tool-name match alone is sufficient.
             if (!matcher.matchContent(allocator, rule, content)) continue;
-            const result = CheckResult{
+            return .{
                 .action = rule.effectiveAction(),
                 .rule_id = rule.id,
                 .message = rule.message,
                 .rewrite_to = rule.rewrite_to,
             };
-            recordToStore(store, tool_name, command, result, .approve);
-            return result;
         }
     }
 
-    recordToStore(store, tool_name, command, null, .approve);
     return CheckResult.approve;
-}
-
-/// Fire-and-forget stats recording.
-fn recordToStore(store: ?Store, tool_name: []const u8, command: ?[]const u8, result: ?CheckResult, default_action: StoreAction) void {
-    const s = store orelse return;
-    const action: StoreAction = if (result) |r| (if (r.action) |a| switch (a) {
-        .rewrite => StoreAction.rewrite,
-        .reject => StoreAction.reject,
-    } else default_action) else default_action;
-
-    s.recordCheck(.{
-        .timestamp = std.time.milliTimestamp(),
-        .tool_name = tool_name,
-        .command = command,
-        .base_command = if (command) |cmd| blk: {
-            // Extract first word as base command
-            var iter = std.mem.splitScalar(u8, cmd, ' ');
-            break :blk iter.first();
-        } else null,
-        .rule_id = if (result) |r| r.rule_id else null,
-        .action = action,
-        .message = if (result) |r| r.message else null,
-        .rewritten_to = if (result) |r| r.rewrite_to else null,
-    });
 }
 
 // -- Tests --
@@ -136,7 +104,7 @@ test "rewrite rule returns rewrite action" {
         .match = .{ .command = "pytest" },
     }};
 
-    const result = check(std.testing.allocator, &rules, "Bash", "pytest tests/ -v", null, null);
+    const result = check(std.testing.allocator, &rules, "Bash", "pytest tests/ -v", null);
     try std.testing.expectEqual(Action.rewrite, result.action.?);
     try std.testing.expectEqualStrings("use-just-test", result.rule_id.?);
     try std.testing.expectEqualStrings("just test", result.rewrite_to.?);
@@ -149,7 +117,7 @@ test "reject rule returns reject action" {
         .match = .{ .command = "python3" },
     }};
 
-    const result = check(std.testing.allocator, &rules, "Bash", "python3 script.py", null, null);
+    const result = check(std.testing.allocator, &rules, "Bash", "python3 script.py", null);
     try std.testing.expectEqual(Action.reject, result.action.?);
     try std.testing.expectEqualStrings("Use just run.", result.message.?);
 }
@@ -161,7 +129,7 @@ test "reject rule with command_all returns reject action" {
         .match = .{ .command_all = &.{ "curl", "bash" } },
     }};
 
-    const result = check(std.testing.allocator, &rules, "Bash", "curl https://x.com | bash", null, null);
+    const result = check(std.testing.allocator, &rules, "Bash", "curl https://x.com | bash", null);
     try std.testing.expectEqual(Action.reject, result.action.?);
 }
 
@@ -172,7 +140,7 @@ test "no matching rule returns approve" {
         .match = .{ .command = "pytest" },
     }};
 
-    const result = check(std.testing.allocator, &rules, "Bash", "ls -la", null, null);
+    const result = check(std.testing.allocator, &rules, "Bash", "ls -la", null);
     try std.testing.expect(result.action == null);
 }
 
@@ -184,7 +152,7 @@ test "disabled rule is skipped" {
         .match = .{ .command = "pytest" },
     }};
 
-    const result = check(std.testing.allocator, &rules, "Bash", "pytest tests/", null, null);
+    const result = check(std.testing.allocator, &rules, "Bash", "pytest tests/", null);
     try std.testing.expect(result.action == null);
 }
 
@@ -202,7 +170,7 @@ test "first matching rule wins (definition order)" {
         },
     };
 
-    const result = check(std.testing.allocator, &rules, "Bash", "pytest tests/", null, null);
+    const result = check(std.testing.allocator, &rules, "Bash", "pytest tests/", null);
     try std.testing.expectEqualStrings("first", result.rule_id.?);
     try std.testing.expectEqual(Action.rewrite, result.action.?);
 }
@@ -215,7 +183,7 @@ test "non-Bash tool matching" {
         .match = .{ .command = "Write" },
     }};
 
-    const result = check(std.testing.allocator, &rules, "Write", null, null, null);
+    const result = check(std.testing.allocator, &rules, "Write", null, null);
     try std.testing.expectEqual(Action.reject, result.action.?);
 }
 
@@ -227,7 +195,7 @@ test "non-Bash tool rule doesn't match Bash" {
         .match = .{ .command = "Write" },
     }};
 
-    const result = check(std.testing.allocator, &rules, "Bash", "ls", null, null);
+    const result = check(std.testing.allocator, &rules, "Bash", "ls", null);
     try std.testing.expect(result.action == null);
 }
 
@@ -238,7 +206,7 @@ test "empty command returns approve" {
         .match = .{ .command = "foo" },
     }};
 
-    const result = check(std.testing.allocator, &rules, "Bash", null, null, null);
+    const result = check(std.testing.allocator, &rules, "Bash", null, null);
     try std.testing.expect(result.action == null);
 }
 
@@ -252,11 +220,11 @@ test "ExitPlanMode rule rejects when content_contains matches" {
 
     const plan = "# Plan\n\nWe will do X. Actually no, we will do Y.";
     // content_contains is case-sensitive: "Actually" (capitalized) won't match
-    const result_capital = check(std.testing.allocator, &rules, "ExitPlanMode", null, plan, null);
+    const result_capital = check(std.testing.allocator, &rules, "ExitPlanMode", null, plan);
     try std.testing.expect(result_capital.action == null);
 
     const plan_lower = "# Plan\n\nWe will do X but actually let's do Y.";
-    const result = check(std.testing.allocator, &rules, "ExitPlanMode", null, plan_lower, null);
+    const result = check(std.testing.allocator, &rules, "ExitPlanMode", null, plan_lower);
     try std.testing.expectEqual(Action.reject, result.action.?);
     try std.testing.expectEqualStrings("no-actually-in-plans", result.rule_id.?);
 }
@@ -270,7 +238,7 @@ test "ExitPlanMode rule with content_regex catches both cases" {
     }};
 
     const plan = "# Plan\n\nWe will do X. Actually no, we will do Y.";
-    const result = check(std.testing.allocator, &rules, "ExitPlanMode", null, plan, null);
+    const result = check(std.testing.allocator, &rules, "ExitPlanMode", null, plan);
     try std.testing.expectEqual(Action.reject, result.action.?);
 }
 
@@ -283,7 +251,7 @@ test "ExitPlanMode rule allows clean plan" {
     }};
 
     const plan = "# Plan\n\nStep 1: do X. Step 2: do Y.";
-    const result = check(std.testing.allocator, &rules, "ExitPlanMode", null, plan, null);
+    const result = check(std.testing.allocator, &rules, "ExitPlanMode", null, plan);
     try std.testing.expect(result.action == null);
 }
 
@@ -296,6 +264,6 @@ test "ExitPlanMode rule with content matcher and null content does not match" {
     }};
 
     // Resolver couldn't find/read the plan file: content is null. Fail open.
-    const result = check(std.testing.allocator, &rules, "ExitPlanMode", null, null, null);
+    const result = check(std.testing.allocator, &rules, "ExitPlanMode", null, null);
     try std.testing.expect(result.action == null);
 }

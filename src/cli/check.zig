@@ -7,7 +7,6 @@ const engine = @import("../engine/engine.zig");
 const hook = @import("../claude/hook.zig");
 const Action = @import("../config/rule.zig").Action;
 const Rule = @import("../config/rule.zig").Rule;
-const Store = @import("../store/store.zig").Store;
 
 /// Run the check command. Returns exit code.
 /// Takes reader/writer interfaces for testability.
@@ -19,7 +18,6 @@ pub fn run(
     allocator: std.mem.Allocator,
     rules: []const Rule,
     stdin_data: []const u8,
-    store: ?Store,
     stdout_writer: anytype,
     stderr_writer: anytype,
     verbose: bool,
@@ -31,7 +29,7 @@ pub fn run(
     };
     defer hook.freeInput(allocator, &input);
 
-    const result = engine.check(allocator, rules, input.tool_name, input.command, input.content, store);
+    const result = engine.check(allocator, rules, input.tool_name, input.command, input.content);
 
     // Output based on action
     if (result.action) |action| {
@@ -45,13 +43,23 @@ pub fn run(
                     else
                         null;
                     defer if (system_msg) |m| allocator.free(m);
-                    try hook.formatRewrite(stdout_writer, rewritten.command, system_msg);
+                    try hook.formatRewrite(stdout_writer, rewritten.command, system_msg, result.rule_id);
                 }
                 return hook.ExitCode.rewrite;
             },
             .reject => {
                 if (result.message) |msg| {
-                    try stderr_writer.print("{s}\n", .{msg});
+                    if (result.rule_id) |rid| {
+                        try stderr_writer.print("[{s}] {s}\n", .{ rid, msg });
+                    } else {
+                        try stderr_writer.print("{s}\n", .{msg});
+                    }
+                }
+                // Emit a stdout marker so the transcript's hook_success
+                // record carries rule_id attribution. Claude Code captures
+                // stdout on exit 2 even though it doesn't act on it.
+                if (result.rule_id) |rid| {
+                    try hook.formatRejectMarker(stdout_writer, rid);
                 }
                 return hook.ExitCode.reject;
             },
@@ -66,7 +74,7 @@ pub fn run(
     if (verbose) {
         if (try buildToolSummary(allocator, input.command, null)) |msg| {
             defer allocator.free(msg);
-            try hook.formatAllow(stdout_writer, msg);
+            try hook.formatAllow(stdout_writer, msg, null);
         }
     }
     return hook.ExitCode.allow;
@@ -139,7 +147,6 @@ test "end-to-end: rewrite rule returns updatedInput on stdout" {
         std.testing.allocator,
         &rules,
         input,
-        null,
         stdout_stream.writer(),
         stderr_stream.writer(),
         false,
@@ -156,6 +163,48 @@ test "end-to-end: rewrite rule returns updatedInput on stdout" {
     try std.testing.expectEqualStrings("allow", hso.object.get("permissionDecision").?.string);
     const cmd = hso.object.get("updatedInput").?.object.get("command").?;
     try std.testing.expectEqualStrings("just test", cmd.string);
+}
+
+test "reject path emits [rule_id] prefix on stderr and stdout marker" {
+    const rules = [_]Rule{.{
+        .id = "no-python3",
+        .message = "Use `just run` instead.",
+        .match = .{ .command = "python3" },
+    }};
+
+    const input =
+        \\{"tool_name":"Bash","tool_input":{"command":"python3 script.py"}}
+    ;
+
+    var stdout_buf: [512]u8 = undefined;
+    var stdout_stream = std.io.fixedBufferStream(&stdout_buf);
+    var stderr_buf: [512]u8 = undefined;
+    var stderr_stream = std.io.fixedBufferStream(&stderr_buf);
+
+    const exit_code = try run(
+        std.testing.allocator,
+        &rules,
+        input,
+        stdout_stream.writer(),
+        stderr_stream.writer(),
+        false,
+    );
+
+    try std.testing.expectEqual(@as(u8, 2), exit_code);
+
+    // Stderr (which the agent sees) starts with the [rule_id] prefix.
+    const stderr_out = stderr_stream.getWritten();
+    try std.testing.expect(std.mem.startsWith(u8, stderr_out, "[no-python3] "));
+    try std.testing.expect(std.mem.indexOf(u8, stderr_out, "just run") != null);
+
+    // Stdout has a parseable systemMessage so transcripts are self-describing.
+    const stdout_out = stdout_stream.getWritten();
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, stdout_out, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(
+        "[no-python3] reject",
+        parsed.value.object.get("systemMessage").?.string,
+    );
 }
 
 test "end-to-end: reject rule returns exit 2 with message on stderr" {
@@ -178,14 +227,14 @@ test "end-to-end: reject rule returns exit 2 with message on stderr" {
         std.testing.allocator,
         &rules,
         input,
-        null,
         stdout_stream.writer(),
         stderr_stream.writer(),
         false,
     );
 
     try std.testing.expectEqual(@as(u8, 2), exit_code);
-    try std.testing.expectEqual(@as(usize, 0), stdout_stream.getWritten().len);
+    // Stdout now carries a [rule_id] reject marker (transcript-discoverable).
+    try std.testing.expect(std.mem.indexOf(u8, stdout_stream.getWritten(), "[no-python3] reject") != null);
     const stderr_output = stderr_stream.getWritten();
     try std.testing.expect(std.mem.indexOf(u8, stderr_output, "just run") != null);
 }
@@ -210,7 +259,6 @@ test "end-to-end: reject rule with command_all returns exit 2" {
         std.testing.allocator,
         &rules,
         input,
-        null,
         stdout_stream.writer(),
         stderr_stream.writer(),
         false,
@@ -239,7 +287,6 @@ test "end-to-end: no matching rule returns exit 0 with empty output" {
         std.testing.allocator,
         &rules,
         input,
-        null,
         stdout_stream.writer(),
         stderr_stream.writer(),
         false,
@@ -266,7 +313,6 @@ test "end-to-end: invalid JSON returns exit 1" {
         std.testing.allocator,
         &rules,
         "not valid json",
-        null,
         stdout_stream.writer(),
         stderr_stream.writer(),
         false,
@@ -296,7 +342,6 @@ test "end-to-end: surgical rewrite in compound command" {
         std.testing.allocator,
         &rules,
         input,
-        null,
         stdout_stream.writer(),
         stderr_stream.writer(),
         false,
@@ -336,7 +381,6 @@ test "verbose allow: emits systemMessage for Bash (just the command, no prefix)"
         std.testing.allocator,
         &rules,
         input,
-        null,
         stdout_stream.writer(),
         stderr_stream.writer(),
         true,
@@ -373,7 +417,6 @@ test "verbose allow: non-Bash tool emits no banner (empty stdout)" {
         std.testing.allocator,
         &rules,
         input,
-        null,
         stdout_stream.writer(),
         stderr_stream.writer(),
         true,
@@ -405,7 +448,6 @@ test "verbose rewrite: emits systemMessage alongside updatedInput" {
         std.testing.allocator,
         &rules,
         input,
-        null,
         stdout_stream.writer(),
         stderr_stream.writer(),
         true,
@@ -416,9 +458,9 @@ test "verbose rewrite: emits systemMessage alongside updatedInput" {
     defer parsed.deinit();
 
     const msg = parsed.value.object.get("systemMessage").?.string;
-    // Banner is "`<original>` -> `<rewritten>`" with no "veer: Bash" prefix
-    // (Claude Code's transcript prepends the tool identifier).
-    try std.testing.expectEqualStrings("`pytest tests/ -v` -> `just test`", msg);
+    // Banner is "[<rule_id>] `<original>` -> `<rewritten>`" -- the rule_id
+    // prefix makes the transcript self-describing for `veer stats`.
+    try std.testing.expectEqualStrings("[use-just-test] `pytest tests/ -v` -> `just test`", msg);
 
     const hso = parsed.value.object.get("hookSpecificOutput").?;
     try std.testing.expectEqualStrings("PreToolUse", hso.object.get("hookEventName").?.string);
@@ -478,7 +520,6 @@ test "end-to-end: ExitPlanMode rejected when plan contains 'actually'" {
         std.testing.allocator,
         &rules,
         input,
-        null,
         stdout_stream.writer(),
         stderr_stream.writer(),
         false,
@@ -539,7 +580,6 @@ test "end-to-end: ExitPlanMode allowed when plan is clean" {
         std.testing.allocator,
         &rules,
         input,
-        null,
         stdout_stream.writer(),
         stderr_stream.writer(),
         false,
@@ -549,7 +589,7 @@ test "end-to-end: ExitPlanMode allowed when plan is clean" {
     try std.testing.expectEqual(@as(usize, 0), stderr_stream.getWritten().len);
 }
 
-test "verbose reject: unchanged (exit 2, stderr message, no stdout)" {
+test "verbose reject: same shape as non-verbose (exit 2, stderr msg, stdout marker)" {
     const rules = [_]Rule{.{
         .id = "no-python3",
         .message = "Use `just run` instead.",
@@ -569,14 +609,15 @@ test "verbose reject: unchanged (exit 2, stderr message, no stdout)" {
         std.testing.allocator,
         &rules,
         input,
-        null,
         stdout_stream.writer(),
         stderr_stream.writer(),
         true,
     );
 
-    // Reject path does not emit a systemMessage (would be ignored on exit 2 anyway).
+    // Reject emits the [rule_id] marker on stdout regardless of verbose.
+    // The marker makes the transcript self-describing for `veer stats`.
     try std.testing.expectEqual(@as(u8, 2), exit_code);
-    try std.testing.expectEqual(@as(usize, 0), stdout_stream.getWritten().len);
+    try std.testing.expect(std.mem.indexOf(u8, stdout_stream.getWritten(), "[no-python3] reject") != null);
     try std.testing.expect(std.mem.indexOf(u8, stderr_stream.getWritten(), "just run") != null);
+    try std.testing.expect(std.mem.startsWith(u8, stderr_stream.getWritten(), "[no-python3] "));
 }

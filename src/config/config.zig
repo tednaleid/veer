@@ -13,7 +13,6 @@ pub const ValidationError = rule_mod.ValidationError;
 pub const validate = rule_mod.validate;
 
 pub const Settings = struct {
-    stats: bool = true,
     log_level: []const u8 = "warn",
     claude_settings_path: ?[]const u8 = null,
     claude_projects_path: ?[]const u8 = null,
@@ -115,7 +114,6 @@ pub fn mergeRules(allocator: std.mem.Allocator, global_rules: []const Rule, proj
 /// (non-default values win).
 pub fn mergeSettings(global: Settings, project: Settings) Settings {
     return .{
-        .stats = project.stats,
         .log_level = project.log_level,
         .claude_settings_path = project.claude_settings_path orelse global.claude_settings_path,
         .claude_projects_path = project.claude_projects_path orelse global.claude_projects_path,
@@ -239,9 +237,6 @@ pub fn loadMerged(allocator: std.mem.Allocator) !MergedConfig {
 
 test "loadString parses basic config" {
     const input =
-        \\[settings]
-        \\stats = true
-        \\
         \\[[rule]]
         \\id = "use-just-test"
         \\name = "Redirect pytest"
@@ -255,7 +250,6 @@ test "loadString parses basic config" {
     defer result.deinit();
 
     const config = result.value;
-    try std.testing.expect(config.settings.stats);
     try std.testing.expectEqual(@as(usize, 1), config.rule.len);
     try std.testing.expectEqualStrings("use-just-test", config.rule[0].id);
     try std.testing.expectEqualStrings("pytest", config.rule[0].match.command.?);
@@ -292,16 +286,16 @@ test "loadString parses multiple rules" {
     try std.testing.expectEqualStrings("rule-b", result.value.rule[1].id);
 }
 
-test "loadString with empty config returns defaults" {
+test "loadString with settings-only config has no rules" {
     const input =
         \\[settings]
-        \\stats = false
+        \\log_level = "debug"
     ;
 
     var result = try loadString(std.testing.allocator, input);
     defer result.deinit();
 
-    try std.testing.expect(!result.value.settings.stats);
+    try std.testing.expectEqualStrings("debug", result.value.settings.log_level);
     try std.testing.expectEqual(@as(usize, 0), result.value.rule.len);
 }
 
@@ -396,7 +390,6 @@ test "loadFile parses empty.toml fixture" {
     var result = try loadFile(std.testing.allocator, "test/configs/empty.toml");
     defer result.deinit();
 
-    try std.testing.expect(!result.value.settings.stats);
     try std.testing.expectEqualStrings("debug", result.value.settings.log_level);
     try std.testing.expectEqual(@as(usize, 0), result.value.rule.len);
 }
@@ -528,17 +521,14 @@ test "globalConfigPath uses XDG_CONFIG_HOME" {
 
 test "mergeSettings project overrides global" {
     const global = Settings{
-        .stats = true,
         .log_level = "info",
         .claude_settings_path = "/global/path",
     };
     const project = Settings{
-        .stats = false,
         .log_level = "debug",
     };
 
     const merged = mergeSettings(global, project);
-    try std.testing.expect(!merged.stats);
     try std.testing.expectEqualStrings("debug", merged.log_level);
     // Project didn't set claude_settings_path, so global value falls through
     try std.testing.expectEqualStrings("/global/path", merged.claude_settings_path.?);

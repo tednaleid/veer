@@ -1,6 +1,3 @@
-[settings]
-stats = true
-
 [[rule]]
 id = "use-just-test"
 name = "Redirect pytest to just test"

@@ -23,10 +23,6 @@ const config_stub =
     \\
 ;
 
-/// Gitignore content for the .veer/ directory. Excludes the SQLite database
-/// and its WAL/journal files (veer.db-wal, veer.db-shm, veer.db-journal).
-const gitignore_content = "veer.db*\n";
-
 /// Hook command strings. `veer install` writes the plain form; `veer install
 /// --verbose` writes the verbose form (which adds user-visible systemMessage
 /// banners to each tool call). Both are recognized on uninstall and on
@@ -87,8 +83,7 @@ pub fn freePaths(allocator: std.mem.Allocator, paths: Paths, scope: Scope) void 
 /// Install the veer hook:
 ///   1. Merge veer entry into settings.json (never overwrite unrelated hooks).
 ///   2. Create config.toml stub if missing.
-///   3. Write .gitignore in config dir (excludes veer.db).
-///   4. Write SKILL.md (always overwrite).
+///   3. Write SKILL.md (always overwrite).
 /// When `verbose` is true, the registered command is `veer check --verbose`,
 /// which causes each tool call to emit a user-visible systemMessage banner.
 /// Returns process exit code (0 on success, 1 on user-facing error).
@@ -96,22 +91,24 @@ pub fn install(allocator: std.mem.Allocator, paths: Paths, verbose: bool, writer
     const hook_code = try installHook(allocator, paths.settings, verbose, writer);
     if (hook_code != 0) return hook_code;
     try ensureConfigStub(paths.config, writer);
-    try writeConfigDirGitignore(paths.config, writer);
     try writeSkillFile(paths.skill, writer);
     return 0;
 }
 
 /// Uninstall the veer hook:
 ///   1. Remove veer entry from settings.json (preserve unrelated hooks).
-///   2. Delete config.toml, .gitignore, and veer.db from config dir.
-///   3. Try to remove the config dir if empty.
-///   4. Delete SKILL.md and parent veer/ skill dir if empty.
+///   2. Delete config.toml from config dir.
+///   3. Best-effort delete leftover veer.db from older installs (no-op if
+///      already absent).
+///   4. Try to remove the config dir if empty.
+///   5. Delete SKILL.md and parent veer/ skill dir if empty.
 pub fn uninstall(allocator: std.mem.Allocator, paths: Paths, writer: anytype) !u8 {
     const hook_code = try uninstallHook(allocator, paths.settings, writer);
     if (hook_code != 0) return hook_code;
     try deleteIfExists(paths.config, "config", writer);
-    // Clean up .gitignore and veer.db from the config directory.
     if (configDir(paths.config)) |dir| {
+        // .gitignore was written by older versions to exclude veer.db; both
+        // are obsolete now. Delete if present (no-op if not).
         try deleteInDir(dir, ".gitignore", writer);
         try deleteInDir(dir, "veer.db", writer);
         std.fs.cwd().deleteDir(dir) catch {};
@@ -317,16 +314,6 @@ fn writeSkillFile(path: []const u8, writer: anytype) !void {
     defer f.close();
     try f.writeAll(skill_content);
     try writer.print("wrote skill {s}\n", .{path});
-}
-
-fn writeConfigDirGitignore(config_path: []const u8, writer: anytype) !void {
-    const dir = configDir(config_path) orelse return;
-    var path_buf: [1024]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buf, "{s}/.gitignore", .{dir}) catch return;
-    const f = try std.fs.cwd().createFile(path, .{ .truncate = true });
-    defer f.close();
-    try f.writeAll(gitignore_content);
-    try writer.print("wrote {s}\n", .{path});
 }
 
 /// Return the parent directory of config_path (e.g. ".veer" from ".veer/config.toml").
@@ -649,7 +636,10 @@ test "uninstall is idempotent (nothing to remove)" {
     try testing.expectEqual(@as(u8, 0), code);
 }
 
-test "install creates .veer/.gitignore" {
+test "uninstall cleans up legacy gitignore and veer.db from older installs" {
+    // Older versions wrote a .gitignore + maintained a veer.db SQLite store.
+    // Both are gone now, but uninstall must still clean them up for users
+    // upgrading from those versions.
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     const tmp_root = try tmp.dir.realpathAlloc(testing.allocator, ".");
@@ -658,32 +648,11 @@ test "install creates .veer/.gitignore" {
     const paths = try testPaths(testing.allocator, tmp_root);
     defer freeTestPaths(testing.allocator, paths);
 
-    var buf: [4096]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    _ = try install(testing.allocator, paths, false, stream.writer());
-
-    var gi_buf: [1024]u8 = undefined;
-    const gi_path = try std.fmt.bufPrint(&gi_buf, "{s}/.veer/.gitignore", .{tmp_root});
-    const content = try readFileAlloc(testing.allocator, gi_path);
-    defer testing.allocator.free(content);
-    try testing.expectEqualStrings("veer.db*\n", content);
-}
-
-test "uninstall removes gitignore and veer.db" {
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const tmp_root = try tmp.dir.realpathAlloc(testing.allocator, ".");
-    defer testing.allocator.free(tmp_root);
-
-    const paths = try testPaths(testing.allocator, tmp_root);
-    defer freeTestPaths(testing.allocator, paths);
-
-    // Create the files that install would create, plus a veer.db
     try testWriteFile(paths.config, "# rules\n");
     try testWriteFile(paths.settings, "{}");
     var gi_buf: [1024]u8 = undefined;
     const gi_path = try std.fmt.bufPrint(&gi_buf, "{s}/.veer/.gitignore", .{tmp_root});
-    try testWriteFile(gi_path, gitignore_content);
+    try testWriteFile(gi_path, "veer.db*\n");
     var db_buf: [1024]u8 = undefined;
     const db_path = try std.fmt.bufPrint(&db_buf, "{s}/.veer/veer.db", .{tmp_root});
     try testWriteFile(db_path, "fake db");

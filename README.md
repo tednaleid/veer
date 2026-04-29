@@ -142,7 +142,6 @@ Project config is merged with global config. Project rules take precedence: a pr
 
 ```toml
 [settings]
-stats = true                   # Enable stats collection (default: true)
 log_level = "warn"             # "debug", "info", "warn", "error" (default: "warn")
 claude_settings_path = ""      # Auto-detected if empty
 claude_projects_path = ""      # Auto-detected if empty
@@ -479,10 +478,41 @@ Usage: veer validate [--config <path>]
 
 ### veer stats
 
-Display usage statistics from `.veer/veer.db`.
+Aggregate hook activity across all your Claude Code sessions by mining the
+JSONL transcripts at `~/.claude/projects/`. Shows outcome counts, top rules,
+top commands, tool distribution, and hook latency. No separate database --
+the transcripts already record everything.
 
 ```
-Usage: veer stats
+Usage: veer stats [--since <duration>] [--projects <path>]
+
+  --since      Time window: "1h", "24h", "7d", "30d" (default: all time)
+  --projects   Override the Claude Code projects root (default: $HOME/.claude/projects)
+```
+
+Example output:
+
+```
+Stats (since 24h, 187 hook fires across 3 sessions in 12 transcripts):
+
+  Outcome: 162 allow | 21 rewrite | 4 reject
+
+  Top rules:
+    use-just-test                     15  rewrite
+    no-actually-in-plans               4  reject
+    echo-separator-unquote             3  rewrite
+
+  Top commands (Bash):
+    git                               42
+    just                              31
+    grep                              19
+
+  Tool distribution:
+    Bash                   115
+    Read                    42
+    Edit                    21
+
+  Hook latency: p50 18ms, p99 91ms (over 187 samples)
 ```
 
 ### veer scan
