@@ -20,6 +20,7 @@ comptime {
     _ = @import("cli/scan.zig");
     _ = @import("cli/test_cmd.zig");
     _ = @import("cli/validate_cmd.zig");
+    _ = @import("cli/config_path.zig");
     _ = @import("claude/transcript.zig");
     _ = @import("claude/settings.zig");
 }

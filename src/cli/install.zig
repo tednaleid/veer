@@ -402,6 +402,26 @@ fn testWriteFile(path: []const u8, content: []const u8) !void {
     try f.writeAll(content);
 }
 
+// Sentinel tests for the embedded skill content. These assert that the
+// SKILL.md shipped to users (and to the agent) keeps documenting the
+// global-config workflow. If you remove or rename one of these anchors,
+// update both the doc and this list deliberately.
+test "skill_content documents global config path" {
+    try testing.expect(std.mem.indexOf(u8, skill_content, "~/.config/veer/config.toml") != null);
+}
+
+test "skill_content documents `veer install --global`" {
+    try testing.expect(std.mem.indexOf(u8, skill_content, "veer install --global") != null);
+}
+
+test "skill_content documents `veer add --global`" {
+    try testing.expect(std.mem.indexOf(u8, skill_content, "veer add --global") != null);
+}
+
+test "skill_content has a global-vs-project guidance heading" {
+    try testing.expect(std.mem.indexOf(u8, skill_content, "global vs. project") != null);
+}
+
 test "install merges into empty settings.json" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();

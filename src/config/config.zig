@@ -32,18 +32,35 @@ pub const ConfigError = error{
     NoConfigFound,
 } || ValidationError;
 
+/// Which file a rule originated from after merging. Used by `veer list` and
+/// `veer test` to show users which config a rule came from.
+pub const RuleSource = enum { project, global };
+
+/// Output of `mergeRules`. The two slices are parallel: `sources[i]` describes
+/// where `rules[i]` came from. Both are owned by the caller.
+pub const MergeResult = struct {
+    rules: []Rule,
+    sources: []RuleSource,
+};
+
 /// Result of loadMerged(). Owns parsed configs and merged rules.
 pub const MergedConfig = struct {
     config: Config = .{},
     project_parsed: ?toml.Parsed(Config) = null,
     global_parsed: ?toml.Parsed(Config) = null,
     merged_rules: ?[]Rule = null,
+    /// Parallel to `config.rule` after `loadMerged` returns: `sources[i]` is
+    /// the origin of `config.rule[i]`. Always populated by `loadMerged`
+    /// (even when only one of project/global is present); `null` only for
+    /// configs loaded via the explicit single-file path.
+    sources: ?[]RuleSource = null,
     /// Absolute path of the project config that was loaded, if any.
     /// Owned by this struct; freed in deinit.
     project_config_path: ?[]const u8 = null,
 
     pub fn deinit(self: *MergedConfig, allocator: std.mem.Allocator) void {
         if (self.merged_rules) |r| allocator.free(r);
+        if (self.sources) |s| allocator.free(s);
         if (self.project_parsed) |*p| p.deinit();
         if (self.global_parsed) |*g| g.deinit();
         if (self.project_config_path) |p| allocator.free(p);
@@ -84,16 +101,18 @@ pub fn loadFile(allocator: std.mem.Allocator, path: []const u8) !toml.Parsed(Con
 
 /// Merge two configs. Project rules override global rules with the same ID.
 /// Project rules come first (definition order), then non-overridden global rules.
-/// Caller owns the returned slice (allocated with `allocator`).
-pub fn mergeRules(allocator: std.mem.Allocator, global_rules: []const Rule, project_rules: []const Rule) ![]Rule {
-    var merged = std.ArrayListUnmanaged(Rule).empty;
+/// Caller owns both slices on the returned `MergeResult`.
+pub fn mergeRules(allocator: std.mem.Allocator, global_rules: []const Rule, project_rules: []const Rule) !MergeResult {
+    var rules = std.ArrayListUnmanaged(Rule).empty;
+    errdefer rules.deinit(allocator);
+    var sources = std.ArrayListUnmanaged(RuleSource).empty;
+    errdefer sources.deinit(allocator);
 
-    // Add all project rules first
     for (project_rules) |r| {
-        try merged.append(allocator, r);
+        try rules.append(allocator, r);
+        try sources.append(allocator, .project);
     }
 
-    // Add global rules that aren't overridden by project rules
     for (global_rules) |global_rule| {
         var overridden = false;
         for (project_rules) |project_rule| {
@@ -103,11 +122,15 @@ pub fn mergeRules(allocator: std.mem.Allocator, global_rules: []const Rule, proj
             }
         }
         if (!overridden) {
-            try merged.append(allocator, global_rule);
+            try rules.append(allocator, global_rule);
+            try sources.append(allocator, .global);
         }
     }
 
-    return merged.items;
+    return .{
+        .rules = try rules.toOwnedSlice(allocator),
+        .sources = try sources.toOwnedSlice(allocator),
+    };
 }
 
 /// Merge two Settings. Project fields override global when set
@@ -215,19 +238,28 @@ pub fn loadMerged(allocator: std.mem.Allocator) !MergedConfig {
         return error.NoConfigFound;
     }
 
-    // Build merged config
+    // Build merged config. `sources` is always populated by loadMerged so
+    // list/test can label each rule even when only one config file exists.
     if (result.project_parsed != null and result.global_parsed != null) {
         const project = result.project_parsed.?.value;
         const global = result.global_parsed.?.value;
-        result.merged_rules = try mergeRules(allocator, global.rule, project.rule);
+        const merge = try mergeRules(allocator, global.rule, project.rule);
+        result.merged_rules = merge.rules;
+        result.sources = merge.sources;
         result.config = .{
             .settings = mergeSettings(global.settings, project.settings),
-            .rule = result.merged_rules.?,
+            .rule = merge.rules,
         };
     } else if (result.project_parsed) |p| {
         result.config = p.value;
+        const sources = try allocator.alloc(RuleSource, p.value.rule.len);
+        @memset(sources, .project);
+        result.sources = sources;
     } else if (result.global_parsed) |g| {
         result.config = g.value;
+        const sources = try allocator.alloc(RuleSource, g.value.rule.len);
+        @memset(sources, .global);
+        result.sources = sources;
     }
 
     return result;
@@ -351,12 +383,38 @@ test "mergeRules combines non-overlapping rules, project first" {
     };
 
     const merged = try mergeRules(std.testing.allocator, &global, &project);
-    defer std.testing.allocator.free(merged);
+    defer std.testing.allocator.free(merged.rules);
+    defer std.testing.allocator.free(merged.sources);
 
-    try std.testing.expectEqual(@as(usize, 2), merged.len);
+    try std.testing.expectEqual(@as(usize, 2), merged.rules.len);
+    try std.testing.expectEqual(@as(usize, 2), merged.sources.len);
     // Project rules first, then global
-    try std.testing.expectEqualStrings("p1", merged[0].id);
-    try std.testing.expectEqualStrings("g1", merged[1].id);
+    try std.testing.expectEqualStrings("p1", merged.rules[0].id);
+    try std.testing.expectEqualStrings("g1", merged.rules[1].id);
+    try std.testing.expectEqual(RuleSource.project, merged.sources[0]);
+    try std.testing.expectEqual(RuleSource.global, merged.sources[1]);
+}
+
+test "mergeRules tags sources for several rules in each list" {
+    const global = [_]Rule{
+        .{ .id = "g1", .message = "m", .match = .{ .command = "a" } },
+        .{ .id = "g2", .message = "m", .match = .{ .command = "b" } },
+    };
+    const project = [_]Rule{
+        .{ .id = "p1", .message = "m", .match = .{ .command = "c" } },
+        .{ .id = "p2", .message = "m", .match = .{ .command = "d" } },
+    };
+
+    const merged = try mergeRules(std.testing.allocator, &global, &project);
+    defer std.testing.allocator.free(merged.rules);
+    defer std.testing.allocator.free(merged.sources);
+
+    try std.testing.expectEqual(@as(usize, 4), merged.rules.len);
+    try std.testing.expectEqualSlices(
+        RuleSource,
+        &.{ .project, .project, .global, .global },
+        merged.sources,
+    );
 }
 
 test "mergeRules project overrides global by ID" {
@@ -368,11 +426,15 @@ test "mergeRules project overrides global by ID" {
     };
 
     const merged = try mergeRules(std.testing.allocator, &global, &project);
-    defer std.testing.allocator.free(merged);
+    defer std.testing.allocator.free(merged.rules);
+    defer std.testing.allocator.free(merged.sources);
 
-    try std.testing.expectEqual(@as(usize, 1), merged.len);
-    try std.testing.expectEqualStrings("Project version", merged[0].displayName());
-    try std.testing.expectEqual(Action.reject, merged[0].effectiveAction());
+    try std.testing.expectEqual(@as(usize, 1), merged.rules.len);
+    try std.testing.expectEqual(@as(usize, 1), merged.sources.len);
+    try std.testing.expectEqualStrings("Project version", merged.rules[0].displayName());
+    try std.testing.expectEqual(Action.reject, merged.rules[0].effectiveAction());
+    // Override semantics: the surviving rule is the project's, so it tags as .project.
+    try std.testing.expectEqual(RuleSource.project, merged.sources[0]);
 }
 
 test "loadFile parses basic.toml fixture" {

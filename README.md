@@ -420,16 +420,19 @@ To remove, use `veer uninstall` (same scope flags).
 
 ### veer list
 
-Display current rules.
+Display current rules. When run against an auto-discovered config (project +
+global merged), the output adds a `Source` column showing whether each rule
+came from `.veer/config.toml` (project) or `~/.config/veer/config.toml`
+(global). With an explicit `--config <path>`, the column is omitted.
 
 ```
 Usage: veer list [--config <path>]
 
-Example output:
-  ID                 Action   Command/Pattern  Message
-  -----------------  -------  ---------------  -----------------------
-  use-just-test      rewrite  pytest           Use just test.
-  no-curl-pipe-bash  reject   (command_all)    Don't pipe curl to bash.
+Example output (merged):
+  ID                 Source   Action   Command/Pattern  Message
+  -----------------  -------  -------  ---------------  -----------------------
+  use-just-test      project  rewrite  pytest           Use just test.
+  no-curl-pipe-bash  global   reject   (command_all)    Don't pipe curl to bash.
 
   2 rule(s)
 ```
@@ -442,16 +445,22 @@ Add a rule to the config file.
 Usage: veer add --action <action> --command <cmd>
                [--id <id>] [--name <name>]
                [--message <msg>] [--rewrite-to <cmd>]
-               [--config <path>]
+               [--config <path> | --global]
 ```
+
+`--global` writes to `~/.config/veer/config.toml` (the same file
+`veer install --global` creates). `--global` and `--config` are mutually
+exclusive.
 
 ### veer remove
 
 Remove a rule by ID.
 
 ```
-Usage: veer remove <rule-id> [--config <path>]
+Usage: veer remove <rule-id> [--config <path> | --global]
 ```
+
+`--global` removes from `~/.config/veer/config.toml`.
 
 ### veer test
 
@@ -461,7 +470,12 @@ Test commands against rules without the hook protocol.
 Usage: veer test "<command>" [--config <path>]
        veer test --file <path> [--config <path>]
 
-Output (TSV): result, return_code, input, rule_id, output
+Output (TSV): result, return_code, input, rule_id, output [, source]
+
+The `source` column is appended only when running against a merged
+project + global config; it shows `project` or `global` for matched rules,
+and is empty for `ALLOW` lines (no rule matched). With an explicit
+`--config <path>`, the column is omitted.
 
 Examples:
   veer test "pytest tests/"
@@ -473,8 +487,10 @@ Examples:
 Check a config file for errors.
 
 ```
-Usage: veer validate [--config <path>]
+Usage: veer validate [--config <path> | --global]
 ```
+
+`--global` validates `~/.config/veer/config.toml`.
 
 ### veer stats
 

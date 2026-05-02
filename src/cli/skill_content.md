@@ -20,14 +20,54 @@ control, rather than repeating them to the agent every session.
 Do not hand-edit this SKILL.md -- running `veer install` always rewrites it
 from the binary's embedded content. Treat this as generated documentation.
 
+## Two config files: project and global
+
+veer reads from two files and merges them:
+
+| Path | Scope | Use it for |
+|---|---|---|
+| `.veer/config.toml` | per-repo, version-controlled | repo-specific tooling redirects |
+| `~/.config/veer/config.toml` | personal, all projects | cross-cutting personal preferences |
+
+Project rules come first (definition order); non-overridden global rules
+follow. A project rule with the same `id` as a global rule replaces the
+global one entirely (and a project rule can disable a global rule by
+setting `enabled = false` with the same id).
+
+`veer install` writes the per-repo pieces (`.claude/settings.json`,
+`.veer/config.toml`, `.claude/skills/veer/SKILL.md`).
+`veer install --global` writes the home-directory pieces
+(`~/.claude/settings.json`, `~/.config/veer/config.toml`,
+`~/.claude/skills/veer/SKILL.md`) and applies to every project. Run both
+to get a global hook with project-level overrides.
+
+### When to put a rule global vs. project
+
+- **Project** rules redirect repo-specific tooling. Match
+  `Justfile`/`package.json scripts`/`Makefile` targets and the underlying
+  tools they wrap (`pytest` -> `just test`, `ruff check` -> `just lint`,
+  `cargo test` -> `just test`). These belong in `.veer/config.toml`
+  alongside the rest of the repo's configuration.
+- **Global** rules codify personal cross-cutting preferences that travel
+  with you between repos. Examples: always reject `curl ... | bash`,
+  always reject `git push --force` against `main`/`master`, always reject
+  `rm -rf $HOME` / `rm -rf ~`. Put these in
+  `~/.config/veer/config.toml`.
+- **When in doubt, prefer project.** Global rules silently apply
+  everywhere, which is great for footguns and bad for anything
+  repo-specific.
+
 ## Read current state first
 
 Before suggesting rule changes, understand what's there:
 
 ```
-veer list                       # pretty table of rules
-cat .veer/config.toml           # raw TOML (edit this directly)
-veer validate                   # check syntax + rule schema
+veer list                       # pretty table of rules; shows Source column
+                                # (project/global) when both files contribute
+cat .veer/config.toml           # raw per-repo TOML (edit this directly)
+cat ~/.config/veer/config.toml  # raw global TOML (edit this directly)
+veer validate                   # check syntax + rule schema (project)
+veer validate --global          # same, against the global file
 ```
 
 ## Preview before committing a rule
@@ -219,22 +259,35 @@ scolding: "Use `just deploy` which wraps the force-push safely" beats
 
 ## Adding a rule
 
-Two paths, both edit `.veer/config.toml`:
+Two paths, both edit a config TOML file. Default target is the per-repo
+`.veer/config.toml`; pass `--global` to target `~/.config/veer/config.toml`
+instead.
 
 **CLI** (good for quick additions):
 
 ```
+# Per-repo (default):
 veer add \
   --id use-just-test \
   --action reject \
   --command pytest \
   --message "Use 'just test' instead of invoking pytest directly."
+
+# Global (applies to every project):
+veer add --global \
+  --id no-curl-pipe-shell \
+  --action reject \
+  --command curl \
+  --message "Don't pipe curl to bash/sh. Download, inspect, then execute."
 ```
+
+`veer remove --global <id>` and `veer validate --global` target the same
+global file.
 
 **Direct TOML edit** (good when you need non-trivial match patterns):
 
 ```
-# append to .veer/config.toml:
+# append to .veer/config.toml (or ~/.config/veer/config.toml for global):
 [[rule]]
 id = "block-force-push-main"
 action = "reject"
@@ -245,7 +298,8 @@ arg_all = ["push", "--force"]
 # and we could add arg matching for "main" if needed
 ```
 
-After editing, always run `veer validate` to catch typos.
+After editing, always run `veer validate` (or `veer validate --global`) to
+catch typos.
 
 ## Proactively suggesting rules
 

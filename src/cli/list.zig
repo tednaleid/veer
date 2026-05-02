@@ -6,20 +6,39 @@ const config_mod = @import("../config/config.zig");
 const Table = @import("../display/table.zig").Table;
 
 /// Run the list command. Outputs rules table to writer.
-pub fn run(allocator: std.mem.Allocator, rules: []const config_mod.Rule, writer: anytype) !u8 {
+/// `sources` is parallel to `rules` when non-null (i.e. when the rules came
+/// from `loadMerged`); the rendered table then includes a `Source` column.
+/// Pass `null` for explicit single-file loads to keep the table compact.
+pub fn run(
+    allocator: std.mem.Allocator,
+    rules: []const config_mod.Rule,
+    sources: ?[]const config_mod.RuleSource,
+    writer: anytype,
+) !u8 {
     if (rules.len == 0) {
         try writer.print("No rules configured.\n", .{});
         return 0;
     }
 
-    var table = Table{ .headers = &.{ "ID", "Action", "Command/Pattern", "Message" } };
+    const show_source = sources != null;
+    if (show_source) std.debug.assert(sources.?.len == rules.len);
+
+    var table = if (show_source)
+        Table{ .headers = &.{ "ID", "Source", "Action", "Command/Pattern", "Message" } }
+    else
+        Table{ .headers = &.{ "ID", "Action", "Command/Pattern", "Message" } };
     defer table.deinit(allocator);
 
-    for (rules) |rule| {
+    for (rules, 0..) |rule, i| {
         const pattern = describeMatch(rule.match);
         const message = if (rule.message) |m| truncate(m, 40) else "";
         const action_str = @tagName(rule.effectiveAction());
-        try table.addRow(allocator, &.{ rule.id, action_str, pattern, message });
+        if (show_source) {
+            const src_str = @tagName(sources.?[i]);
+            try table.addRow(allocator, &.{ rule.id, src_str, action_str, pattern, message });
+        } else {
+            try table.addRow(allocator, &.{ rule.id, action_str, pattern, message });
+        }
     }
 
     try table.render(writer);
@@ -53,21 +72,41 @@ test "list with rules renders table" {
 
     var buf: [2048]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = try run(std.testing.allocator, &rules, stream.writer());
+    const exit_code = try run(std.testing.allocator, &rules, null, stream.writer());
 
     try std.testing.expectEqual(@as(u8, 0), exit_code);
     const output = stream.getWritten();
     try std.testing.expect(std.mem.indexOf(u8, output, "use-just-test") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "rewrite") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "2 rule(s)") != null);
+    // Single-file load: no Source column.
+    try std.testing.expect(std.mem.indexOf(u8, output, "Source") == null);
 }
 
 test "list with no rules" {
     var buf: [256]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = try run(std.testing.allocator, &.{}, stream.writer());
+    const exit_code = try run(std.testing.allocator, &.{}, null, stream.writer());
 
     try std.testing.expectEqual(@as(u8, 0), exit_code);
     const output = stream.getWritten();
     try std.testing.expect(std.mem.indexOf(u8, output, "No rules") != null);
+}
+
+test "list with sources renders Source column" {
+    const rules = [_]config_mod.Rule{
+        .{ .id = "p-rule", .message = "from project", .match = .{ .command = "foo" } },
+        .{ .id = "g-rule", .message = "from global", .match = .{ .command = "bar" } },
+    };
+    const sources = [_]config_mod.RuleSource{ .project, .global };
+
+    var buf: [2048]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    const exit_code = try run(std.testing.allocator, &rules, &sources, stream.writer());
+
+    try std.testing.expectEqual(@as(u8, 0), exit_code);
+    const output = stream.getWritten();
+    try std.testing.expect(std.mem.indexOf(u8, output, "Source") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "project") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "global") != null);
 }

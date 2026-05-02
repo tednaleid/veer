@@ -16,6 +16,7 @@ const stats_cmd = @import("cli/stats.zig");
 const scan_cmd = @import("cli/scan.zig");
 const test_cmd = @import("cli/test_cmd.zig");
 const validate_cmd = @import("cli/validate_cmd.zig");
+const config_path_mod = @import("cli/config_path.zig");
 const settings_mod = @import("claude/settings.zig");
 
 const Command = enum { check, install, uninstall, list, add, remove, stats, scan, @"test", validate };
@@ -82,6 +83,10 @@ const LoadedConfig = struct {
     settings: config_mod.Settings,
     parsed_file: ?@import("toml").Parsed(config_mod.Config),
     merged: ?config_mod.MergedConfig,
+    /// Parallel to `rules`; populated only when `merged != null`. Lets
+    /// `list`/`test` show which file each rule came from. `null` when the
+    /// config was loaded from an explicit single-file path.
+    sources: ?[]const config_mod.RuleSource,
 };
 
 /// Load config from explicit path or auto-discover. Exits on failure.
@@ -93,6 +98,7 @@ fn loadConfig(allocator: std.mem.Allocator, config_path: ?[]const u8) LoadedConf
                 .settings = result.value.settings,
                 .parsed_file = result,
                 .merged = null,
+                .sources = null,
             };
         } else |_| {
             std.debug.print("veer: failed to load config: {s}\n", .{path});
@@ -106,6 +112,7 @@ fn loadConfig(allocator: std.mem.Allocator, config_path: ?[]const u8) LoadedConf
             .settings = result.config.settings,
             .parsed_file = null,
             .merged = result,
+            .sources = result.sources,
         };
     } else |err| {
         if (err == error.NoConfigFound) {
@@ -144,6 +151,7 @@ fn loadConfigForCheck(allocator: std.mem.Allocator, config_path: ?[]const u8) Lo
                 .settings = result.value.settings,
                 .parsed_file = result,
                 .merged = null,
+                .sources = null,
             };
         } else |_| {
             std.debug.print(
@@ -161,6 +169,7 @@ fn loadConfigForCheck(allocator: std.mem.Allocator, config_path: ?[]const u8) Lo
             .settings = result.config.settings,
             .parsed_file = null,
             .merged = result,
+            .sources = result.sources,
         };
     } else |err| {
         if (err == error.NoConfigFound) {
@@ -417,7 +426,7 @@ fn runList(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
 
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = list_cmd.run(allocator, loaded.rules, stream.writer()) catch {
+    const exit_code = list_cmd.run(allocator, loaded.rules, loaded.sources, stream.writer()) catch {
         std.debug.print("veer list: internal error\n", .{});
         std.process.exit(1);
     };
@@ -437,6 +446,7 @@ fn runAdd(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
         \\    --message <str>     Message to display.
         \\    --rewrite-to <str>  Command to rewrite to.
         \\    --config <str>      Path to config file (default: .veer/config.toml).
+        \\    --global            Write to ~/.config/veer/config.toml instead.
         \\
     );
     var diag = clap.Diagnostic{};
@@ -448,6 +458,9 @@ fn runAdd(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
 
     if (res.args.help != 0) printSubHelp(&params);
 
+    var resolved = resolveRuleConfigPathOrExit(allocator, res.args.global != 0, res.args.config, "add");
+    defer resolved.deinit(allocator);
+
     const opts = add_cmd.AddOptions{
         .action = res.args.action,
         .command = res.args.command,
@@ -455,7 +468,7 @@ fn runAdd(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
         .name = res.args.name,
         .message = res.args.message,
         .rewrite_to = res.args.@"rewrite-to",
-        .config_path = res.args.config orelse ".veer/config.toml",
+        .config_path = resolved.path,
     };
 
     var buf: [1024]u8 = undefined;
@@ -474,6 +487,7 @@ fn runRemove(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void
     const params = comptime clap.parseParamsComptime(
         \\-h, --help          Display this help and exit.
         \\    --config <str>  Path to config file (default: .veer/config.toml).
+        \\    --global        Remove from ~/.config/veer/config.toml instead.
         \\<str>
         \\
     );
@@ -492,11 +506,12 @@ fn runRemove(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void
         std.process.exit(1);
     };
 
-    const config_path = res.args.config orelse ".veer/config.toml";
+    var resolved = resolveRuleConfigPathOrExit(allocator, res.args.global != 0, res.args.config, "remove");
+    defer resolved.deinit(allocator);
 
     var buf: [1024]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = remove_cmd.run(allocator, rule_id, config_path, stream.writer()) catch {
+    const exit_code = remove_cmd.run(allocator, rule_id, resolved.path, stream.writer()) catch {
         std.debug.print("veer remove: internal error\n", .{});
         std.process.exit(1);
     };
@@ -648,7 +663,7 @@ fn runTest(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
 
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = test_cmd.run(allocator, loaded.rules, opts, stream.writer()) catch {
+    const exit_code = test_cmd.run(allocator, loaded.rules, loaded.sources, opts, stream.writer()) catch {
         std.debug.print("veer test: internal error\n", .{});
         std.process.exit(1);
     };
@@ -662,6 +677,7 @@ fn runValidate(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !vo
     const params = comptime clap.parseParamsComptime(
         \\-h, --help          Display this help and exit.
         \\    --config <str>  Path to config file (default: .veer/config.toml).
+        \\    --global        Validate ~/.config/veer/config.toml instead.
         \\
     );
     var diag = clap.Diagnostic{};
@@ -673,11 +689,12 @@ fn runValidate(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !vo
 
     if (res.args.help != 0) printSubHelp(&params);
 
-    const config_path = res.args.config orelse ".veer/config.toml";
+    var resolved = resolveRuleConfigPathOrExit(allocator, res.args.global != 0, res.args.config, "validate");
+    defer resolved.deinit(allocator);
 
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = validate_cmd.run(allocator, .{ .config_path = config_path }, stream.writer()) catch {
+    const exit_code = validate_cmd.run(allocator, .{ .config_path = resolved.path }, stream.writer()) catch {
         std.debug.print("veer validate: internal error\n", .{});
         std.process.exit(1);
     };
@@ -685,6 +702,26 @@ fn runValidate(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !vo
     const output = stream.getWritten();
     if (output.len > 0) _ = std.fs.File.stdout().write(output) catch {};
     std.process.exit(exit_code);
+}
+
+/// Wrapper around `config_path_mod.resolve` that maps errors to user-facing
+/// messages and exits the process. Keeps the runAdd/runRemove/runValidate
+/// dispatchers compact.
+fn resolveRuleConfigPathOrExit(allocator: std.mem.Allocator, global: bool, config_arg: ?[]const u8, verb: []const u8) config_path_mod.Resolved {
+    return config_path_mod.resolve(allocator, global, config_arg) catch |err| switch (err) {
+        error.MutuallyExclusive => {
+            std.debug.print("veer {s}: --global and --config are mutually exclusive\n", .{verb});
+            std.process.exit(1);
+        },
+        error.NoHome => {
+            std.debug.print("veer {s}: --global requires $HOME to be set\n", .{verb});
+            std.process.exit(1);
+        },
+        error.OutOfMemory => {
+            std.debug.print("veer {s}: out of memory\n", .{verb});
+            std.process.exit(1);
+        },
+    };
 }
 
 fn printMainHelp() void {
