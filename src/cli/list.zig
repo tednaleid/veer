@@ -23,21 +23,27 @@ pub fn run(
     const show_source = sources != null;
     if (show_source) std.debug.assert(sources.?.len == rules.len);
 
+    // Match strings are composed per-row; lifetime must outlive table.render.
+    // An arena scoped to this function is the simplest way to do that.
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
     var table = if (show_source)
-        Table{ .headers = &.{ "ID", "Source", "Action", "Command/Pattern", "Message" } }
+        Table{ .headers = &.{ "ID", "Source", "Action", "Tool", "Match", "Message" } }
     else
-        Table{ .headers = &.{ "ID", "Action", "Command/Pattern", "Message" } };
+        Table{ .headers = &.{ "ID", "Action", "Tool", "Match", "Message" } };
     defer table.deinit(allocator);
 
     for (rules, 0..) |rule, i| {
-        const pattern = describeMatch(rule.match);
+        const match_str = try formatMatch(arena_alloc, rule.match);
         const message = if (rule.message) |m| truncate(m, 40) else "";
         const action_str = @tagName(rule.effectiveAction());
         if (show_source) {
             const src_str = @tagName(sources.?[i]);
-            try table.addRow(allocator, &.{ rule.id, src_str, action_str, pattern, message });
+            try table.addRow(allocator, &.{ rule.id, src_str, action_str, rule.tool, match_str, message });
         } else {
-            try table.addRow(allocator, &.{ rule.id, action_str, pattern, message });
+            try table.addRow(allocator, &.{ rule.id, action_str, rule.tool, match_str, message });
         }
     }
 
@@ -46,15 +52,122 @@ pub fn run(
     return 0;
 }
 
-fn describeMatch(m: config_mod.MatchConfig) []const u8 {
-    if (m.command) |cmd| return cmd;
-    if (m.command_regex) |r| return r;
-    if (m.flag) |f| return f;
-    if (m.arg) |a| return a;
-    if (m.raw_regex) |r| return r;
-    if (m.command_any != null) return "(command_any)";
-    if (m.command_all != null) return "(command_all)";
-    return "(complex)";
+/// Render a `MatchConfig` as a single readable line for the `Match` column.
+/// AND-combined fields are space-separated; lists use brace expansion; regex
+/// fields are wrapped in `/.../`. Memory comes from `arena`.
+pub fn formatMatch(arena: std.mem.Allocator, m: config_mod.MatchConfig) ![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var aw = buf.writer(arena);
+
+    // -- command portion --
+    if (m.command_all) |cmds| {
+        for (cmds, 0..) |c, i| {
+            if (i > 0) try aw.writeAll(" | ");
+            try aw.writeAll(c);
+        }
+    } else if (m.command_any) |cmds| {
+        try writeBraceList(&aw, cmds);
+    } else if (m.command) |c| {
+        try aw.writeAll(c);
+    } else if (m.command_regex) |r| {
+        try aw.print("/{s}/", .{r});
+    }
+
+    // -- positional args --
+    if (m.arg) |a| try writeAfterSep(&aw, &buf, a);
+    if (m.arg_all) |args| for (args) |a| try writeAfterSep(&aw, &buf, a);
+    if (m.arg_any) |args| {
+        try ensureSep(&aw, &buf);
+        try writeBraceList(&aw, args);
+    }
+    if (m.arg_regex) |r| {
+        try ensureSep(&aw, &buf);
+        try aw.print("arg /{s}/", .{r});
+    }
+
+    // -- flags --
+    if (m.flag) |f| try writeFlag(&aw, &buf, f);
+    if (m.flag_all) |fs| for (fs) |f| try writeFlag(&aw, &buf, f);
+    if (m.flag_any) |fs| {
+        try ensureSep(&aw, &buf);
+        try aw.writeByte('{');
+        for (fs, 0..) |f, i| {
+            if (i > 0) try aw.writeByte(',');
+            try writeFlagBare(&aw, f);
+        }
+        try aw.writeByte('}');
+    }
+
+    // -- whole-input regex --
+    if (m.raw_regex) |r| {
+        try ensureSep(&aw, &buf);
+        try aw.print("raw /{s}/", .{r});
+    }
+
+    // -- content (non-Bash) --
+    if (m.content_regex) |r| {
+        try ensureSep(&aw, &buf);
+        try aw.print("/{s}/", .{r});
+    }
+    if (m.content_contains) |s| {
+        try ensureSep(&aw, &buf);
+        try aw.print("\"{s}\"", .{s});
+    }
+
+    // -- ast shape --
+    if (m.ast) |a| {
+        try ensureSep(&aw, &buf);
+        try aw.writeAll("ast(");
+        var first = true;
+        if (a.has_node) |n| {
+            try aw.writeAll(n);
+            first = false;
+        }
+        if (a.min_depth) |d| {
+            if (!first) try aw.writeByte(',');
+            try aw.print("min_depth={d}", .{d});
+            first = false;
+        }
+        if (a.min_count) |c| {
+            if (!first) try aw.writeByte(',');
+            try aw.print("min_count={d}", .{c});
+        }
+        try aw.writeByte(')');
+    }
+
+    if (buf.items.len == 0) try aw.writeAll("(any)");
+    return buf.items;
+}
+
+fn ensureSep(aw: anytype, buf: *std.ArrayListUnmanaged(u8)) !void {
+    if (buf.items.len > 0) try aw.writeByte(' ');
+}
+
+fn writeAfterSep(aw: anytype, buf: *std.ArrayListUnmanaged(u8), s: []const u8) !void {
+    try ensureSep(aw, buf);
+    try aw.writeAll(s);
+}
+
+fn writeBraceList(aw: anytype, items: []const []const u8) !void {
+    try aw.writeByte('{');
+    for (items, 0..) |s, i| {
+        if (i > 0) try aw.writeByte(',');
+        try aw.writeAll(s);
+    }
+    try aw.writeByte('}');
+}
+
+fn writeFlag(aw: anytype, buf: *std.ArrayListUnmanaged(u8), name: []const u8) !void {
+    try ensureSep(aw, buf);
+    try writeFlagBare(aw, name);
+}
+
+/// Single-char names render as `-X`, longer names as `--XX`. Mirrors the
+/// matcher's own short/long flag semantics so the rendered preview matches
+/// what users will type.
+fn writeFlagBare(aw: anytype, name: []const u8) !void {
+    if (name.len == 1) try aw.writeAll("-") else try aw.writeAll("--");
+    try aw.writeAll(name);
 }
 
 fn truncate(s: []const u8, max_len: usize) []const u8 {
@@ -81,6 +194,12 @@ test "list with rules renders table" {
     try std.testing.expect(std.mem.indexOf(u8, output, "2 rule(s)") != null);
     // Single-file load: no Source column.
     try std.testing.expect(std.mem.indexOf(u8, output, "Source") == null);
+    // New columns are present.
+    try std.testing.expect(std.mem.indexOf(u8, output, "Tool") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "Match") != null);
+    // Bash is the default tool; command_all renders as a pipeline summary.
+    try std.testing.expect(std.mem.indexOf(u8, output, "Bash") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "curl | bash") != null);
 }
 
 test "list with no rules" {
@@ -109,4 +228,84 @@ test "list with sources renders Source column" {
     try std.testing.expect(std.mem.indexOf(u8, output, "Source") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "project") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "global") != null);
+}
+
+// -- formatMatch unit tests --
+
+fn expectFormat(expected: []const u8, m: config_mod.MatchConfig) !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const got = try formatMatch(arena.allocator(), m);
+    try std.testing.expectEqualStrings(expected, got);
+}
+
+test "formatMatch: bare command" {
+    try expectFormat("zig", .{ .command = "zig" });
+}
+
+test "formatMatch: command + arg + long flag" {
+    try expectFormat("zig fmt --check", .{
+        .command = "zig",
+        .arg = "fmt",
+        .flag = "check",
+    });
+}
+
+test "formatMatch: command + arg_all + long flag (zig build test --fuzz)" {
+    try expectFormat("zig build test --fuzz", .{
+        .command = "zig",
+        .arg_all = &.{ "build", "test" },
+        .flag = "fuzz",
+    });
+}
+
+test "formatMatch: short flag uses single dash" {
+    try expectFormat("rm -r -f", .{
+        .command = "rm",
+        .flag_all = &.{ "r", "f" },
+    });
+}
+
+test "formatMatch: command_all renders as pipeline" {
+    try expectFormat("curl | bash", .{ .command_all = &.{ "curl", "bash" } });
+}
+
+test "formatMatch: command_any uses brace list" {
+    try expectFormat("{ruff,uvx}", .{ .command_any = &.{ "ruff", "uvx" } });
+}
+
+test "formatMatch: command_regex wrapped in slashes" {
+    try expectFormat("/python[23]?/", .{ .command_regex = "python[23]?" });
+}
+
+test "formatMatch: arg_regex carries an arg label" {
+    try expectFormat("git arg /\\.py$/", .{
+        .command = "git",
+        .arg_regex = "\\.py$",
+    });
+}
+
+test "formatMatch: flag_any in brace list with mixed lengths" {
+    try expectFormat("git {-f,--force}", .{
+        .command = "git",
+        .flag_any = &.{ "f", "force" },
+    });
+}
+
+test "formatMatch: content_regex (non-Bash tool)" {
+    try expectFormat("/[Aa]ctually/", .{ .content_regex = "[Aa]ctually" });
+}
+
+test "formatMatch: content_contains" {
+    try expectFormat("\"TODO\"", .{ .content_contains = "TODO" });
+}
+
+test "formatMatch: ast block" {
+    try expectFormat("ast(pipeline,min_count=4)", .{
+        .ast = .{ .has_node = "pipeline", .min_count = 4 },
+    });
+}
+
+test "formatMatch: empty match falls back to (any)" {
+    try expectFormat("(any)", .{});
 }

@@ -420,21 +420,29 @@ To remove, use `veer uninstall` (same scope flags).
 
 ### veer list
 
-Display current rules. When run against an auto-discovered config (project +
-global merged), the output adds a `Source` column showing whether each rule
-came from `.veer/config.toml` (project) or `~/.config/veer/config.toml`
-(global). With an explicit `--config <path>`, the column is omitted.
+Display current rules. The `Tool` column is the Claude Code tool the rule
+matches (`Bash` by default; `ExitPlanMode` for plan-content rules). The
+`Match` column is a short shell-like preview of the rule's match section --
+e.g. `zig build test --fuzz` for `command="zig", arg_all=["build","test"],
+flag="fuzz"`. Lists render as brace expansion (`{ruff,uvx}`); regexes wrap
+in `/.../`; `command_all` renders as a pipeline (`curl | bash`).
+
+When run against an auto-discovered config (project + global merged), the
+output adds a `Source` column showing whether each rule came from
+`.veer/config.toml` (project) or `~/.config/veer/config.toml` (global).
+With an explicit `--config <path>`, the column is omitted.
 
 ```
 Usage: veer list [--config <path>]
 
 Example output (merged):
-  ID                 Source   Action   Command/Pattern  Message
-  -----------------  -------  -------  ---------------  -----------------------
-  use-just-test      project  rewrite  pytest           Use just test.
-  no-curl-pipe-bash  global   reject   (command_all)    Don't pipe curl to bash.
+  ID                  Source   Action   Tool          Match                  Message
+  ------------------  -------  -------  ------------  ---------------------  -----------------------
+  use-just-test       project  reject   Bash          zig build test         Use 'just test'.
+  no-curl-pipe-shell  global   reject   Bash          curl | bash            Don't pipe curl to bash.
+  no-actually-plans   global   reject   ExitPlanMode  /[Aa]ctually/          Plans must not contain "actually".
 
-  2 rule(s)
+  3 rule(s)
 ```
 
 ### veer add
