@@ -7,6 +7,12 @@ on:
 permissions:
   contents: write
 
+env:
+  # Opt into Node.js 24 ahead of GitHub's June 2026 forced cutover.
+  # mlugg/setup-zig still declares node20 in its action.yml; this flag
+  # makes the runner execute it on Node 24 anyway.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build:
     strategy:
