@@ -3,14 +3,6 @@
 # See .claude/skills/veer/SKILL.md for a guide on adding rules.
 
 [[rule]]
-id = "no-curl-pipe-shell"
-name = "Block curl piped to a shell"
-action = "reject"
-message = "Don't pipe curl to bash/sh -- download, inspect, then execute."
-[rule.match]
-command_all = ["curl", "bash"]
-
-[[rule]]
 id = "use-just-fuzz"
 name = "Redirect zig fuzz to just fuzz"
 action = "reject"
@@ -66,20 +58,6 @@ message = "Use 'just build' instead of invoking zig build directly."
 command = "zig"
 arg = "build"
 
-# Rewrite `echo "---"` to `echo ---` (no quotes). Claude Code treats the
-# quoted form as "quoted characters in flag names" and prompts for approval;
-# the unquoted form is identical at the shell level and approval-free. Works
-# standalone and inside compound statements -- veer splices the replacement
-# into the matched subcommand and preserves everything around it.
-[[rule]]
-id = "echo-separator-unquote"
-name = "Drop quotes around --- separators to skip approval prompts"
-action = "rewrite"
-rewrite_to = "echo ---"
-[rule.match]
-command = "echo"
-arg = "---"
-
 # Deliberate test probe: won't match any real command. Use the unique
 # string `veer-rewrite-probe` to verify rewrite behavior end-to-end in
 # Claude Code (the verbose banner should show the transformation).
@@ -91,17 +69,3 @@ rewrite_to = "echo \"veer rewrote the probe successfully\""
 [rule.match]
 command = "echo"
 arg = "veer-rewrite-probe"
-
-# Plan-quality rule: reject ExitPlanMode when the plan body contains
-# "actually". The word almost always indicates the agent changed direction
-# mid-plan, leaving the document with a contradiction that confuses whoever
-# implements it. veer locates the plan file via the session's transcript
-# and matches against its body.
-[[rule]]
-id = "no-actually-in-plans"
-name = "Reject plans that contain 'actually'"
-tool = "ExitPlanMode"
-action = "reject"
-message = "Plans must not contain 'actually' -- it usually means you changed direction mid-plan. Rewrite so the plan reads as one coherent direction."
-[rule.match]
-content_regex = "[Aa]ctually"
