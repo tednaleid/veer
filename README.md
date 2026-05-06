@@ -571,6 +571,12 @@ Claude Code                    veer                         Tool
 
 Shell commands are parsed into ASTs using tree-sitter-bash, giving structural understanding of pipelines, subshells, command substitutions, flags, and arguments -- rather than relying on fragile regex matching.
 
+### When veer isn't installed (fail-open)
+
+If `veer` is registered as a hook in `settings.json` but the binary isn't on the PATH (uninstalled, not yet built, fresh checkout of an open-source project, etc.), Claude Code treats the missing hook as a **non-blocking** failure: the tool call proceeds normally and the user sees a `PreToolUse:Bash hook error` notification in the UI. The agent itself receives no signal -- from its perspective, the call simply ran.
+
+This is intentional. A `.veer/config.toml` checked into an open-source repo shouldn't block contributors who haven't installed veer. The tradeoff: rules silently stop being enforced if veer goes missing. If you depend on a specific rule for safety (rather than convenience), don't rely on veer alone for it -- pair it with Claude Code's built-in `deniedTools` / permission system, which fails closed.
+
 ## Performance
 
 | Operation | Target |
