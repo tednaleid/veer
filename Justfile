@@ -237,6 +237,28 @@ install:
         echo "Make sure ~/.local/bin is in your PATH."
     fi
 
+# Remove the ~/.local/bin/veer symlink (revert to brew-installed veer)
+uninstall:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    link="$HOME/.local/bin/veer"
+    if [ ! -e "$link" ] && [ ! -L "$link" ]; then
+        echo "Not installed: $link does not exist."
+        exit 0
+    fi
+    if [ ! -L "$link" ]; then
+        echo "Refusing to remove $link: not a symlink (looks like a real binary, e.g. brew)."
+        exit 1
+    fi
+    target=$(readlink "$link")
+    rm "$link"
+    echo "Removed: $link -> $target"
+    if command -v veer >/dev/null 2>&1; then
+        echo "Now resolving to: $(command -v veer)"
+    else
+        echo "No veer found on PATH."
+    fi
+
 # Bump version, commit, tag with release notes, and push.
 # Usage: just bump 1.2.3 (or just bump for patch increment)
 bump version="":
