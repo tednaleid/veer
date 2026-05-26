@@ -36,6 +36,13 @@ pub const ConfigError = error{
 /// `veer test` to show users which config a rule came from.
 pub const RuleSource = enum { local, project, global };
 
+/// One tier of rules to merge, tagged with where it came from.
+/// In `mergeRules`, earlier tiers have higher precedence.
+pub const RuleTier = struct {
+    rules: []const Rule,
+    source: RuleSource,
+};
+
 /// Output of `mergeRules`. The two slices are parallel: `sources[i]` describes
 /// where `rules[i]` came from. Both are owned by the caller.
 pub const MergeResult = struct {
@@ -99,31 +106,25 @@ pub fn loadFile(allocator: std.mem.Allocator, path: []const u8) !toml.Parsed(Con
     return loadString(allocator, content);
 }
 
-/// Merge two configs. Project rules override global rules with the same ID.
-/// Project rules come first (definition order), then non-overridden global rules.
+/// Fold an ordered list of tiers into one merged rule set. Earlier tiers
+/// have higher precedence: the first occurrence of a rule `id` wins and
+/// later tiers with the same id are dropped. Output order preserves tier
+/// order (all kept tier[0] rules, then kept tier[1] rules, ...), which keeps
+/// higher-precedence rules earlier for the first-match-wins evaluator.
 /// Caller owns both slices on the returned `MergeResult`.
-pub fn mergeRules(allocator: std.mem.Allocator, global_rules: []const Rule, project_rules: []const Rule) !MergeResult {
+pub fn mergeRules(allocator: std.mem.Allocator, tiers: []const RuleTier) !MergeResult {
     var rules = std.ArrayListUnmanaged(Rule).empty;
     errdefer rules.deinit(allocator);
     var sources = std.ArrayListUnmanaged(RuleSource).empty;
     errdefer sources.deinit(allocator);
 
-    for (project_rules) |r| {
-        try rules.append(allocator, r);
-        try sources.append(allocator, .project);
-    }
-
-    for (global_rules) |global_rule| {
-        var overridden = false;
-        for (project_rules) |project_rule| {
-            if (std.mem.eql(u8, global_rule.id, project_rule.id)) {
-                overridden = true;
-                break;
+    for (tiers) |tier| {
+        next_rule: for (tier.rules) |r| {
+            for (rules.items) |existing| {
+                if (std.mem.eql(u8, existing.id, r.id)) continue :next_rule;
             }
-        }
-        if (!overridden) {
-            try rules.append(allocator, global_rule);
-            try sources.append(allocator, .global);
+            try rules.append(allocator, r);
+            try sources.append(allocator, tier.source);
         }
     }
 
@@ -243,7 +244,11 @@ pub fn loadMerged(allocator: std.mem.Allocator) !MergedConfig {
     if (result.project_parsed != null and result.global_parsed != null) {
         const project = result.project_parsed.?.value;
         const global = result.global_parsed.?.value;
-        const merge = try mergeRules(allocator, global.rule, project.rule);
+        const tiers = [_]RuleTier{
+            .{ .rules = project.rule, .source = .project },
+            .{ .rules = global.rule, .source = .global },
+        };
+        const merge = try mergeRules(allocator, &tiers);
         result.merged_rules = merge.rules;
         result.sources = merge.sources;
         result.config = .{
@@ -374,38 +379,87 @@ test "loadFile returns FileNotFound for missing file" {
     try std.testing.expectError(error.FileNotFound, loadFile(std.testing.allocator, "/nonexistent/path/config.toml"));
 }
 
-test "mergeRules combines non-overlapping rules, project first" {
-    const global = [_]Rule{
-        .{ .id = "g1", .message = "m", .match = .{ .command = "a" } },
+test "mergeRules combines non-overlapping rules in tier order" {
+    const local = [_]Rule{
+        .{ .id = "l1", .message = "m", .match = .{ .command = "x" } },
     };
     const project = [_]Rule{
         .{ .id = "p1", .message = "m", .match = .{ .command = "b" } },
     };
+    const global = [_]Rule{
+        .{ .id = "g1", .message = "m", .match = .{ .command = "a" } },
+    };
+    const tiers = [_]RuleTier{
+        .{ .rules = &local, .source = .local },
+        .{ .rules = &project, .source = .project },
+        .{ .rules = &global, .source = .global },
+    };
 
-    const merged = try mergeRules(std.testing.allocator, &global, &project);
+    const merged = try mergeRules(std.testing.allocator, &tiers);
     defer std.testing.allocator.free(merged.rules);
     defer std.testing.allocator.free(merged.sources);
 
-    try std.testing.expectEqual(@as(usize, 2), merged.rules.len);
-    try std.testing.expectEqual(@as(usize, 2), merged.sources.len);
-    // Project rules first, then global
-    try std.testing.expectEqualStrings("p1", merged.rules[0].id);
-    try std.testing.expectEqualStrings("g1", merged.rules[1].id);
-    try std.testing.expectEqual(RuleSource.project, merged.sources[0]);
-    try std.testing.expectEqual(RuleSource.global, merged.sources[1]);
+    try std.testing.expectEqual(@as(usize, 3), merged.rules.len);
+    try std.testing.expectEqualStrings("l1", merged.rules[0].id);
+    try std.testing.expectEqualStrings("p1", merged.rules[1].id);
+    try std.testing.expectEqualStrings("g1", merged.rules[2].id);
+    try std.testing.expectEqualSlices(
+        RuleSource,
+        &.{ .local, .project, .global },
+        merged.sources,
+    );
 }
 
-test "mergeRules tags sources for several rules in each list" {
-    const global = [_]Rule{
-        .{ .id = "g1", .message = "m", .match = .{ .command = "a" } },
-        .{ .id = "g2", .message = "m", .match = .{ .command = "b" } },
+test "mergeRules: local overrides project overrides global by id" {
+    const local = [_]Rule{
+        .{ .id = "shared", .name = "Local", .message = "m", .match = .{ .command = "a" } },
     };
+    const project = [_]Rule{
+        .{ .id = "shared", .name = "Project", .message = "m", .match = .{ .command = "a" } },
+        .{ .id = "ponly", .name = "ProjectOnly", .message = "m", .match = .{ .command = "b" } },
+    };
+    const global = [_]Rule{
+        .{ .id = "shared", .name = "Global", .message = "m", .match = .{ .command = "a" } },
+        .{ .id = "ponly", .name = "GlobalShadowed", .message = "m", .match = .{ .command = "c" } },
+        .{ .id = "gonly", .name = "GlobalOnly", .message = "m", .match = .{ .command = "d" } },
+    };
+    const tiers = [_]RuleTier{
+        .{ .rules = &local, .source = .local },
+        .{ .rules = &project, .source = .project },
+        .{ .rules = &global, .source = .global },
+    };
+
+    const merged = try mergeRules(std.testing.allocator, &tiers);
+    defer std.testing.allocator.free(merged.rules);
+    defer std.testing.allocator.free(merged.sources);
+
+    // shared -> local, ponly -> project, gonly -> global
+    try std.testing.expectEqual(@as(usize, 3), merged.rules.len);
+    try std.testing.expectEqualStrings("shared", merged.rules[0].id);
+    try std.testing.expectEqualStrings("Local", merged.rules[0].displayName());
+    try std.testing.expectEqual(RuleSource.local, merged.sources[0]);
+    try std.testing.expectEqualStrings("ponly", merged.rules[1].id);
+    try std.testing.expectEqualStrings("ProjectOnly", merged.rules[1].displayName());
+    try std.testing.expectEqual(RuleSource.project, merged.sources[1]);
+    try std.testing.expectEqualStrings("gonly", merged.rules[2].id);
+    try std.testing.expectEqual(RuleSource.global, merged.sources[2]);
+}
+
+test "mergeRules regression: two tiers behave like the old project-over-global merge" {
     const project = [_]Rule{
         .{ .id = "p1", .message = "m", .match = .{ .command = "c" } },
         .{ .id = "p2", .message = "m", .match = .{ .command = "d" } },
     };
+    const global = [_]Rule{
+        .{ .id = "g1", .message = "m", .match = .{ .command = "a" } },
+        .{ .id = "g2", .message = "m", .match = .{ .command = "b" } },
+    };
+    const tiers = [_]RuleTier{
+        .{ .rules = &project, .source = .project },
+        .{ .rules = &global, .source = .global },
+    };
 
-    const merged = try mergeRules(std.testing.allocator, &global, &project);
+    const merged = try mergeRules(std.testing.allocator, &tiers);
     defer std.testing.allocator.free(merged.rules);
     defer std.testing.allocator.free(merged.sources);
 
@@ -417,24 +471,19 @@ test "mergeRules tags sources for several rules in each list" {
     );
 }
 
-test "mergeRules project overrides global by ID" {
+test "mergeRules with a single tier copies rules and tags the source" {
     const global = [_]Rule{
-        .{ .id = "shared", .name = "Global version", .message = "global msg", .match = .{ .command = "a" } },
+        .{ .id = "g1", .message = "m", .match = .{ .command = "a" } },
     };
-    const project = [_]Rule{
-        .{ .id = "shared", .name = "Project version", .message = "project msg", .match = .{ .command = "a" } },
+    const tiers = [_]RuleTier{
+        .{ .rules = &global, .source = .global },
     };
-
-    const merged = try mergeRules(std.testing.allocator, &global, &project);
+    const merged = try mergeRules(std.testing.allocator, &tiers);
     defer std.testing.allocator.free(merged.rules);
     defer std.testing.allocator.free(merged.sources);
 
     try std.testing.expectEqual(@as(usize, 1), merged.rules.len);
-    try std.testing.expectEqual(@as(usize, 1), merged.sources.len);
-    try std.testing.expectEqualStrings("Project version", merged.rules[0].displayName());
-    try std.testing.expectEqual(Action.reject, merged.rules[0].effectiveAction());
-    // Override semantics: the surviving rule is the project's, so it tags as .project.
-    try std.testing.expectEqual(RuleSource.project, merged.sources[0]);
+    try std.testing.expectEqual(RuleSource.global, merged.sources[0]);
 }
 
 test "loadFile parses basic.toml fixture" {
