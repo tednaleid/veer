@@ -230,6 +230,22 @@ test "list with sources renders Source column" {
     try std.testing.expect(std.mem.indexOf(u8, output, "global") != null);
 }
 
+test "list with local source renders local in Source column" {
+    const rules = [_]config_mod.Rule{
+        .{ .id = "l-rule", .message = "from local", .match = .{ .command = "baz" } },
+    };
+    const sources = [_]config_mod.RuleSource{.local};
+
+    var buf: [2048]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    const exit_code = try run(std.testing.allocator, &rules, &sources, stream.writer());
+
+    try std.testing.expectEqual(@as(u8, 0), exit_code);
+    const output = stream.getWritten();
+    try std.testing.expect(std.mem.indexOf(u8, output, "Source") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "local") != null);
+}
+
 // -- formatMatch unit tests --
 
 fn expectFormat(expected: []const u8, m: config_mod.MatchConfig) !void {
