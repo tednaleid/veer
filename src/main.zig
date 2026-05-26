@@ -328,7 +328,7 @@ fn runInstall(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !voi
 
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = install_cmd.install(allocator, paths, verbose, stream.writer()) catch |err| {
+    const exit_code = install_cmd.install(allocator, paths, scope, verbose, stream.writer()) catch |err| {
         std.debug.print("veer install: {}\n", .{err});
         std.process.exit(1);
     };

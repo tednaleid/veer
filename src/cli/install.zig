@@ -44,7 +44,7 @@ pub const Scope = enum { project, local, global };
 pub const Paths = struct {
     settings: []const u8,
     config: []const u8,
-    skill: []const u8,
+    skill: ?[]const u8,
 };
 
 /// Resolve absolute paths for the given install scope.
@@ -58,8 +58,8 @@ pub fn resolvePaths(allocator: std.mem.Allocator, scope: Scope) !Paths {
         },
         .local => .{
             .settings = ".claude/settings.local.json",
-            .config = ".veer/config.toml",
-            .skill = ".claude/skills/veer/SKILL.md",
+            .config = ".veer/config.local.toml",
+            .skill = null,
         },
         .global => blk: {
             const home = std.posix.getenv("HOME") orelse return error.NoHome;
@@ -76,22 +76,24 @@ pub fn freePaths(allocator: std.mem.Allocator, paths: Paths, scope: Scope) void 
     if (scope == .global) {
         allocator.free(paths.settings);
         allocator.free(paths.config);
-        allocator.free(paths.skill);
+        if (paths.skill) |s| allocator.free(s);
     }
 }
 
 /// Install the veer hook:
 ///   1. Merge veer entry into settings.json (never overwrite unrelated hooks).
-///   2. Create config.toml stub if missing.
-///   3. Write SKILL.md (always overwrite).
+///   2. Create config stub if missing.
+///   3. Write SKILL.md (always overwrite) -- skipped for .local scope.
+///   4. For .local scope, ensure config is excluded from git tracking.
 /// When `verbose` is true, the registered command is `veer check --verbose`,
 /// which causes each tool call to emit a user-visible systemMessage banner.
 /// Returns process exit code (0 on success, 1 on user-facing error).
-pub fn install(allocator: std.mem.Allocator, paths: Paths, verbose: bool, writer: anytype) !u8 {
+pub fn install(allocator: std.mem.Allocator, paths: Paths, scope: Scope, verbose: bool, writer: anytype) !u8 {
     const hook_code = try installHook(allocator, paths.settings, verbose, writer);
     if (hook_code != 0) return hook_code;
     try ensureConfigStub(paths.config, writer);
-    try writeSkillFile(paths.skill, writer);
+    if (paths.skill) |skill| try writeSkillFile(skill, writer);
+    if (scope == .local) try ensureLocalConfigExcluded(allocator, paths.config, writer);
     return 0;
 }
 
@@ -113,10 +115,12 @@ pub fn uninstall(allocator: std.mem.Allocator, paths: Paths, writer: anytype) !u
         try deleteInDir(dir, "veer.db", writer);
         std.fs.cwd().deleteDir(dir) catch {};
     }
-    try deleteIfExists(paths.skill, "skill", writer);
-    // Remove parent veer/ skill dir if empty
-    if (std.mem.lastIndexOfScalar(u8, paths.skill, '/')) |sep| {
-        std.fs.cwd().deleteDir(paths.skill[0..sep]) catch {};
+    if (paths.skill) |skill| {
+        try deleteIfExists(skill, "skill", writer);
+        // Remove parent veer/ skill dir if empty
+        if (std.mem.lastIndexOfScalar(u8, skill, '/')) |sep| {
+            std.fs.cwd().deleteDir(skill[0..sep]) catch {};
+        }
     }
     return 0;
 }
@@ -316,6 +320,14 @@ fn writeSkillFile(path: []const u8, writer: anytype) !void {
     try writer.print("wrote skill {s}\n", .{path});
 }
 
+/// Ensure the local config file is excluded from git tracking via
+/// .git/info/exclude. This is a no-op stub; Task 8 replaces it.
+fn ensureLocalConfigExcluded(allocator: std.mem.Allocator, config_relpath: []const u8, writer: anytype) !void {
+    _ = allocator;
+    _ = config_relpath;
+    _ = writer;
+}
+
 /// Return the parent directory of config_path (e.g. ".veer" from ".veer/config.toml").
 fn configDir(config_path: []const u8) ?[]const u8 {
     return if (std.mem.lastIndexOfScalar(u8, config_path, '/')) |sep|
@@ -392,7 +404,7 @@ fn testPaths(allocator: std.mem.Allocator, tmp_root: []const u8) !Paths {
 fn freeTestPaths(allocator: std.mem.Allocator, paths: Paths) void {
     allocator.free(paths.settings);
     allocator.free(paths.config);
-    allocator.free(paths.skill);
+    if (paths.skill) |s| allocator.free(s);
 }
 
 fn testWriteFile(path: []const u8, content: []const u8) !void {
@@ -436,7 +448,7 @@ test "install merges into empty settings.json" {
 
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    const code = try install(testing.allocator, paths, false, stream.writer());
+    const code = try install(testing.allocator, paths, .project, false, stream.writer());
     try testing.expectEqual(@as(u8, 0), code);
 
     const content = try readFileAlloc(testing.allocator, paths.settings);
@@ -468,7 +480,7 @@ test "install preserves existing non-veer PreToolUse hook" {
 
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    _ = try install(testing.allocator, paths, false, stream.writer());
+    _ = try install(testing.allocator, paths, .project, false, stream.writer());
 
     const content = try readFileAlloc(testing.allocator, paths.settings);
     defer testing.allocator.free(content);
@@ -488,9 +500,9 @@ test "install is idempotent (no duplicate veer entries)" {
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
 
-    _ = try install(testing.allocator, paths, false, stream.writer());
+    _ = try install(testing.allocator, paths, .project, false, stream.writer());
     stream.reset();
-    _ = try install(testing.allocator, paths, false, stream.writer());
+    _ = try install(testing.allocator, paths, .project, false, stream.writer());
 
     const content = try readFileAlloc(testing.allocator, paths.settings);
     defer testing.allocator.free(content);
@@ -518,7 +530,7 @@ test "install rejects invalid JSON in settings.json" {
 
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    const code = try install(testing.allocator, paths, false, stream.writer());
+    const code = try install(testing.allocator, paths, .project, false, stream.writer());
     try testing.expectEqual(@as(u8, 1), code);
 
     // Original file must be untouched
@@ -538,7 +550,7 @@ test "install creates .veer/config.toml stub when missing" {
 
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    _ = try install(testing.allocator, paths, false, stream.writer());
+    _ = try install(testing.allocator, paths, .project, false, stream.writer());
 
     const content = try readFileAlloc(testing.allocator, paths.config);
     defer testing.allocator.free(content);
@@ -560,7 +572,7 @@ test "install preserves existing config.toml" {
 
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    _ = try install(testing.allocator, paths, false, stream.writer());
+    _ = try install(testing.allocator, paths, .project, false, stream.writer());
 
     const content = try readFileAlloc(testing.allocator, paths.config);
     defer testing.allocator.free(content);
@@ -577,13 +589,13 @@ test "install always overwrites skill file" {
     defer freeTestPaths(testing.allocator, paths);
 
     // Pre-populate with stale content
-    try testWriteFile(paths.skill, "stale content");
+    try testWriteFile(paths.skill.?, "stale content");
 
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    _ = try install(testing.allocator, paths, false, stream.writer());
+    _ = try install(testing.allocator, paths, .project, false, stream.writer());
 
-    const content = try readFileAlloc(testing.allocator, paths.skill);
+    const content = try readFileAlloc(testing.allocator, paths.skill.?);
     defer testing.allocator.free(content);
     try testing.expectEqualStrings(skill_content, content);
 }
@@ -630,7 +642,7 @@ test "uninstall deletes config and skill" {
     defer freeTestPaths(testing.allocator, paths);
 
     try testWriteFile(paths.config, "# rules\n");
-    try testWriteFile(paths.skill, "# skill\n");
+    try testWriteFile(paths.skill.?, "# skill\n");
     try testWriteFile(paths.settings, "{}");
 
     var buf: [4096]u8 = undefined;
@@ -638,7 +650,7 @@ test "uninstall deletes config and skill" {
     _ = try uninstall(testing.allocator, paths, stream.writer());
 
     try testing.expect(!fileExistsAbs(paths.config));
-    try testing.expect(!fileExistsAbs(paths.skill));
+    try testing.expect(!fileExistsAbs(paths.skill.?));
 }
 
 test "uninstall is idempotent (nothing to remove)" {
@@ -731,7 +743,7 @@ test "install --verbose writes 'veer check --verbose' into settings.json" {
 
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    _ = try install(testing.allocator, paths, true, stream.writer());
+    _ = try install(testing.allocator, paths, .project, true, stream.writer());
 
     const content = try readFileAlloc(testing.allocator, paths.settings);
     defer testing.allocator.free(content);
@@ -761,9 +773,9 @@ test "install then install --verbose replaces the entry (one entry total)" {
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
 
-    _ = try install(testing.allocator, paths, false, stream.writer());
+    _ = try install(testing.allocator, paths, .project, false, stream.writer());
     stream.reset();
-    _ = try install(testing.allocator, paths, true, stream.writer());
+    _ = try install(testing.allocator, paths, .project, true, stream.writer());
 
     const content = try readFileAlloc(testing.allocator, paths.settings);
     defer testing.allocator.free(content);
@@ -804,9 +816,9 @@ test "install --verbose then install (plain) switches back" {
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
 
-    _ = try install(testing.allocator, paths, true, stream.writer());
+    _ = try install(testing.allocator, paths, .project, true, stream.writer());
     stream.reset();
-    _ = try install(testing.allocator, paths, false, stream.writer());
+    _ = try install(testing.allocator, paths, .project, false, stream.writer());
 
     const content = try readFileAlloc(testing.allocator, paths.settings);
     defer testing.allocator.free(content);
@@ -825,10 +837,42 @@ test "uninstall removes a verbose-form veer entry" {
 
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    _ = try install(testing.allocator, paths, true, stream.writer());
+    _ = try install(testing.allocator, paths, .project, true, stream.writer());
     stream.reset();
     _ = try uninstall(testing.allocator, paths, stream.writer());
 
     // Whole settings.json removed (it only contained the veer hook).
     try testing.expect(!fileExistsAbs(paths.settings));
+}
+
+test "resolvePaths(.local) targets config.local.toml and no skill" {
+    const paths = try resolvePaths(testing.allocator, .local);
+    defer freePaths(testing.allocator, paths, .local);
+    try testing.expectEqualStrings(".claude/settings.local.json", paths.settings);
+    try testing.expectEqualStrings(".veer/config.local.toml", paths.config);
+    try testing.expect(paths.skill == null);
+}
+
+test "install with null skill writes no skill file" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_root = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(tmp_root);
+
+    const paths = Paths{
+        .settings = try std.fmt.allocPrint(testing.allocator, "{s}/.claude/settings.local.json", .{tmp_root}),
+        .config = try std.fmt.allocPrint(testing.allocator, "{s}/.veer/config.local.toml", .{tmp_root}),
+        .skill = null,
+    };
+    defer testing.allocator.free(paths.settings);
+    defer testing.allocator.free(paths.config);
+
+    var buf: [4096]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    _ = try install(testing.allocator, paths, .local, false, stream.writer());
+
+    try testing.expect(fileExistsAbs(paths.config));
+    var skill_buf: [1024]u8 = undefined;
+    const skill_path = try std.fmt.bufPrint(&skill_buf, "{s}/.claude/skills/veer/SKILL.md", .{tmp_root});
+    try testing.expect(!fileExistsAbs(skill_path));
 }
