@@ -4,7 +4,7 @@
 
 **Goal:** Add a third, gitignored `.veer/config.local.toml` config tier (precedence local > project > global) and make `veer install --local` a fully private install.
 
-**Architecture:** Generalize the two-way config merge into an ordered-tier fold over `[local, project, global]` (first-id-wins, output preserves tier order). Replace `config_path.resolve`'s `global: bool` with a `Target` tagged union built by a pure `targetFromFlags` helper, so illegal flag combinations are unrepresentable past the CLI boundary. Redefine `Scope.local` in the installer to seed `config.local.toml`, skip the project skill, and append the local config to an existing `.gitignore`.
+**Architecture:** Generalize the two-way config merge into an ordered-tier fold over `[local, project, global]` (first-id-wins, output preserves tier order). Replace `config_path.resolve`'s `global: bool` with a `Target` tagged union built by a pure `targetFromFlags` helper, so illegal flag combinations are unrepresentable past the CLI boundary. Redefine `Scope.local` in the installer to seed `config.local.toml`, skip the project skill, and exclude the local config via the repo's `.git/info/exclude` (per-repo, uncommitted).
 
 **Tech Stack:** Zig 0.15.2, clap (CLI), zig-toml. Tests live in `test` blocks at the bottom of each source file; run via `just test` / `just check`. Spec: `docs/spec/local-config-tier.md`.
 
@@ -29,10 +29,10 @@ Files created or modified, with responsibility:
 - `src/config/config.zig` (modify) -- `RuleSource` enum, `RuleTier` type, `mergeRules` fold, `mergeSettings` fold, `MergedConfig.local_parsed`, `loadMerged` local discovery + load, `local_config_relpath`, generalized `findConfigUpwards`.
 - `src/cli/test_cmd.zig` (modify) -- add `.local` arm to the `RuleSource` switch in `sourceSuffixFor`.
 - `src/cli/config_path.zig` (modify) -- `Target` union, `targetFromFlags`, `resolve(target)` rewrite.
-- `src/cli/install.zig` (modify) -- `Paths.skill` optional, `resolvePaths(.local)` config path, `install`/`uninstall` skill guards, `install` gitignore append for local scope, gitignore helpers.
+- `src/cli/install.zig` (modify) -- `Paths.skill` optional, `resolvePaths(.local)` config path, `install`/`uninstall` skill guards, `install` git-exclude append for local scope (`.git/info/exclude`), exclude helpers (`gitInfoExcludePath`, `appendExcludeEntry`, `ensureLocalConfigExcluded`).
 - `src/main.zig` (modify) -- `--local` flag on `add`/`remove`/`validate`, `resolveRuleConfigPathOrExit` signature, `install`/`uninstall` help text, pass `scope` into `install_cmd.install`.
 - `src/cli/skill_content.md` (modify) -- document the three-tier table, `--local`, private install.
-- `README.md` (modify) -- document the local tier and gitignore behavior.
+- `README.md` (modify) -- document the local tier and the `.git/info/exclude` behavior.
 
 ---
 
@@ -966,22 +966,22 @@ pub fn install(allocator: std.mem.Allocator, paths: Paths, scope: Scope, verbose
     if (hook_code != 0) return hook_code;
     try ensureConfigStub(paths.config, writer);
     if (paths.skill) |skill| try writeSkillFile(skill, writer);
-    if (scope == .local) try ensureLocalConfigGitignored(allocator, paths.config, writer);
+    if (scope == .local) try ensureLocalConfigExcluded(allocator, local_config_relpath, writer);
     return 0;
 }
 ```
 
-(`ensureLocalConfigGitignored` is implemented in Task 8. For this task, add a temporary no-op stub so the build passes:
+`local_config_relpath` is `".veer/config.local.toml"` (defined in `src/config/config.zig`; import it as needed, e.g. `const config_mod = @import("../config/config.zig");` and use `config_mod.local_config_relpath`, or hardcode the string with a comment -- match how the file already references config paths). `ensureLocalConfigExcluded` is implemented in Task 8. For this task, add a temporary no-op stub so the build passes:
 
 ```zig
-fn ensureLocalConfigGitignored(allocator: std.mem.Allocator, config_path: []const u8, writer: anytype) !void {
+fn ensureLocalConfigExcluded(allocator: std.mem.Allocator, config_relpath: []const u8, writer: anytype) !void {
     _ = allocator;
-    _ = config_path;
+    _ = config_relpath;
     _ = writer;
 }
 ```
 
-Task 8 replaces this stub with the real implementation.)
+Task 8 replaces this stub with the real implementation.
 
 - [ ] **Step 5: Guard the skill delete in `uninstall`**
 
@@ -1041,55 +1041,74 @@ git commit -m "Make install --local fully private (config.local.toml, no skill)"
 
 ---
 
-## Task 8: Append the local config to an existing `.gitignore`
+## Task 8: Add the local config to `.git/info/exclude`
 
-Replace the Task 7 stub with a real `ensureLocalConfigGitignored` that finds the nearest existing `.gitignore` walking up from cwd, appends the config path (relative to that `.gitignore`'s directory) if not already present, and silently does nothing when no `.gitignore` exists.
+Replace the Task 7 stub with a real `ensureLocalConfigExcluded` that adds `.veer/config.local.toml` to the repo's `.git/info/exclude` -- git's per-repo, UNCOMMITTED ignore file. This avoids the leak inherent in editing the tracked `.gitignore` (whose modification would eventually be committed and expose veer to teammates) and the over-breadth of the global excludes.
+
+**Why `git rev-parse --git-path info/exclude` and not a hardcoded `.git/info/exclude`:** in a linked git worktree, `.git` is a FILE pointing at `<repo>/.git/worktrees/<name>`, so the literal path does not exist. `git rev-parse --git-path info/exclude` returns the correct path in plain repos, worktrees, and submodules (verified empirically: it resolves to the shared common-dir `info/exclude`, and an entry there takes effect inside worktrees). `info/exclude` patterns are matched relative to the repo root, exactly like a root `.gitignore`, so the entry is simply `.veer/config.local.toml` with no relative-path math.
 
 **Files:**
-- Modify: `src/cli/install.zig` (`ensureLocalConfigGitignored` + helpers + tests)
+- Modify: `src/cli/install.zig` (`ensureLocalConfigExcluded` + helpers + tests)
 
 - [ ] **Step 1: Write failing tests**
 
-Add to `src/cli/install.zig` test section. These drive the helper directly using a tmp dir; the helper resolves paths against the process cwd, so the tests set the config path as an absolute path under the tmp root and create the `.gitignore` there.
-
-Because `ensureLocalConfigGitignored` walks up from the real cwd, test it via a dedicated lower-level helper `appendGitignoreEntry(gitignore_path, entry, writer)` that is cwd-independent:
+Add to `src/cli/install.zig` test section. The `appendExcludeEntry` helper is cwd-independent (takes an absolute path), so it is driven directly with a tmp file. `gitInfoExcludePath` shells out to git; tests run inside the veer git repo, so it returns a real path ending in `info/exclude`.
 
 ```zig
-test "appendGitignoreEntry adds the entry when missing" {
+test "appendExcludeEntry adds the entry to an existing file" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     const tmp_root = try tmp.dir.realpathAlloc(testing.allocator, ".");
     defer testing.allocator.free(tmp_root);
 
-    var gi_buf: [1024]u8 = undefined;
-    const gi_path = try std.fmt.bufPrint(&gi_buf, "{s}/.gitignore", .{tmp_root});
-    try testWriteFile(gi_path, "node_modules/\n");
+    var ex_buf: [1024]u8 = undefined;
+    const ex_path = try std.fmt.bufPrint(&ex_buf, "{s}/exclude", .{tmp_root});
+    try testWriteFile(ex_path, "# git ignore patterns\n*~\n");
 
     var buf: [1024]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    try appendGitignoreEntry(testing.allocator, gi_path, ".veer/config.local.toml", stream.writer());
+    try appendExcludeEntry(testing.allocator, ex_path, ".veer/config.local.toml", stream.writer());
 
-    const content = try readFileAlloc(testing.allocator, gi_path);
+    const content = try readFileAlloc(testing.allocator, ex_path);
     defer testing.allocator.free(content);
     try testing.expect(std.mem.indexOf(u8, content, ".veer/config.local.toml") != null);
-    try testing.expect(std.mem.indexOf(u8, content, "node_modules/") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "*~") != null);
 }
 
-test "appendGitignoreEntry is idempotent" {
+test "appendExcludeEntry creates the file when missing" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     const tmp_root = try tmp.dir.realpathAlloc(testing.allocator, ".");
     defer testing.allocator.free(tmp_root);
 
-    var gi_buf: [1024]u8 = undefined;
-    const gi_path = try std.fmt.bufPrint(&gi_buf, "{s}/.gitignore", .{tmp_root});
-    try testWriteFile(gi_path, ".veer/config.local.toml\n");
+    // Path under an existing dir, but the exclude file itself does not exist yet.
+    var ex_buf: [1024]u8 = undefined;
+    const ex_path = try std.fmt.bufPrint(&ex_buf, "{s}/exclude", .{tmp_root});
 
     var buf: [1024]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    try appendGitignoreEntry(testing.allocator, gi_path, ".veer/config.local.toml", stream.writer());
+    try appendExcludeEntry(testing.allocator, ex_path, ".veer/config.local.toml", stream.writer());
 
-    const content = try readFileAlloc(testing.allocator, gi_path);
+    const content = try readFileAlloc(testing.allocator, ex_path);
+    defer testing.allocator.free(content);
+    try testing.expect(std.mem.indexOf(u8, content, ".veer/config.local.toml") != null);
+}
+
+test "appendExcludeEntry is idempotent" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_root = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(tmp_root);
+
+    var ex_buf: [1024]u8 = undefined;
+    const ex_path = try std.fmt.bufPrint(&ex_buf, "{s}/exclude", .{tmp_root});
+    try testWriteFile(ex_path, ".veer/config.local.toml\n");
+
+    var buf: [1024]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    try appendExcludeEntry(testing.allocator, ex_path, ".veer/config.local.toml", stream.writer());
+
+    const content = try readFileAlloc(testing.allocator, ex_path);
     defer testing.allocator.free(content);
     var count: usize = 0;
     var i: usize = 0;
@@ -1100,67 +1119,52 @@ test "appendGitignoreEntry is idempotent" {
     try testing.expectEqual(@as(usize, 1), count);
 }
 
-test "findNearestGitignore returns null when none exists" {
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const tmp_root = try tmp.dir.realpathAlloc(testing.allocator, ".");
-    defer testing.allocator.free(tmp_root);
-
-    const found = try findNearestGitignore(testing.allocator, tmp_root);
-    try testing.expect(found == null);
-}
-
-test "findNearestGitignore finds one in an ancestor" {
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const tmp_root = try tmp.dir.realpathAlloc(testing.allocator, ".");
-    defer testing.allocator.free(tmp_root);
-
-    var gi_buf: [1024]u8 = undefined;
-    const gi_path = try std.fmt.bufPrint(&gi_buf, "{s}/.gitignore", .{tmp_root});
-    try testWriteFile(gi_path, "\n");
-    try tmp.dir.makePath("sub/dir");
-    var sub_buf: [1024]u8 = undefined;
-    const sub_abs = try std.fmt.bufPrint(&sub_buf, "{s}/sub/dir", .{tmp_root});
-
-    const found = try findNearestGitignore(testing.allocator, sub_abs);
-    defer if (found) |f| testing.allocator.free(f);
-    try testing.expect(found != null);
-    try testing.expect(std.mem.endsWith(u8, found.?, "/.gitignore"));
+test "gitInfoExcludePath returns a path inside a git repo" {
+    // The test process runs inside the veer git repo, so git resolves a path.
+    const path = try gitInfoExcludePath(testing.allocator);
+    defer if (path) |p| testing.allocator.free(p);
+    try testing.expect(path != null);
+    try testing.expect(std.mem.endsWith(u8, std.mem.trim(u8, path.?, " \t\r\n"), "info/exclude"));
 }
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `just test`
-Expected: FAIL. `appendGitignoreEntry` and `findNearestGitignore` do not exist.
+Expected: FAIL. `appendExcludeEntry` and `gitInfoExcludePath` do not exist.
 
-- [ ] **Step 3: Implement the gitignore helpers**
+- [ ] **Step 3: Implement the helpers**
 
-In `src/cli/install.zig`, replace the Task 7 stub `ensureLocalConfigGitignored` with:
+In `src/cli/install.zig`, replace the Task 7 stub `ensureLocalConfigExcluded` with the following. First confirm the `std.process.Child.run` API against the installed stdlib (`/opt/homebrew/Cellar/zig@0.15/0.15.2/lib/zig/std/process/Child.zig`): it takes a struct with `.allocator` and `.argv` and returns a result with `.term` and owned `.stdout` / `.stderr`. Adjust field/method names if 0.15.2 differs.
 
 ```zig
-/// Walk up from `start_abs` looking for a `.gitignore`. Returns its absolute
-/// path or null. Caller owns the returned slice.
-fn findNearestGitignore(allocator: std.mem.Allocator, start_abs: []const u8) !?[]u8 {
-    var current: []const u8 = start_abs;
-    while (true) {
-        const candidate = try std.fmt.allocPrint(allocator, "{s}/.gitignore", .{current});
-        if (fileExistsAbs(candidate)) return candidate;
-        allocator.free(candidate);
-        const parent = std.fs.path.dirname(current) orelse return null;
-        if (parent.ptr == current.ptr and parent.len == current.len) return null;
-        current = parent;
-    }
+const std = @import("std"); // already imported at top of file; do not duplicate
+
+/// Resolve the repo's per-repo exclude file via git. Returns its path
+/// (possibly relative to cwd) or null if not in a git repo / git unavailable.
+/// `git rev-parse --git-path info/exclude` resolves correctly in plain repos
+/// and in linked worktrees (where `.git` is a file). Caller owns the slice.
+fn gitInfoExcludePath(allocator: std.mem.Allocator) !?[]u8 {
+    const result = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ "git", "rev-parse", "--git-path", "info/exclude" },
+    }) catch return null;
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    if (result.term != .Exited or result.term.Exited != 0) return null;
+    const trimmed = std.mem.trim(u8, result.stdout, " \t\r\n");
+    if (trimmed.len == 0) return null;
+    return try allocator.dupe(u8, trimmed);
 }
 
-/// Append `entry` to the gitignore at `gitignore_path` if no line already
-/// equals it (after trimming). No-op when already present. Uses the same
-/// read-then-rewrite idiom as `writeSkillFile`/`writeJsonAtomic` to avoid
-/// any reliance on a particular seek API.
-fn appendGitignoreEntry(allocator: std.mem.Allocator, gitignore_path: []const u8, entry: []const u8, writer: anytype) !void {
-    const content = readFileAlloc(allocator, gitignore_path) catch |err| switch (err) {
-        error.FileNotFound => return, // caller guarantees it exists; be safe
+/// Append `entry` to the git exclude file at `exclude_path` if no line already
+/// equals it (after trimming). Creates the file if it does not exist (its
+/// parent `info/` dir always exists in a valid git repo). Idempotent. Uses the
+/// read-then-rewrite idiom from `writeSkillFile`/`writeJsonAtomic`.
+fn appendExcludeEntry(allocator: std.mem.Allocator, exclude_path: []const u8, entry: []const u8, writer: anytype) !void {
+    const content = readFileAlloc(allocator, exclude_path) catch |err| switch (err) {
+        error.FileNotFound => try allocator.dupe(u8, ""),
         else => return err,
     };
     defer allocator.free(content);
@@ -1171,69 +1175,59 @@ fn appendGitignoreEntry(allocator: std.mem.Allocator, gitignore_path: []const u8
     }
 
     const needs_nl = content.len > 0 and content[content.len - 1] != '\n';
-    const f = try std.fs.cwd().createFile(gitignore_path, .{ .truncate = true });
+    const f = try std.fs.cwd().createFile(exclude_path, .{ .truncate = true });
     defer f.close();
     try f.writeAll(content);
     if (needs_nl) try f.writeAll("\n");
     try f.writeAll(entry);
     try f.writeAll("\n");
-    try writer.print("added {s} to {s}\n", .{ entry, gitignore_path });
+    try writer.print("excluded {s} via {s}\n", .{ entry, exclude_path });
 }
 
-/// For a local install, append the local config to the nearest existing
-/// `.gitignore`. Never creates a `.gitignore`; silently does nothing when
-/// none is found (e.g. not a git repo). `config_path` is relative to cwd
-/// (e.g. ".veer/config.local.toml").
-fn ensureLocalConfigGitignored(allocator: std.mem.Allocator, config_path: []const u8, writer: anytype) !void {
-    const cwd_abs = std.fs.cwd().realpathAlloc(allocator, ".") catch return;
-    defer allocator.free(cwd_abs);
-
-    const gitignore = (try findNearestGitignore(allocator, cwd_abs)) orelse return;
-    defer allocator.free(gitignore);
-
-    // Entry relative to the gitignore's directory. The config lives at
-    // <cwd_abs>/<config_path>; the gitignore is at <dir>/.gitignore where
-    // <dir> is cwd_abs or an ancestor. Compute the path of the config
-    // relative to <dir>.
-    const dir = std.fs.path.dirname(gitignore).?; // absolute dir of .gitignore
-    const entry = if (std.mem.eql(u8, dir, cwd_abs))
-        try allocator.dupe(u8, config_path)
-    else blk: {
-        // cwd_abs is a descendant of dir: prefix = cwd_abs[dir.len+1..].
-        const prefix = cwd_abs[dir.len + 1 ..];
-        break :blk try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, config_path });
-    };
-    defer allocator.free(entry);
-
-    try appendGitignoreEntry(allocator, gitignore, entry, writer);
+/// For a local install, add the local config to the repo's `.git/info/exclude`
+/// (per-repo, uncommitted). Silently does nothing when not in a git repo.
+/// `config_relpath` is the repo-root-relative path (".veer/config.local.toml"),
+/// which is exactly the pattern `info/exclude` expects.
+fn ensureLocalConfigExcluded(allocator: std.mem.Allocator, config_relpath: []const u8, writer: anytype) !void {
+    const exclude_path = (try gitInfoExcludePath(allocator)) orelse return;
+    defer allocator.free(exclude_path);
+    try appendExcludeEntry(allocator, exclude_path, config_relpath, writer);
 }
 ```
 
-Note: `fileExistsAbs` and `readFileAlloc` already exist in this file; reuse them. Confirm `std.fs.File.seekFromEnd` / `writeAll` API against the installed stdlib (`/opt/homebrew/Cellar/zig@0.15/0.15.2/lib/zig/std/fs/File.zig`) and adjust if the method names differ in 0.15.2; an equivalent is to read the content, then rewrite the file with `content ++ maybe_nl ++ entry ++ "\n"` using the existing `createFile(.{ .truncate = true })` pattern used by `writeSkillFile`. If `seekFromEnd` is awkward, prefer the read-then-rewrite approach for clarity.
+Notes:
+- Do NOT add a second `const std = @import("std");` -- it is already at the top of the file; the line above is only to show which namespace is used.
+- `readFileAlloc` and the `createFile(.{ .truncate = true })` pattern already exist in this file; reuse them.
+- The `gitInfoExcludePath` test asserts the returned path ends in `info/exclude`; the path may be relative (e.g. `.git/info/exclude`) when git is run from the repo root, which is fine -- `std.fs.cwd()` operations in `appendExcludeEntry` honor cwd.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `just test`
 Expected: PASS.
 
-- [ ] **Step 5: Manually verify end to end**
+- [ ] **Step 5: Manually verify end to end (including a worktree)**
 
 Run:
 ```bash
 just build
-cd "$(mktemp -d)" && git init -q && printf 'node_modules/\n' > .gitignore
-"$OLDPWD/zig-out/bin/veer" install --local
-cat .gitignore
-ls -a .veer .claude
-cd "$OLDPWD"
+BIN="$PWD/zig-out/bin/veer"
+# Plain repo:
+d="$(mktemp -d)"; ( cd "$d" && git init -q && "$BIN" install --local \
+  && echo "--- check-ignore ---" && git check-ignore .veer/config.local.toml \
+  && echo "--- status (should NOT list config.local.toml) ---" && git status --porcelain \
+  && echo "--- .gitignore must NOT exist or NOT mention veer ---" && (cat .gitignore 2>/dev/null || echo "(no .gitignore -- good)") \
+  && ls -a .claude .veer )
+rm -rf "$d"
 ```
-Expected: `.gitignore` now contains `.veer/config.local.toml`; `.veer/config.local.toml` exists; `.claude/settings.local.json` exists; no `.claude/skills/veer/SKILL.md` was created.
+Expected: `git check-ignore` prints `.veer/config.local.toml`; `git status --porcelain` does NOT list it; there is no `.gitignore` (veer did not create or touch one); `.claude/settings.local.json` and `.veer/config.local.toml` exist; no `.claude/skills/veer/SKILL.md`.
+
+Optionally also verify inside a worktree of that repo (`git worktree add ../wt` then run `install --local` there and confirm `git check-ignore` works), to confirm the `git rev-parse --git-path` resolution.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add src/cli/install.zig
-git commit -m "Append local config to an existing .gitignore on install --local"
+git commit -m "Exclude local config via .git/info/exclude on install --local"
 ```
 
 ---
@@ -1283,10 +1277,10 @@ Precedence is local > project > global: a local rule with the same `id` as a
 project or global rule replaces it (and `enabled = false` in the local file
 disables a lower-tier rule). `veer install --local` is a fully private
 install -- it puts the hook in `.claude/settings.local.json`, seeds
-`.veer/config.local.toml`, appends that file to an existing `.gitignore`, and
-writes no project skill (it relies on a global skill from
-`veer install --global`). Use it when you want veer in a repo your teammates
-do not use.
+`.veer/config.local.toml`, adds that file to `.git/info/exclude` (git's
+per-repo, uncommitted ignore so it never leaks to teammates), and writes no
+project skill (it relies on a global skill from `veer install --global`). Use
+it when you want veer in a repo your teammates do not use.
 ```
 
 Document the `--local` flag in the "Adding a rule" section near the `--global` examples:
@@ -1303,7 +1297,7 @@ Expected: PASS.
 
 - [ ] **Step 5: Update `README.md`**
 
-Find the section documenting the two config files (search for `~/.config/veer/config.toml`). Add the local tier to the table/list, document precedence (local > project > global), and add a short "Private install" note describing `veer install --local` (private hook, `config.local.toml`, gitignore append, no project skill, recommend running `veer install --global` once for the skill). Keep prose plain: no emojis, no em dashes, no hyperbole (per repo conventions).
+Find the section documenting the two config files (search for `~/.config/veer/config.toml`). Add the local tier to the table/list, document precedence (local > project > global), and add a short "Private install" note describing `veer install --local` (private hook, `config.local.toml`, added to `.git/info/exclude` so it stays uncommitted, no project skill, recommend running `veer install --global` once for the skill). Keep prose plain: no emojis, no em dashes, no hyperbole (per repo conventions).
 
 - [ ] **Step 6: Update install/uninstall help text in `main.zig`**
 
@@ -1312,9 +1306,9 @@ In `runInstall`'s `install_desc` (lines 286-310), replace the `--local` paragrap
 ```zig
         \\With --local, this is a fully private install: the hook goes into
         \\.claude/settings.local.json, the config stub is written to
-        \\.veer/config.local.toml (and appended to an existing .gitignore), and
-        \\no project skill is written. Run 'veer install --global' once so a
-        \\global skill is available.
+        \\.veer/config.local.toml (and added to .git/info/exclude so it stays
+        \\uncommitted), and no project skill is written. Run 'veer install
+        \\--global' once so a global skill is available.
 ```
 
 Update the `--local` flag summary line (line 279):
@@ -1328,7 +1322,7 @@ In `runUninstall`'s `uninstall_desc` (lines 348-365), replace the `--local` para
 ```zig
         \\With --local, the hook is removed from .claude/settings.local.json and
         \\.veer/config.local.toml is deleted (the private install never wrote a
-        \\project skill, and the .gitignore line is left in place).
+        \\project skill, and the .git/info/exclude entry is left in place).
 ```
 
 Update the `--local` flag summary line (line 344):
@@ -1409,6 +1403,6 @@ git commit -m "Document the local config tier and private install"
 - `Target { project, local, global, config }`, `targetFromFlags(local, global, config_arg)`, `resolve(allocator, target)` consistent Tasks 5, 6.
 - `resolveRuleConfigPathOrExit(allocator, local, global, config_arg, verb)` consistent Tasks 6.
 - `Paths.skill: ?[]const u8`, `install(allocator, paths, scope, verbose, writer)` consistent Tasks 7, 8, 9, and the `src/main.zig` call site.
-- `ensureLocalConfigGitignored` / `findNearestGitignore` / `appendGitignoreEntry` defined Task 8, stubbed Task 7.
+- `ensureLocalConfigExcluded` / `gitInfoExcludePath` / `appendExcludeEntry` defined Task 8 (`ensureLocalConfigExcluded` stubbed Task 7).
 
-**Verified against source during planning:** `Settings.log_level` is a `[]const u8` (default `"warn"`), so Task 3 uses string literals and `expectEqualStrings`. Task 8's gitignore append uses the existing read-then-rewrite `createFile(.{ .truncate = true })` idiom (same as `writeSkillFile`), avoiding any seek-API uncertainty.
+**Verified against source during planning:** `Settings.log_level` is a `[]const u8` (default `"warn"`), so Task 3 uses string literals and `expectEqualStrings`. Task 8 locates the per-repo exclude file with `git rev-parse --git-path info/exclude` (verified to resolve correctly inside a worktree) and appends via the existing read-then-rewrite `createFile(.{ .truncate = true })` idiom (same as `writeSkillFile`), avoiding any seek-API uncertainty.

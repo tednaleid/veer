@@ -52,9 +52,14 @@ These were settled during brainstorming and are not open:
    `.claude/settings.local.json` (already), config stub into
    `.veer/config.local.toml` (changed from the shared `.veer/config.toml`),
    and **no project skill file** (relies on a global skill install).
-7. `install --local` gitignore: append `.veer/config.local.toml` to the
-   nearest existing `.gitignore` walking up; never create one, never error
-   outside a git repo, skip silently when none is found.
+7. `install --local` ignore: add `.veer/config.local.toml` to the repo's
+   `.git/info/exclude` (located via `git rev-parse --git-path info/exclude`,
+   which resolves correctly in linked worktrees too). This keeps the ignore
+   rule per-repo and uncommitted, so it never leaks to teammates. Append only
+   if absent (idempotent); skip silently when not in a git repo. Chosen over
+   the tracked `.gitignore` (which would commit the rule) and the global
+   excludes (too broad). Verified empirically that `info/exclude` takes effect
+   inside a worktree.
 
 ## Existing state worth noting
 
@@ -174,13 +179,17 @@ simply overlays whatever the team committed (if anything).
 - Config stub: writes a starter `.veer/config.local.toml` only if absent;
   never clobbers an existing local config (`ensureConfigStub` already
   no-ops when the file exists).
-- gitignore: **only if a `.gitignore` already exists** (nearest one found
-  walking up from the project root, the dir containing `.veer/`), append
-  `.veer/config.local.toml` if not already covered. Idempotent: no duplicate
-  line on re-run. Never creates a `.gitignore`; never errors outside a git
-  repo or when none is found -- the step is skipped silently. (Note:
-  `.claude/settings.local.json` is Claude Code's own file and Claude Code
-  manages its gitignore; veer does not touch it.)
+- ignore registration: add `.veer/config.local.toml` to the repo's
+  `.git/info/exclude` -- git's per-repo, uncommitted ignore file. Locate it
+  with `git rev-parse --git-path info/exclude` (returns the correct path in
+  plain repos and in linked worktrees, where `.git` is a file). `info/exclude`
+  patterns are relative to the repo root, so the entry is exactly
+  `.veer/config.local.toml` (no relative-path computation). Append only if not
+  already present (idempotent). If `git rev-parse` fails (not a git repo, or
+  git unavailable), skip silently. Chosen over the tracked `.gitignore` (which
+  would commit the ignore rule and leak veer to teammates) and over the global
+  excludes (too broad). `.claude/settings.local.json` is Claude Code's own
+  file; veer does not touch its ignore.
 - The hook still goes into `.claude/settings.local.json` (unchanged).
 
 ### 5a. `veer uninstall --local`
@@ -190,9 +199,9 @@ simply overlays whatever the team committed (if anything).
 - Deletes `.veer/config.local.toml` (the new local config target).
 - Skips skill deletion (skill is `null` for `Scope.local`; the private
   install never wrote one).
-- Does not remove the `config.local.toml` line from `.gitignore` (leave the
-  user's gitignore edits alone, matching how uninstall otherwise avoids
-  touching unrelated config).
+- Does not remove the `config.local.toml` entry from `.git/info/exclude`
+  (leave it; matching how uninstall otherwise avoids touching unrelated
+  config, and a stale exclude entry for a deleted file is harmless).
 
 ### 6. `veer validate --local`
 
@@ -233,9 +242,10 @@ simply overlays whatever the team committed (if anything).
   `null`; settings is `.claude/settings.local.json`.
 - `install --local`: writes hook to `.claude/settings.local.json`; seeds
   `.veer/config.local.toml` when absent; does not clobber an existing local
-  config; does **not** write a project skill file; appends `config.local.toml`
-  to an existing nearest `.gitignore`; no-op (silent) when no `.gitignore`
-  exists; idempotent gitignore line.
+  config; does **not** write a project skill file; adds `.veer/config.local.toml`
+  to `.git/info/exclude` (located via `git rev-parse --git-path info/exclude`);
+  idempotent (no duplicate entry on re-run); skips silently when not in a git
+  repo.
 - `uninstall --local`: removes hook from `.claude/settings.local.json`;
   deletes `.veer/config.local.toml`; does not error on a missing project
   skill.
