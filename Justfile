@@ -196,7 +196,7 @@ check-local-override:
     #!/usr/bin/env bash
     set -euo pipefail
     zig build
-    tmp="$(mktemp -d)"
+    tmp="$(mktemp -d)" ; trap 'rm -rf "$tmp"' EXIT
     mkdir -p "$tmp/.veer"
     cat > "$tmp/.veer/config.toml" <<'EOF'
     [[rule]]
@@ -215,7 +215,6 @@ check-local-override:
     command = "danger"
     EOF
     out="$(cd "$tmp" && echo '{"tool_name":"Bash","tool_input":{"command":"danger"}}' | "{{justfile_directory()}}/zig-out/bin/veer" check 2>&1 || true)"
-    rm -rf "$tmp"
     echo "$out" | grep -q "LOCAL rule wins" && echo "check-local-override: PASS" || { echo "check-local-override: FAIL"; echo "$out"; exit 1; }
 
 # Verify `install --local` registers config.local.toml in .git/info/exclude.
@@ -227,7 +226,7 @@ check-local-install-exclude:
     set -euo pipefail
     zig build
     bin="{{justfile_directory()}}/zig-out/bin/veer"
-    tmp="$(mktemp -d)"
+    tmp="$(mktemp -d)" ; trap 'rm -rf "$tmp"' EXIT
     (
       cd "$tmp"
       unset GIT_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_WORK_TREE 2>/dev/null || true
@@ -238,13 +237,13 @@ check-local-install-exclude:
       git check-ignore -q .veer/config.local.toml
       # the hook went to settings.local.json (private), not committed settings.json
       test -f .claude/settings.local.json
+      test ! -e .claude/settings.json
       # no project skill written, no .gitignore created
       test ! -e .claude/skills/veer/SKILL.md
       test ! -e .gitignore
       # the entry is in info/exclude
       grep -q "config.local.toml" .git/info/exclude
     )
-    rm -rf "$tmp"
     echo "check-local-install-exclude: PASS"
 
 # List rules from basic.toml fixture

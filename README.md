@@ -139,7 +139,7 @@ Re-run `veer install` (without `--verbose`) to switch back to silent mode. The t
 
 All three files are merged. Precedence is local > project > global: a local rule with the same ID as a project or global rule replaces it entirely, and `enabled = false` in the local file disables a lower-tier rule.
 
-The local config file (`.veer/config.local.toml`) is gitignored by default when created via `veer install --local`.
+The local config file (`.veer/config.local.toml`) is kept out of git via the repo's `.git/info/exclude` (per-repo and uncommitted) when created via `veer install --local`.
 
 #### Private install
 
