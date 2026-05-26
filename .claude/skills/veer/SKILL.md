@@ -46,8 +46,17 @@ it when you want veer in a repo your teammates do not use.
 `~/.claude/skills/veer/SKILL.md`) and applies to every project. Run both
 to get a global hook with project-level overrides.
 
-### When to put a rule global vs. project
+### When to put a rule local, project, or global
 
+- **Local** rules are personal and stay in this repo only. Use
+  `.veer/config.local.toml` (kept out of git via `.git/info/exclude`) for
+  rules you do not want to commit: personal experiments, machine-specific
+  redirects, or an override of a committed project rule you are not ready to
+  share. When the user says "keep this local", "don't check this in", or
+  "just for me in this repo", this is the tier -- add it with
+  `veer add --local` or by editing `.veer/config.local.toml`, never
+  `.veer/config.toml`. If the hook is not yet installed privately, run
+  `veer install --local` (and `veer install --global` once for a skill).
 - **Project** rules redirect repo-specific tooling. Match
   `Justfile`/`package.json scripts`/`Makefile` targets and the underlying
   tools they wrap (`pytest` -> `just test`, `ruff check` -> `just lint`,
@@ -67,12 +76,14 @@ to get a global hook with project-level overrides.
 Before suggesting rule changes, understand what's there:
 
 ```
-veer list                       # pretty table of rules; shows Source column
-                                # (project/global) when both files contribute
-cat .veer/config.toml           # raw per-repo TOML (edit this directly)
-cat ~/.config/veer/config.toml  # raw global TOML (edit this directly)
-veer validate                   # check syntax + rule schema (project)
-veer validate --global          # same, against the global file
+veer list                          # pretty table of rules; shows Source column
+                                   # (local/project/global) when files contribute
+cat .veer/config.local.toml        # raw per-repo private TOML (gitignored)
+cat .veer/config.toml              # raw per-repo TOML (edit this directly)
+cat ~/.config/veer/config.toml     # raw global TOML (edit this directly)
+veer validate                      # check syntax + rule schema (project)
+veer validate --local              # same, against the local file
+veer validate --global             # same, against the global file
 ```
 
 ## Preview before committing a rule

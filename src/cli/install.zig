@@ -480,8 +480,12 @@ test "skill_content documents `veer add --global`" {
     try testing.expect(std.mem.indexOf(u8, skill_content, "veer add --global") != null);
 }
 
-test "skill_content has a global-vs-project guidance heading" {
-    try testing.expect(std.mem.indexOf(u8, skill_content, "global vs. project") != null);
+test "skill_content has a local/project/global guidance heading" {
+    try testing.expect(std.mem.indexOf(u8, skill_content, "local, project, or global") != null);
+}
+
+test "skill_content documents `veer add --local`" {
+    try testing.expect(std.mem.indexOf(u8, skill_content, "veer add --local") != null);
 }
 
 test "install merges into empty settings.json" {
