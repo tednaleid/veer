@@ -34,7 +34,7 @@ pub const ConfigError = error{
 
 /// Which file a rule originated from after merging. Used by `veer list` and
 /// `veer test` to show users which config a rule came from.
-pub const RuleSource = enum { project, global };
+pub const RuleSource = enum { local, project, global };
 
 /// Output of `mergeRules`. The two slices are parallel: `sources[i]` describes
 /// where `rules[i]` came from. Both are owned by the caller.

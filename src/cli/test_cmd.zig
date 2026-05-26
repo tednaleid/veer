@@ -118,6 +118,7 @@ fn sourceSuffixFor(rules: []const Rule, sources: []const config_mod.RuleSource, 
     const id = matched_rule_id orelse return "\t";
     for (rules, sources) |rule, src| {
         if (std.mem.eql(u8, rule.id, id)) return switch (src) {
+            .local => "\tlocal",
             .project => "\tproject",
             .global => "\tglobal",
         };
