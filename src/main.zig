@@ -336,7 +336,9 @@ fn runInstall(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !voi
     if (exit_code == 0 and scope == .local) {
         // Best-effort: keep .veer/config.local.toml out of git via the repo's
         // per-repo, uncommitted .git/info/exclude. No-op outside a git repo.
-        install_cmd.ensureLocalConfigExcluded(allocator, paths.config, stream.writer()) catch {};
+        install_cmd.ensureLocalConfigExcluded(allocator, paths.config, stream.writer()) catch |err| {
+            std.debug.print("veer install: warning: could not register .git/info/exclude entry: {}\n", .{err});
+        };
     }
 
     const output = stream.getWritten();

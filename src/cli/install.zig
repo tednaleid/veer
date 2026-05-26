@@ -1,5 +1,5 @@
-// ABOUTME: Install / uninstall veer as a Claude Code PreToolUse hook.
-// ABOUTME: Merges into settings.json, creates config stub, writes skill file.
+// ABOUTME: Merges into settings.json, creates config stub, writes skill file,
+// ABOUTME: and (for --local) registers the config in .git/info/exclude.
 
 const std = @import("std");
 
@@ -982,8 +982,11 @@ test "appendExcludeEntry is idempotent" {
         i = pos + 1;
     }
     try testing.expectEqual(@as(usize, 1), count);
+    try testing.expectEqualStrings("", stream.getWritten());
 }
 
+// Env-coupled: this test runs inside the veer git repo, so git resolves a
+// path. It would fail if tests were run outside any git repository.
 test "gitInfoExcludePath returns a path inside a git repo" {
     const path = try gitInfoExcludePath(testing.allocator);
     defer if (path) |p| testing.allocator.free(p);
