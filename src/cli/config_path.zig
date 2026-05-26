@@ -38,9 +38,9 @@ pub fn targetFromFlags(local: bool, global: bool, config_arg: ?[]const u8) FlagE
 }
 
 /// Resolved config path plus any allocations the caller needs to free.
-/// `path` is borrowed from one of: a clap argument, a static literal, or
-/// `paths_handle` (only when `--global`). Always call `deinit` to release
-/// the allocation when `--global` was used.
+/// `path` is borrowed from one of: a clap argument (`.config`), a static
+/// literal (`.project` or `.local`), or `paths_handle` (`.global` only).
+/// Always call `deinit` to release the allocation when `--global` was used.
 pub const Resolved = struct {
     path: []const u8,
     /// Non-null only when `--global` was used; holds the heap-allocated
