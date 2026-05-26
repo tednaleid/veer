@@ -55,6 +55,7 @@ pub const MergedConfig = struct {
     config: Config = .{},
     project_parsed: ?toml.Parsed(Config) = null,
     global_parsed: ?toml.Parsed(Config) = null,
+    local_parsed: ?toml.Parsed(Config) = null,
     merged_rules: ?[]Rule = null,
     /// Parallel to `config.rule` after `loadMerged` returns: `sources[i]` is
     /// the origin of `config.rule[i]`. Always populated by `loadMerged`
@@ -70,6 +71,7 @@ pub const MergedConfig = struct {
         if (self.sources) |s| allocator.free(s);
         if (self.project_parsed) |*p| p.deinit();
         if (self.global_parsed) |*g| g.deinit();
+        if (self.local_parsed) |*l| l.deinit();
         if (self.project_config_path) |p| allocator.free(p);
     }
 };
@@ -158,6 +160,7 @@ pub fn mergeSettings(tiers: []const Settings) Settings {
 }
 
 pub const project_config_relpath = ".veer/config.toml";
+pub const local_config_relpath = ".veer/config.local.toml";
 
 /// Build the global config path: $XDG_CONFIG_HOME/veer/config.toml or ~/.config/veer/config.toml.
 /// Caller owns the returned string.
@@ -169,27 +172,28 @@ pub fn globalConfigPath(allocator: std.mem.Allocator) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{s}/.config/veer/config.toml", .{home});
 }
 
-/// Locate the project's `.veer/config.toml`.
+/// Walk up from `cwd_abs` (and an optional `project_dir_hint`) looking for
+/// `<dir>/<relpath>`. Returns the absolute path of the first match, or null.
 ///
 /// Discovery order:
-///   1. If `project_dir_hint` is non-null, try `<hint>/.veer/config.toml`.
+///   1. If `project_dir_hint` is non-null, try `<hint>/<relpath>`.
 ///      Used by `loadMerged` to forward `$CLAUDE_PROJECT_DIR` (set by Claude
 ///      Code for every PreToolUse hook invocation), making discovery
 ///      deterministic for the hook case regardless of cwd drift.
 ///   2. Walk up from `cwd_abs` toward filesystem root, checking
-///      `<dir>/.veer/config.toml` at each level. Same algorithm git uses
+///      `<dir>/<relpath>` at each level. Same algorithm git uses
 ///      for `.git/`. Handles CLI usage (`veer test` from a subdirectory).
 ///
-/// Returns the absolute path of the first match, or null if none exists.
 /// Caller owns the returned slice.
-pub fn findProjectConfigPath(
+pub fn findConfigUpwards(
     allocator: std.mem.Allocator,
     cwd_abs: []const u8,
     project_dir_hint: ?[]const u8,
+    relpath: []const u8,
 ) !?[]u8 {
     if (project_dir_hint) |hint| {
         if (hint.len > 0) {
-            const candidate = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ hint, project_config_relpath });
+            const candidate = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ hint, relpath });
             if (fileExists(candidate)) return candidate;
             allocator.free(candidate);
         }
@@ -197,7 +201,7 @@ pub fn findProjectConfigPath(
 
     var current: []const u8 = cwd_abs;
     while (true) {
-        const candidate = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ current, project_config_relpath });
+        const candidate = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ current, relpath });
         if (fileExists(candidate)) return candidate;
         allocator.free(candidate);
 
@@ -205,6 +209,15 @@ pub fn findProjectConfigPath(
         if (parent.ptr == current.ptr and parent.len == current.len) return null;
         current = parent;
     }
+}
+
+/// Locate the project's `.veer/config.toml`. See `findConfigUpwards`.
+pub fn findProjectConfigPath(
+    allocator: std.mem.Allocator,
+    cwd_abs: []const u8,
+    project_dir_hint: ?[]const u8,
+) !?[]u8 {
+    return findConfigUpwards(allocator, cwd_abs, project_dir_hint, project_config_relpath);
 }
 
 fn fileExists(path: []const u8) bool {
@@ -236,6 +249,27 @@ pub fn loadMerged(allocator: std.mem.Allocator) !MergedConfig {
         }
     }
 
+    // Local tier: sibling of the project config when one was found, else an
+    // independent upward walk. A local file alone is a valid config source.
+    if (cwd_abs) |cwd| {
+        const hint = std.posix.getenv("CLAUDE_PROJECT_DIR");
+        const local_path: ?[]u8 = if (result.project_config_path) |pp| blk: {
+            const dir = std.fs.path.dirname(pp) orelse break :blk null;
+            const lp = try std.fmt.allocPrint(allocator, "{s}/config.local.toml", .{dir});
+            if (fileExists(lp)) break :blk lp;
+            allocator.free(lp);
+            break :blk null;
+        } else try findConfigUpwards(allocator, cwd, hint, local_config_relpath);
+
+        if (local_path) |lp| {
+            defer allocator.free(lp);
+            result.local_parsed = loadFile(allocator, lp) catch |err| blk: {
+                if (err == error.FileNotFound) break :blk null;
+                return err;
+            };
+        }
+    }
+
     // Try global config
     const global_path = globalConfigPath(allocator) catch null;
     defer if (global_path) |p| allocator.free(p);
@@ -248,37 +282,36 @@ pub fn loadMerged(allocator: std.mem.Allocator) !MergedConfig {
     }
 
     // Must have at least one config
-    if (result.project_parsed == null and result.global_parsed == null) {
+    if (result.project_parsed == null and result.global_parsed == null and result.local_parsed == null) {
         return error.NoConfigFound;
     }
 
-    // Build merged config. `sources` is always populated by loadMerged so
-    // list/test can label each rule even when only one config file exists.
-    if (result.project_parsed != null and result.global_parsed != null) {
-        const project = result.project_parsed.?.value;
-        const global = result.global_parsed.?.value;
-        const tiers = [_]RuleTier{
-            .{ .rules = project.rule, .source = .project },
-            .{ .rules = global.rule, .source = .global },
-        };
-        const merge = try mergeRules(allocator, &tiers);
-        result.merged_rules = merge.rules;
-        result.sources = merge.sources;
-        result.config = .{
-            .settings = mergeSettings(&.{ project.settings, global.settings }),
-            .rule = merge.rules,
-        };
-    } else if (result.project_parsed) |p| {
-        result.config = p.value;
-        const sources = try allocator.alloc(RuleSource, p.value.rule.len);
-        @memset(sources, .project);
-        result.sources = sources;
-    } else if (result.global_parsed) |g| {
-        result.config = g.value;
-        const sources = try allocator.alloc(RuleSource, g.value.rule.len);
-        @memset(sources, .global);
-        result.sources = sources;
+    // Collect present tiers, highest precedence first: local, project, global.
+    var rule_tiers = std.ArrayListUnmanaged(RuleTier).empty;
+    defer rule_tiers.deinit(allocator);
+    var setting_tiers = std.ArrayListUnmanaged(Settings).empty;
+    defer setting_tiers.deinit(allocator);
+
+    if (result.local_parsed) |p| {
+        try rule_tiers.append(allocator, .{ .rules = p.value.rule, .source = .local });
+        try setting_tiers.append(allocator, p.value.settings);
     }
+    if (result.project_parsed) |p| {
+        try rule_tiers.append(allocator, .{ .rules = p.value.rule, .source = .project });
+        try setting_tiers.append(allocator, p.value.settings);
+    }
+    if (result.global_parsed) |g| {
+        try rule_tiers.append(allocator, .{ .rules = g.value.rule, .source = .global });
+        try setting_tiers.append(allocator, g.value.settings);
+    }
+
+    const merge = try mergeRules(allocator, rule_tiers.items);
+    result.merged_rules = merge.rules;
+    result.sources = merge.sources;
+    result.config = .{
+        .settings = mergeSettings(setting_tiers.items),
+        .rule = merge.rules,
+    };
 
     return result;
 }
@@ -637,6 +670,31 @@ test "findProjectConfigPath falls back to walk-up when hint dir has no config" {
     const expected = try std.fmt.allocPrint(std.testing.allocator, "{s}/.veer/config.toml", .{cwd_abs});
     defer std.testing.allocator.free(expected);
     try std.testing.expectEqualStrings(expected, path.?);
+}
+
+test "findConfigUpwards finds a local config beside the project config" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(tmp_abs);
+
+    try tmp.dir.makePath(".veer");
+    var pf = try tmp.dir.createFile(".veer/config.toml", .{});
+    pf.close();
+    var lf = try tmp.dir.createFile(".veer/config.local.toml", .{});
+    lf.close();
+
+    const path = try findConfigUpwards(std.testing.allocator, tmp_abs, null, local_config_relpath);
+    defer if (path) |p| std.testing.allocator.free(p);
+    try std.testing.expect(path != null);
+    try std.testing.expect(std.mem.endsWith(u8, path.?, "/.veer/config.local.toml"));
+}
+
+test "loadFile parses the local-only fixture" {
+    var result = try loadFile(std.testing.allocator, "test/configs/local_only/.veer/config.local.toml");
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 1), result.value.rule.len);
+    try std.testing.expectEqualStrings("local-only-rule", result.value.rule[0].id);
 }
 
 test "globalConfigPath uses XDG_CONFIG_HOME" {

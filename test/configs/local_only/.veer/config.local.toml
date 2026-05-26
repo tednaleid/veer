@@ -1,0 +1,5 @@
+[[rule]]
+id = "local-only-rule"
+message = "from local"
+[rule.match]
+command = "localcmd"
