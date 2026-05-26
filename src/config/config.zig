@@ -226,11 +226,14 @@ fn fileExists(path: []const u8) bool {
     return true;
 }
 
-/// Auto-discover and merge project + global configs.
+/// Auto-discover and merge local + project + global configs.
 /// Project config is found via `findProjectConfigPath` (honors
-/// `$CLAUDE_PROJECT_DIR`, then walks up from cwd). Global config is
+/// `$CLAUDE_PROJECT_DIR`, then walks up from cwd). Local config is the
+/// sibling `config.local.toml` when a project config was found, else an
+/// independent upward walk. Global config is
 /// `~/.config/veer/config.toml` (or `$XDG_CONFIG_HOME/veer/config.toml`).
-/// Returns error.NoConfigFound if neither exists.
+/// Returns error.NoConfigFound only if none of the local, project, or global
+/// configs exist.
 pub fn loadMerged(allocator: std.mem.Allocator) !MergedConfig {
     var result = MergedConfig{};
     errdefer result.deinit(allocator);
@@ -247,15 +250,15 @@ pub fn loadMerged(allocator: std.mem.Allocator) !MergedConfig {
                 return err;
             };
         }
-    }
 
-    // Local tier: sibling of the project config when one was found, else an
-    // independent upward walk. A local file alone is a valid config source.
-    if (cwd_abs) |cwd| {
-        const hint = std.posix.getenv("CLAUDE_PROJECT_DIR");
+        // Local tier: sibling of the project config when one was found, else an
+        // independent upward walk. A local file alone is a valid config source.
         const local_path: ?[]u8 = if (result.project_config_path) |pp| blk: {
-            const dir = std.fs.path.dirname(pp) orelse break :blk null;
-            const lp = try std.fmt.allocPrint(allocator, "{s}/config.local.toml", .{dir});
+            // pp is "<root>/.veer/config.toml"; the local file is the sibling
+            // "<root>/.veer/config.local.toml" -> derive from <root> + relpath.
+            const veer_dir = std.fs.path.dirname(pp) orelse break :blk null;
+            const root = std.fs.path.dirname(veer_dir) orelse break :blk null;
+            const lp = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ root, local_config_relpath });
             if (fileExists(lp)) break :blk lp;
             allocator.free(lp);
             break :blk null;
