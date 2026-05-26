@@ -137,14 +137,21 @@ pub fn mergeRules(allocator: std.mem.Allocator, tiers: []const RuleTier) !MergeR
     };
 }
 
-/// Merge two Settings. Project fields override global when set
-/// (non-default values win).
-pub fn mergeSettings(global: Settings, project: Settings) Settings {
-    return .{
-        .log_level = project.log_level,
-        .claude_settings_path = project.claude_settings_path orelse global.claude_settings_path,
-        .claude_projects_path = project.claude_projects_path orelse global.claude_projects_path,
-    };
+/// Fold Settings tiers ordered highest-precedence-first. The highest tier's
+/// `log_level` wins; each optional path takes the first non-null tier walking
+/// highest to lowest. An empty slice yields default Settings.
+pub fn mergeSettings(tiers: []const Settings) Settings {
+    var result = Settings{};
+    var log_set = false;
+    for (tiers) |t| {
+        if (!log_set) {
+            result.log_level = t.log_level;
+            log_set = true;
+        }
+        if (result.claude_settings_path == null) result.claude_settings_path = t.claude_settings_path;
+        if (result.claude_projects_path == null) result.claude_projects_path = t.claude_projects_path;
+    }
+    return result;
 }
 
 pub const project_config_relpath = ".veer/config.toml";
@@ -255,7 +262,7 @@ pub fn loadMerged(allocator: std.mem.Allocator) !MergedConfig {
         result.merged_rules = merge.rules;
         result.sources = merge.sources;
         result.config = .{
-            .settings = mergeSettings(global.settings, project.settings),
+            .settings = mergeSettings(&.{ project.settings, global.settings }),
             .rule = merge.rules,
         };
     } else if (result.project_parsed) |p| {
@@ -646,8 +653,30 @@ test "mergeSettings project overrides global" {
         .log_level = "debug",
     };
 
-    const merged = mergeSettings(global, project);
+    const merged = mergeSettings(&.{ project, global });
     try std.testing.expectEqualStrings("debug", merged.log_level);
     // Project didn't set claude_settings_path, so global value falls through
     try std.testing.expectEqualStrings("/global/path", merged.claude_settings_path.?);
+}
+
+test "mergeSettings: highest tier wins for log_level, first non-null path wins" {
+    const local = Settings{ .log_level = "debug", .claude_settings_path = null, .claude_projects_path = "L" };
+    const project = Settings{ .log_level = "warn", .claude_settings_path = "P", .claude_projects_path = "P" };
+    const global = Settings{ .log_level = "error", .claude_settings_path = "G", .claude_projects_path = "G" };
+
+    // Ordered highest-first: local, project, global.
+    const merged = mergeSettings(&.{ local, project, global });
+    try std.testing.expectEqualStrings("debug", merged.log_level);
+    try std.testing.expectEqualStrings("P", merged.claude_settings_path.?);
+    try std.testing.expectEqualStrings("L", merged.claude_projects_path.?);
+}
+
+test "mergeSettings regression: two tiers match old project-over-global behavior" {
+    const project = Settings{ .log_level = "warn", .claude_settings_path = null, .claude_projects_path = "P" };
+    const global = Settings{ .log_level = "error", .claude_settings_path = "G", .claude_projects_path = "G" };
+
+    const merged = mergeSettings(&.{ project, global });
+    try std.testing.expectEqualStrings("warn", merged.log_level);
+    try std.testing.expectEqualStrings("G", merged.claude_settings_path.?);
+    try std.testing.expectEqualStrings("P", merged.claude_projects_path.?);
 }
