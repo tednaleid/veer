@@ -966,12 +966,12 @@ pub fn install(allocator: std.mem.Allocator, paths: Paths, scope: Scope, verbose
     if (hook_code != 0) return hook_code;
     try ensureConfigStub(paths.config, writer);
     if (paths.skill) |skill| try writeSkillFile(skill, writer);
-    if (scope == .local) try ensureLocalConfigExcluded(allocator, local_config_relpath, writer);
+    if (scope == .local) try ensureLocalConfigExcluded(allocator, paths.config, writer);
     return 0;
 }
 ```
 
-`local_config_relpath` is `".veer/config.local.toml"` (defined in `src/config/config.zig`; import it as needed, e.g. `const config_mod = @import("../config/config.zig");` and use `config_mod.local_config_relpath`, or hardcode the string with a comment -- match how the file already references config paths). `ensureLocalConfigExcluded` is implemented in Task 8. For this task, add a temporary no-op stub so the build passes:
+For `Scope.local`, `paths.config` is the relative `.veer/config.local.toml` -- which is exactly the repo-root-relative pattern `.git/info/exclude` expects, so it doubles as the exclude entry (no extra import needed). `ensureLocalConfigExcluded` is implemented in Task 8. For this task, add a temporary no-op stub so the build passes:
 
 ```zig
 fn ensureLocalConfigExcluded(allocator: std.mem.Allocator, config_relpath: []const u8, writer: anytype) !void {
@@ -1044,6 +1044,8 @@ git commit -m "Make install --local fully private (config.local.toml, no skill)"
 ## Task 8: Add the local config to `.git/info/exclude`
 
 Replace the Task 7 stub with a real `ensureLocalConfigExcluded` that adds `.veer/config.local.toml` to the repo's `.git/info/exclude` -- git's per-repo, UNCOMMITTED ignore file. This avoids the leak inherent in editing the tracked `.gitignore` (whose modification would eventually be committed and expose veer to teammates) and the over-breadth of the global excludes.
+
+**REFINED during execution (supersedes Task 7's placement):** the exclude step is *orchestration*, not a pure file op -- it shells out to `git` and depends on the process cwd being the repo root. It must therefore live in `runInstall` (main.zig), NOT inside the `install()` library function. Reason: `std.testing.tmpDir` creates directories *inside* the repo (`.zig-cache/tmp/...`), so if `install()` ran `git rev-parse` during a unit test, git would discover the real veer repo and write into its actual `.git/info/exclude`. Task 8 therefore (a) reverts Task 7's `scope` param + exclude call + stub from `install()` and the `.project` arg from its callsites, and (b) calls `ensureLocalConfigExcluded` from `runInstall` for local scope. `install()` stays a pure file-writer (keeps the optional-skill behavior from Task 7); the helpers are `pub` in install.zig and unit-tested directly; the end-to-end install-and-exclude is covered by a Justfile smoke recipe in Task 9.
 
 **Why `git rev-parse --git-path info/exclude` and not a hardcoded `.git/info/exclude`:** in a linked git worktree, `.git` is a FILE pointing at `<repo>/.git/worktrees/<name>`, so the literal path does not exist. `git rev-parse --git-path info/exclude` returns the correct path in plain repos, worktrees, and submodules (verified empirically: it resolves to the shared common-dir `info/exclude`, and an entry there takes effect inside worktrees). `info/exclude` patterns are matched relative to the repo root, exactly like a root `.gitignore`, so the entry is simply `.veer/config.local.toml` with no relative-path math.
 

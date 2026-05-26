@@ -20,19 +20,24 @@ control, rather than repeating them to the agent every session.
 Do not hand-edit this SKILL.md -- running `veer install` always rewrites it
 from the binary's embedded content. Treat this as generated documentation.
 
-## Two config files: project and global
+## Three config tiers: local, project, and global
 
-veer reads from two files and merges them:
+veer reads from up to three files and merges them:
 
 | Path | Scope | Use it for |
 |---|---|---|
+| `.veer/config.local.toml` | per-repo, gitignored | personal per-repo rules not shared with the team |
 | `.veer/config.toml` | per-repo, version-controlled | repo-specific tooling redirects |
 | `~/.config/veer/config.toml` | personal, all projects | cross-cutting personal preferences |
 
-Project rules come first (definition order); non-overridden global rules
-follow. A project rule with the same `id` as a global rule replaces the
-global one entirely (and a project rule can disable a global rule by
-setting `enabled = false` with the same id).
+Precedence is local > project > global: a local rule with the same `id` as a
+project or global rule replaces it (and `enabled = false` in the local file
+disables a lower-tier rule). `veer install --local` is a fully private
+install: it puts the hook in `.claude/settings.local.json`, seeds
+`.veer/config.local.toml`, adds that file to the repo's `.git/info/exclude`
+(per-repo and uncommitted, so it never leaks to teammates), and writes no
+project skill (it relies on a global skill from `veer install --global`). Use
+it when you want veer in a repo your teammates do not use.
 
 `veer install` writes the per-repo pieces (`.claude/settings.json`,
 `.veer/config.toml`, `.claude/skills/veer/SKILL.md`).
@@ -283,6 +288,9 @@ veer add --global \
 
 `veer remove --global <id>` and `veer validate --global` target the same
 global file.
+
+`veer add --local`, `veer remove --local`, and `veer validate --local` target
+`.veer/config.local.toml`.
 
 **Direct TOML edit** (good when you need non-trivial match patterns):
 

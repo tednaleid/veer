@@ -133,10 +133,17 @@ Re-run `veer install` (without `--verbose`) to switch back to silent mode. The t
 
 | Location | Path | Purpose |
 |----------|------|---------|
+| Local | `.veer/config.local.toml` | Personal per-repo rules not shared with the team |
 | Project | `.veer/config.toml` | Rules specific to this project |
 | Global | `~/.config/veer/config.toml` | Rules applied to all projects |
 
-Project config is merged with global config. Project rules take precedence: a project rule with the same ID as a global rule replaces it entirely. A project rule can disable a global rule by setting `enabled = false` with the same ID.
+All three files are merged. Precedence is local > project > global: a local rule with the same ID as a project or global rule replaces it entirely, and `enabled = false` in the local file disables a lower-tier rule.
+
+The local config file (`.veer/config.local.toml`) is gitignored by default when created via `veer install --local`.
+
+#### Private install
+
+`veer install --local` is a fully private install: it puts the hook in `.claude/settings.local.json` (which is not shared with teammates), seeds `.veer/config.local.toml`, and adds that file to the repo's `.git/info/exclude` (per-repo and uncommitted, so it never leaks to teammates). No project skill file is written; it relies on a global skill from `veer install --global`. Use it when you want veer in a repo your teammates do not use. Run `veer install --global` once first so a skill is available to the agent.
 
 ### Settings
 

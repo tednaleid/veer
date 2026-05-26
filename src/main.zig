@@ -276,7 +276,7 @@ fn runCheck(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void 
 fn runInstall(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
     const params = comptime clap.parseParamsComptime(
         \\-h, --help     Display this help and exit.
-        \\    --local    Write hook into .claude/settings.local.json instead of .claude/settings.json.
+        \\    --local    Fully private install: hook in settings.local.json, config.local.toml, no project skill.
         \\    --global   Install into your home directory (all projects) instead of the current one.
         \\    --verbose  Install in verbose mode: each Bash command (and its rewrite target)
         \\               shows as a systemMessage banner in the Claude Code transcript.
@@ -291,8 +291,11 @@ fn runInstall(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !voi
         \\  - creates .veer/config.toml with a starter rule if it does not already exist
         \\  - writes .claude/skills/veer/SKILL.md (guides Claude on reading and adding veer rules)
         \\
-        \\With --local, the hook goes into .claude/settings.local.json (user-private,
-        \\typically gitignored); config and skill still go to the project paths.
+        \\With --local, this is a fully private install: the hook goes into
+        \\.claude/settings.local.json, the config stub is written to
+        \\.veer/config.local.toml (and added to .git/info/exclude so it stays
+        \\uncommitted), and no project skill is written. Run 'veer install
+        \\--global' once so a global skill is available.
         \\
         \\With --global, files are written to your home directory:
         \\  - ~/.claude/settings.json (hook)
@@ -349,7 +352,7 @@ fn runInstall(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !voi
 fn runUninstall(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
     const params = comptime clap.parseParamsComptime(
         \\-h, --help    Display this help and exit.
-        \\    --local   Uninstall from .claude/settings.local.json instead of .claude/settings.json.
+        \\    --local   Uninstall the private install: settings.local.json hook and config.local.toml.
         \\    --global  Uninstall from your home directory (all projects) instead of the current one.
         \\
     );
@@ -361,8 +364,9 @@ fn runUninstall(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !v
         \\  - deletes .veer/config.toml
         \\  - deletes .claude/skills/veer/SKILL.md
         \\
-        \\With --local, the same cleanup runs but the hook is removed from
-        \\.claude/settings.local.json.
+        \\With --local, the hook is removed from .claude/settings.local.json and
+        \\.veer/config.local.toml is deleted (the private install never wrote a
+        \\project skill, and the .git/info/exclude entry is left in place).
         \\
         \\With --global, files are removed from your home directory:
         \\  - ~/.claude/settings.json (veer entry)

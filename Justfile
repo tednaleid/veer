@@ -1,7 +1,7 @@
 default: check
 
 # Run tests + lint + help/no-config/verbose/from-subdir smoke tests
-check: test lint check-help check-no-config check-verbose check-from-subdir
+check: test lint check-help check-no-config check-verbose check-from-subdir check-local-override check-local-install-exclude
 
 # Run all tests
 test:
@@ -190,6 +190,62 @@ check-help:
     fi
 
     echo "check-help: PASS"
+
+# Verify a local-tier rule overrides a project rule of the same id.
+check-local-override:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    zig build
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/.veer"
+    cat > "$tmp/.veer/config.toml" <<'EOF'
+    [[rule]]
+    id = "shared"
+    action = "reject"
+    message = "PROJECT rule"
+    [rule.match]
+    command = "danger"
+    EOF
+    cat > "$tmp/.veer/config.local.toml" <<'EOF'
+    [[rule]]
+    id = "shared"
+    action = "reject"
+    message = "LOCAL rule wins"
+    [rule.match]
+    command = "danger"
+    EOF
+    out="$(cd "$tmp" && echo '{"tool_name":"Bash","tool_input":{"command":"danger"}}' | "{{justfile_directory()}}/zig-out/bin/veer" check 2>&1 || true)"
+    rm -rf "$tmp"
+    echo "$out" | grep -q "LOCAL rule wins" && echo "check-local-override: PASS" || { echo "check-local-override: FAIL"; echo "$out"; exit 1; }
+
+# Verify `install --local` registers config.local.toml in .git/info/exclude.
+# Note: unsets GIT_DIR and GIT_INDEX_FILE so that git commands inside the temp
+# repo are not confused by the parent repo's git environment (which is set when
+# this recipe runs inside a git pre-commit hook).
+check-local-install-exclude:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    zig build
+    bin="{{justfile_directory()}}/zig-out/bin/veer"
+    tmp="$(mktemp -d)"
+    (
+      cd "$tmp"
+      unset GIT_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_WORK_TREE 2>/dev/null || true
+      git init -q
+      "$bin" install --local >/dev/null
+      # config.local.toml must exist and be ignored via .git/info/exclude
+      test -f .veer/config.local.toml
+      git check-ignore -q .veer/config.local.toml
+      # the hook went to settings.local.json (private), not committed settings.json
+      test -f .claude/settings.local.json
+      # no project skill written, no .gitignore created
+      test ! -e .claude/skills/veer/SKILL.md
+      test ! -e .gitignore
+      # the entry is in info/exclude
+      grep -q "config.local.toml" .git/info/exclude
+    )
+    rm -rf "$tmp"
+    echo "check-local-install-exclude: PASS"
 
 # List rules from basic.toml fixture
 list-rules:

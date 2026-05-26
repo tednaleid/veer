@@ -462,6 +462,10 @@ fn testWriteFile(path: []const u8, content: []const u8) !void {
 // SKILL.md shipped to users (and to the agent) keeps documenting the
 // global-config workflow. If you remove or rename one of these anchors,
 // update both the doc and this list deliberately.
+test "skill_content documents the local config path" {
+    try testing.expect(std.mem.indexOf(u8, skill_content, ".veer/config.local.toml") != null);
+}
+
 test "skill_content documents global config path" {
     try testing.expect(std.mem.indexOf(u8, skill_content, "~/.config/veer/config.toml") != null);
 }
