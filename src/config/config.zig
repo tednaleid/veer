@@ -128,9 +128,12 @@ pub fn mergeRules(allocator: std.mem.Allocator, tiers: []const RuleTier) !MergeR
         }
     }
 
+    const owned_rules = try rules.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_rules);
+    const owned_sources = try sources.toOwnedSlice(allocator);
     return .{
-        .rules = try rules.toOwnedSlice(allocator),
-        .sources = try sources.toOwnedSlice(allocator),
+        .rules = owned_rules,
+        .sources = owned_sources,
     };
 }
 
@@ -464,6 +467,10 @@ test "mergeRules regression: two tiers behave like the old project-over-global m
     defer std.testing.allocator.free(merged.sources);
 
     try std.testing.expectEqual(@as(usize, 4), merged.rules.len);
+    try std.testing.expectEqualStrings("p1", merged.rules[0].id);
+    try std.testing.expectEqualStrings("p2", merged.rules[1].id);
+    try std.testing.expectEqualStrings("g1", merged.rules[2].id);
+    try std.testing.expectEqualStrings("g2", merged.rules[3].id);
     try std.testing.expectEqualSlices(
         RuleSource,
         &.{ .project, .project, .global, .global },
