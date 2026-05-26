@@ -84,16 +84,14 @@ pub fn freePaths(allocator: std.mem.Allocator, paths: Paths, scope: Scope) void 
 ///   1. Merge veer entry into settings.json (never overwrite unrelated hooks).
 ///   2. Create config stub if missing.
 ///   3. Write SKILL.md (always overwrite) -- skipped for .local scope.
-///   4. For .local scope, ensure config is excluded from git tracking.
 /// When `verbose` is true, the registered command is `veer check --verbose`,
 /// which causes each tool call to emit a user-visible systemMessage banner.
 /// Returns process exit code (0 on success, 1 on user-facing error).
-pub fn install(allocator: std.mem.Allocator, paths: Paths, scope: Scope, verbose: bool, writer: anytype) !u8 {
+pub fn install(allocator: std.mem.Allocator, paths: Paths, verbose: bool, writer: anytype) !u8 {
     const hook_code = try installHook(allocator, paths.settings, verbose, writer);
     if (hook_code != 0) return hook_code;
     try ensureConfigStub(paths.config, writer);
     if (paths.skill) |skill| try writeSkillFile(skill, writer);
-    if (scope == .local) try ensureLocalConfigExcluded(allocator, paths.config, writer);
     return 0;
 }
 
@@ -320,12 +318,58 @@ fn writeSkillFile(path: []const u8, writer: anytype) !void {
     try writer.print("wrote skill {s}\n", .{path});
 }
 
-/// Ensure the local config file is excluded from git tracking via
-/// .git/info/exclude. This is a no-op stub; Task 8 replaces it.
-fn ensureLocalConfigExcluded(allocator: std.mem.Allocator, config_relpath: []const u8, writer: anytype) !void {
-    _ = allocator;
-    _ = config_relpath;
-    _ = writer;
+/// Resolve the repo's per-repo exclude file via git. Returns its path
+/// (possibly relative to cwd) or null if not in a git repo / git unavailable.
+/// `git rev-parse --git-path info/exclude` resolves correctly in plain repos
+/// and in linked worktrees (where `.git` is a file). Caller owns the slice.
+pub fn gitInfoExcludePath(allocator: std.mem.Allocator) !?[]u8 {
+    const result = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ "git", "rev-parse", "--git-path", "info/exclude" },
+    }) catch return null;
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    if (result.term != .Exited or result.term.Exited != 0) return null;
+    const trimmed = std.mem.trim(u8, result.stdout, " \t\r\n");
+    if (trimmed.len == 0) return null;
+    return try allocator.dupe(u8, trimmed);
+}
+
+/// Append `entry` to the git exclude file at `exclude_path` if no line already
+/// equals it (after trimming). Creates the file if missing (its parent
+/// `info/` dir exists in a valid git repo). Idempotent. Read-then-rewrite,
+/// matching `writeSkillFile`/`writeJsonAtomic`.
+pub fn appendExcludeEntry(allocator: std.mem.Allocator, exclude_path: []const u8, entry: []const u8, writer: anytype) !void {
+    const content = readFileAlloc(allocator, exclude_path) catch |err| switch (err) {
+        error.FileNotFound => try allocator.dupe(u8, ""),
+        else => return err,
+    };
+    defer allocator.free(content);
+
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.eql(u8, std.mem.trim(u8, line, " \t\r"), entry)) return;
+    }
+
+    const needs_nl = content.len > 0 and content[content.len - 1] != '\n';
+    const f = try std.fs.cwd().createFile(exclude_path, .{ .truncate = true });
+    defer f.close();
+    try f.writeAll(content);
+    if (needs_nl) try f.writeAll("\n");
+    try f.writeAll(entry);
+    try f.writeAll("\n");
+    try writer.print("excluded {s} via {s}\n", .{ entry, exclude_path });
+}
+
+/// Add `config_relpath` (the repo-root-relative ".veer/config.local.toml") to
+/// the repo's `.git/info/exclude` (per-repo, uncommitted). Silently does
+/// nothing when not in a git repo. Call this from the install orchestration
+/// with the process cwd at the repo root.
+pub fn ensureLocalConfigExcluded(allocator: std.mem.Allocator, config_relpath: []const u8, writer: anytype) !void {
+    const exclude_path = (try gitInfoExcludePath(allocator)) orelse return;
+    defer allocator.free(exclude_path);
+    try appendExcludeEntry(allocator, exclude_path, config_relpath, writer);
 }
 
 /// Return the parent directory of config_path (e.g. ".veer" from ".veer/config.toml").
@@ -448,7 +492,7 @@ test "install merges into empty settings.json" {
 
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    const code = try install(testing.allocator, paths, .project, false, stream.writer());
+    const code = try install(testing.allocator, paths, false, stream.writer());
     try testing.expectEqual(@as(u8, 0), code);
 
     const content = try readFileAlloc(testing.allocator, paths.settings);
@@ -480,7 +524,7 @@ test "install preserves existing non-veer PreToolUse hook" {
 
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    _ = try install(testing.allocator, paths, .project, false, stream.writer());
+    _ = try install(testing.allocator, paths, false, stream.writer());
 
     const content = try readFileAlloc(testing.allocator, paths.settings);
     defer testing.allocator.free(content);
@@ -500,9 +544,9 @@ test "install is idempotent (no duplicate veer entries)" {
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
 
-    _ = try install(testing.allocator, paths, .project, false, stream.writer());
+    _ = try install(testing.allocator, paths, false, stream.writer());
     stream.reset();
-    _ = try install(testing.allocator, paths, .project, false, stream.writer());
+    _ = try install(testing.allocator, paths, false, stream.writer());
 
     const content = try readFileAlloc(testing.allocator, paths.settings);
     defer testing.allocator.free(content);
@@ -530,7 +574,7 @@ test "install rejects invalid JSON in settings.json" {
 
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    const code = try install(testing.allocator, paths, .project, false, stream.writer());
+    const code = try install(testing.allocator, paths, false, stream.writer());
     try testing.expectEqual(@as(u8, 1), code);
 
     // Original file must be untouched
@@ -550,7 +594,7 @@ test "install creates .veer/config.toml stub when missing" {
 
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    _ = try install(testing.allocator, paths, .project, false, stream.writer());
+    _ = try install(testing.allocator, paths, false, stream.writer());
 
     const content = try readFileAlloc(testing.allocator, paths.config);
     defer testing.allocator.free(content);
@@ -572,7 +616,7 @@ test "install preserves existing config.toml" {
 
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    _ = try install(testing.allocator, paths, .project, false, stream.writer());
+    _ = try install(testing.allocator, paths, false, stream.writer());
 
     const content = try readFileAlloc(testing.allocator, paths.config);
     defer testing.allocator.free(content);
@@ -593,7 +637,7 @@ test "install always overwrites skill file" {
 
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    _ = try install(testing.allocator, paths, .project, false, stream.writer());
+    _ = try install(testing.allocator, paths, false, stream.writer());
 
     const content = try readFileAlloc(testing.allocator, paths.skill.?);
     defer testing.allocator.free(content);
@@ -743,7 +787,7 @@ test "install --verbose writes 'veer check --verbose' into settings.json" {
 
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    _ = try install(testing.allocator, paths, .project, true, stream.writer());
+    _ = try install(testing.allocator, paths, true, stream.writer());
 
     const content = try readFileAlloc(testing.allocator, paths.settings);
     defer testing.allocator.free(content);
@@ -773,9 +817,9 @@ test "install then install --verbose replaces the entry (one entry total)" {
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
 
-    _ = try install(testing.allocator, paths, .project, false, stream.writer());
+    _ = try install(testing.allocator, paths, false, stream.writer());
     stream.reset();
-    _ = try install(testing.allocator, paths, .project, true, stream.writer());
+    _ = try install(testing.allocator, paths, true, stream.writer());
 
     const content = try readFileAlloc(testing.allocator, paths.settings);
     defer testing.allocator.free(content);
@@ -816,9 +860,9 @@ test "install --verbose then install (plain) switches back" {
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
 
-    _ = try install(testing.allocator, paths, .project, true, stream.writer());
+    _ = try install(testing.allocator, paths, true, stream.writer());
     stream.reset();
-    _ = try install(testing.allocator, paths, .project, false, stream.writer());
+    _ = try install(testing.allocator, paths, false, stream.writer());
 
     const content = try readFileAlloc(testing.allocator, paths.settings);
     defer testing.allocator.free(content);
@@ -837,7 +881,7 @@ test "uninstall removes a verbose-form veer entry" {
 
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    _ = try install(testing.allocator, paths, .project, true, stream.writer());
+    _ = try install(testing.allocator, paths, true, stream.writer());
     stream.reset();
     _ = try uninstall(testing.allocator, paths, stream.writer());
 
@@ -869,10 +913,80 @@ test "install with null skill writes no skill file" {
 
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    _ = try install(testing.allocator, paths, .local, false, stream.writer());
+    _ = try install(testing.allocator, paths, false, stream.writer());
 
     try testing.expect(fileExistsAbs(paths.config));
     var skill_buf: [1024]u8 = undefined;
     const skill_path = try std.fmt.bufPrint(&skill_buf, "{s}/.claude/skills/veer/SKILL.md", .{tmp_root});
     try testing.expect(!fileExistsAbs(skill_path));
+}
+
+test "appendExcludeEntry adds the entry to an existing file" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_root = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(tmp_root);
+
+    var ex_buf: [1024]u8 = undefined;
+    const ex_path = try std.fmt.bufPrint(&ex_buf, "{s}/exclude", .{tmp_root});
+    try testWriteFile(ex_path, "# git ignore patterns\n*~\n");
+
+    var buf: [1024]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    try appendExcludeEntry(testing.allocator, ex_path, ".veer/config.local.toml", stream.writer());
+
+    const content = try readFileAlloc(testing.allocator, ex_path);
+    defer testing.allocator.free(content);
+    try testing.expect(std.mem.indexOf(u8, content, ".veer/config.local.toml") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "*~") != null);
+}
+
+test "appendExcludeEntry creates the file when missing" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_root = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(tmp_root);
+
+    var ex_buf: [1024]u8 = undefined;
+    const ex_path = try std.fmt.bufPrint(&ex_buf, "{s}/exclude", .{tmp_root});
+
+    var buf: [1024]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    try appendExcludeEntry(testing.allocator, ex_path, ".veer/config.local.toml", stream.writer());
+
+    const content = try readFileAlloc(testing.allocator, ex_path);
+    defer testing.allocator.free(content);
+    try testing.expect(std.mem.indexOf(u8, content, ".veer/config.local.toml") != null);
+}
+
+test "appendExcludeEntry is idempotent" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_root = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(tmp_root);
+
+    var ex_buf: [1024]u8 = undefined;
+    const ex_path = try std.fmt.bufPrint(&ex_buf, "{s}/exclude", .{tmp_root});
+    try testWriteFile(ex_path, ".veer/config.local.toml\n");
+
+    var buf: [1024]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    try appendExcludeEntry(testing.allocator, ex_path, ".veer/config.local.toml", stream.writer());
+
+    const content = try readFileAlloc(testing.allocator, ex_path);
+    defer testing.allocator.free(content);
+    var count: usize = 0;
+    var i: usize = 0;
+    while (std.mem.indexOfPos(u8, content, i, ".veer/config.local.toml")) |pos| {
+        count += 1;
+        i = pos + 1;
+    }
+    try testing.expectEqual(@as(usize, 1), count);
+}
+
+test "gitInfoExcludePath returns a path inside a git repo" {
+    const path = try gitInfoExcludePath(testing.allocator);
+    defer if (path) |p| testing.allocator.free(p);
+    try testing.expect(path != null);
+    try testing.expect(std.mem.endsWith(u8, std.mem.trim(u8, path.?, " \t\r\n"), "info/exclude"));
 }

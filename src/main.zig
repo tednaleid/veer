@@ -328,10 +328,16 @@ fn runInstall(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !voi
 
     var buf: [4096]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = install_cmd.install(allocator, paths, scope, verbose, stream.writer()) catch |err| {
+    const exit_code = install_cmd.install(allocator, paths, verbose, stream.writer()) catch |err| {
         std.debug.print("veer install: {}\n", .{err});
         std.process.exit(1);
     };
+
+    if (exit_code == 0 and scope == .local) {
+        // Best-effort: keep .veer/config.local.toml out of git via the repo's
+        // per-repo, uncommitted .git/info/exclude. No-op outside a git repo.
+        install_cmd.ensureLocalConfigExcluded(allocator, paths.config, stream.writer()) catch {};
+    }
 
     const output = stream.getWritten();
     if (output.len > 0) _ = std.fs.File.stdout().write(output) catch {};
