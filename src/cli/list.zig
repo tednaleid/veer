@@ -1,5 +1,5 @@
 // ABOUTME: Display current veer rules in a formatted table.
-// ABOUTME: Loads merged config (project + global) and renders rule summary.
+// ABOUTME: Loads merged config (local, project, and global) and renders rule summary.
 
 const std = @import("std");
 const config_mod = @import("../config/config.zig");

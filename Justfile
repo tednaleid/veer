@@ -153,7 +153,7 @@ check-no-config:
     code=$?
     set -e
     [ "$code" = "2" ] || { echo "FAIL: expected exit 2, got $code"; cat stderr.txt; exit 1; }
-    grep -q "no .veer/config.toml found" stderr.txt || { echo "FAIL: missing 'no config' header"; cat stderr.txt; exit 1; }
+    grep -q "no config found" stderr.txt || { echo "FAIL: missing 'no config' header"; cat stderr.txt; exit 1; }
     grep -q "cwd:" stderr.txt || { echo "FAIL: missing cwd in error"; cat stderr.txt; exit 1; }
     echo "check-no-config: PASS"
 

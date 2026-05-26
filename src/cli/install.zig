@@ -102,6 +102,8 @@ pub fn install(allocator: std.mem.Allocator, paths: Paths, verbose: bool, writer
 ///      already absent).
 ///   4. Try to remove the config dir if empty.
 ///   5. Delete SKILL.md and parent veer/ skill dir if empty.
+///      (For a local/private install paths.skill is null, so this step is
+///      skipped -- there is no project skill to delete.)
 pub fn uninstall(allocator: std.mem.Allocator, paths: Paths, writer: anytype) !u8 {
     const hook_code = try uninstallHook(allocator, paths.settings, writer);
     if (hook_code != 0) return hook_code;

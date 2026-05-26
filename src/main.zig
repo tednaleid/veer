@@ -125,11 +125,11 @@ fn loadConfig(allocator: std.mem.Allocator, config_path: ?[]const u8) LoadedConf
     }
 }
 
-/// Print "no .veer/config.toml found" plus the cwd that was searched and
+/// Print "no config found" plus the cwd that was searched and
 /// `$CLAUDE_PROJECT_DIR` if it was set. Best-effort: if cwd resolution fails
 /// we still print a useful header.
 fn printNoConfigSearchPath(allocator: std.mem.Allocator) void {
-    std.debug.print("veer: no .veer/config.toml found\n", .{});
+    std.debug.print("veer: no config found (looked for .veer/config.local.toml, .veer/config.toml, and ~/.config/veer/config.toml)\n", .{});
     if (std.fs.cwd().realpathAlloc(allocator, ".")) |cwd| {
         defer allocator.free(cwd);
         std.debug.print("  cwd: {s} (walked up to /, no config)\n", .{cwd});
