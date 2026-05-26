@@ -446,6 +446,7 @@ fn runAdd(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
         \\    --message <str>     Message to display.
         \\    --rewrite-to <str>  Command to rewrite to.
         \\    --config <str>      Path to config file (default: .veer/config.toml).
+        \\    --local             Write to .veer/config.local.toml (gitignored) instead.
         \\    --global            Write to ~/.config/veer/config.toml instead.
         \\
     );
@@ -458,7 +459,7 @@ fn runAdd(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
 
     if (res.args.help != 0) printSubHelp(&params);
 
-    var resolved = resolveRuleConfigPathOrExit(allocator, res.args.global != 0, res.args.config, "add");
+    var resolved = resolveRuleConfigPathOrExit(allocator, res.args.local != 0, res.args.global != 0, res.args.config, "add");
     defer resolved.deinit(allocator);
 
     const opts = add_cmd.AddOptions{
@@ -487,6 +488,7 @@ fn runRemove(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void
     const params = comptime clap.parseParamsComptime(
         \\-h, --help          Display this help and exit.
         \\    --config <str>  Path to config file (default: .veer/config.toml).
+        \\    --local         Remove from .veer/config.local.toml (gitignored) instead.
         \\    --global        Remove from ~/.config/veer/config.toml instead.
         \\<str>
         \\
@@ -506,7 +508,7 @@ fn runRemove(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void
         std.process.exit(1);
     };
 
-    var resolved = resolveRuleConfigPathOrExit(allocator, res.args.global != 0, res.args.config, "remove");
+    var resolved = resolveRuleConfigPathOrExit(allocator, res.args.local != 0, res.args.global != 0, res.args.config, "remove");
     defer resolved.deinit(allocator);
 
     var buf: [1024]u8 = undefined;
@@ -677,6 +679,7 @@ fn runValidate(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !vo
     const params = comptime clap.parseParamsComptime(
         \\-h, --help          Display this help and exit.
         \\    --config <str>  Path to config file (default: .veer/config.toml).
+        \\    --local         Validate .veer/config.local.toml (gitignored) instead.
         \\    --global        Validate ~/.config/veer/config.toml instead.
         \\
     );
@@ -689,7 +692,7 @@ fn runValidate(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !vo
 
     if (res.args.help != 0) printSubHelp(&params);
 
-    var resolved = resolveRuleConfigPathOrExit(allocator, res.args.global != 0, res.args.config, "validate");
+    var resolved = resolveRuleConfigPathOrExit(allocator, res.args.local != 0, res.args.global != 0, res.args.config, "validate");
     defer resolved.deinit(allocator);
 
     var buf: [4096]u8 = undefined;
@@ -707,12 +710,12 @@ fn runValidate(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !vo
 /// Wrapper around `config_path_mod.resolve` that maps errors to user-facing
 /// messages and exits the process. Keeps the runAdd/runRemove/runValidate
 /// dispatchers compact.
-fn resolveRuleConfigPathOrExit(allocator: std.mem.Allocator, global: bool, config_arg: ?[]const u8, verb: []const u8) config_path_mod.Resolved {
-    return config_path_mod.resolve(allocator, global, config_arg) catch |err| switch (err) {
-        error.MutuallyExclusive => {
-            std.debug.print("veer {s}: --global and --config are mutually exclusive\n", .{verb});
-            std.process.exit(1);
-        },
+fn resolveRuleConfigPathOrExit(allocator: std.mem.Allocator, local: bool, global: bool, config_arg: ?[]const u8, verb: []const u8) config_path_mod.Resolved {
+    const target = config_path_mod.targetFromFlags(local, global, config_arg) catch {
+        std.debug.print("veer {s}: --local, --global, and --config are mutually exclusive\n", .{verb});
+        std.process.exit(1);
+    };
+    return config_path_mod.resolve(allocator, target) catch |err| switch (err) {
         error.NoHome => {
             std.debug.print("veer {s}: --global requires $HOME to be set\n", .{verb});
             std.process.exit(1);
