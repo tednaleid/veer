@@ -38,9 +38,13 @@ These were settled during brainstorming and are not open:
 1. File name: `.veer/config.local.toml` (mirrors Claude Code's
    `settings.json` / `settings.local.json` pairing).
 2. Precedence: local > project > global.
-3. CLI: add `--local` to the commands that lack it (`add`, `remove`,
-   `validate`, `list`, `test`, `config-path`, `scan`). `install` and
-   `uninstall` already have `--local` via the existing `Scope` enum.
+3. CLI: add a `--local` flag to `add`, `remove`, `validate` (the commands
+   whose `--global` targets a config file, via `config_path.resolve`).
+   `install` / `uninstall` already have `--local` via the `Scope` enum.
+   `list` / `test` / `check` need no flag -- they read all tiers via
+   `loadMerged` and surface local rules through the `source` column.
+   `scan` is untouched (its `--global` means "scan global transcripts",
+   not a config target).
 4. Merge structure: ordered-tier fold (not repeated two-way merges).
 5. Flag plumbing: a `Target` **tagged union** with `--config` folded in, so
    illegal flag combinations are unrepresentable past the CLI boundary.
@@ -132,10 +136,16 @@ simply overlays whatever the team committed (if anything).
   mutually exclusive) lives in exactly one place: the CLI arg-parsing layer
   that collapses clap's separate raw flags into a single `Target`. Any pair
   set together yields `error.MutuallyExclusive`.
-- `--local` is added to the commands that lack it: `add`, `remove`,
-  `validate`, `list`, `test`, `config-path`, `scan`. `--local` resolves to
-  the relative `.veer/config.local.toml` (matching how the project default is
-  relative).
+- `--local` is added only to `add`, `remove`, `validate` -- the commands
+  whose `--global` resolves a config-file target through
+  `config_path.resolve`. `--local` resolves to the relative
+  `.veer/config.local.toml` (matching how the project default is relative).
+- `resolve`'s flag inputs are collapsed into a `Target` by a pure
+  `targetFromFlags(local, global, config_arg)` helper that returns
+  `error.MutuallyExclusive` when more than one is set. `resolve(allocator,
+  target)` then maps the `Target` to a path. This is the single CLI boundary
+  where an illegal combination can be reported; everything downstream is a
+  total `Target`.
 - `install` / `uninstall` already accept `--local` via `resolveScope` and the
   `Scope` enum; their behavior changes are in section 5, not new flags.
 - `install`'s `Scope` enum (`{ project, local, global }`) and
@@ -143,8 +153,12 @@ simply overlays whatever the team committed (if anything).
   as two distinct types: `install` has no `--config` option, and `Target`
   exists to resolve a single write path for `add`/`remove`/`validate`. Not
   unified (YAGNI).
-- `list` and `test` already render a Source column / source field. They gain
-  the `local` value automatically once `RuleSource` includes it.
+- `list` and `test` already render a source column / field. `list.zig` uses
+  `@tagName(source)`, so `local` appears automatically. `test_cmd.zig` has an
+  explicit `switch` on `RuleSource` in `sourceSuffixFor` that must gain a
+  `.local => "\tlocal"` arm (the compiler enforces this). Neither command
+  gets a `--local` flag.
+- `scan` is not modified.
 
 ### 5. `veer install --local` (modify existing `Scope.local`)
 
