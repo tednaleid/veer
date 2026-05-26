@@ -140,6 +140,9 @@ pub fn mergeRules(allocator: std.mem.Allocator, tiers: []const RuleTier) !MergeR
 /// Fold Settings tiers ordered highest-precedence-first. The highest tier's
 /// `log_level` wins; each optional path takes the first non-null tier walking
 /// highest to lowest. An empty slice yields default Settings.
+/// `log_level` is a non-null string (default "warn") with no "unset" sentinel,
+/// so the `log_set` guard takes the first tier's value once; re-assigning every
+/// iteration would instead make the LAST (lowest-precedence) tier win.
 pub fn mergeSettings(tiers: []const Settings) Settings {
     var result = Settings{};
     var log_set = false;
@@ -644,7 +647,14 @@ test "globalConfigPath uses XDG_CONFIG_HOME" {
     try std.testing.expect(std.mem.endsWith(u8, path, "/veer/config.toml"));
 }
 
-test "mergeSettings project overrides global" {
+test "mergeSettings with no tiers yields default Settings" {
+    const merged = mergeSettings(&.{});
+    try std.testing.expectEqualStrings("warn", merged.log_level);
+    try std.testing.expect(merged.claude_settings_path == null);
+    try std.testing.expect(merged.claude_projects_path == null);
+}
+
+test "mergeSettings: project overrides global" {
     const global = Settings{
         .log_level = "info",
         .claude_settings_path = "/global/path",
