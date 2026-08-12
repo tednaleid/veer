@@ -17,6 +17,7 @@ const Rule = @import("../config/rule.zig").Rule;
 pub fn run(
     allocator: std.mem.Allocator,
     rules: []const Rule,
+    root: ?[]const u8,
     stdin_data: []const u8,
     stdout_writer: anytype,
     stderr_writer: anytype,
@@ -35,6 +36,7 @@ pub fn run(
         .content = input.content,
         .file_path = input.file_path,
         .cwd = input.cwd,
+        .root = root,
     });
 
     // Output based on action
@@ -152,6 +154,7 @@ test "end-to-end: rewrite rule returns updatedInput on stdout" {
     const exit_code = try run(
         std.testing.allocator,
         &rules,
+        null,
         input,
         stdout_stream.writer(),
         stderr_stream.writer(),
@@ -190,6 +193,7 @@ test "reject path emits [rule_id] prefix on stderr and stdout marker" {
     const exit_code = try run(
         std.testing.allocator,
         &rules,
+        null,
         input,
         stdout_stream.writer(),
         stderr_stream.writer(),
@@ -232,6 +236,7 @@ test "end-to-end: reject rule returns exit 2 with message on stderr" {
     const exit_code = try run(
         std.testing.allocator,
         &rules,
+        null,
         input,
         stdout_stream.writer(),
         stderr_stream.writer(),
@@ -264,6 +269,7 @@ test "end-to-end: reject rule with command_all returns exit 2" {
     const exit_code = try run(
         std.testing.allocator,
         &rules,
+        null,
         input,
         stdout_stream.writer(),
         stderr_stream.writer(),
@@ -292,6 +298,7 @@ test "end-to-end: no matching rule returns exit 0 with empty output" {
     const exit_code = try run(
         std.testing.allocator,
         &rules,
+        null,
         input,
         stdout_stream.writer(),
         stderr_stream.writer(),
@@ -318,6 +325,7 @@ test "end-to-end: invalid JSON returns exit 1" {
     const exit_code = try run(
         std.testing.allocator,
         &rules,
+        null,
         "not valid json",
         stdout_stream.writer(),
         stderr_stream.writer(),
@@ -347,6 +355,7 @@ test "end-to-end: surgical rewrite in compound command" {
     const exit_code = try run(
         std.testing.allocator,
         &rules,
+        null,
         input,
         stdout_stream.writer(),
         stderr_stream.writer(),
@@ -386,6 +395,7 @@ test "verbose allow: emits systemMessage for Bash (just the command, no prefix)"
     const exit_code = try run(
         std.testing.allocator,
         &rules,
+        null,
         input,
         stdout_stream.writer(),
         stderr_stream.writer(),
@@ -422,6 +432,7 @@ test "verbose allow: non-Bash tool emits no banner (empty stdout)" {
     const exit_code = try run(
         std.testing.allocator,
         &rules,
+        null,
         input,
         stdout_stream.writer(),
         stderr_stream.writer(),
@@ -453,6 +464,7 @@ test "verbose rewrite: emits systemMessage alongside updatedInput" {
     const exit_code = try run(
         std.testing.allocator,
         &rules,
+        null,
         input,
         stdout_stream.writer(),
         stderr_stream.writer(),
@@ -525,6 +537,7 @@ test "end-to-end: ExitPlanMode rejected when plan contains 'actually'" {
     const exit_code = try run(
         std.testing.allocator,
         &rules,
+        null,
         input,
         stdout_stream.writer(),
         stderr_stream.writer(),
@@ -585,6 +598,7 @@ test "end-to-end: ExitPlanMode allowed when plan is clean" {
     const exit_code = try run(
         std.testing.allocator,
         &rules,
+        null,
         input,
         stdout_stream.writer(),
         stderr_stream.writer(),
@@ -614,6 +628,7 @@ test "verbose reject: same shape as non-verbose (exit 2, stderr msg, stdout mark
     const exit_code = try run(
         std.testing.allocator,
         &rules,
+        null,
         input,
         stdout_stream.writer(),
         stderr_stream.writer(),

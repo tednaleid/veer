@@ -264,9 +264,12 @@ fn runCheck(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void 
     var stderr_buf: [4096]u8 = undefined;
     var stderr_stream = std.io.fixedBufferStream(&stderr_buf);
 
+    const root: ?[]const u8 = if (loaded.merged) |m| m.projectRoot() else null;
+
     const exit_code = check_cmd.run(
         allocator,
         loaded.rules,
+        root,
         stdin_data,
         stdout_stream.writer(),
         stderr_stream.writer(),

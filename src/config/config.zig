@@ -74,6 +74,15 @@ pub const MergedConfig = struct {
         if (self.local_parsed) |*l| l.deinit();
         if (self.project_config_path) |p| allocator.free(p);
     }
+
+    /// The directory containing the `.veer/` dir the project config came
+    /// from. A slice into `project_config_path`; no allocation. Null when no
+    /// project config was found.
+    pub fn projectRoot(self: MergedConfig) ?[]const u8 {
+        const pp = self.project_config_path orelse return null;
+        const veer_dir = std.fs.path.dirname(pp) orelse return null;
+        return std.fs.path.dirname(veer_dir);
+    }
 };
 
 /// Why a config file failed to parse. `position` is a TOML syntax error;
@@ -954,4 +963,13 @@ test "mergeSettings regression: two tiers match old project-over-global behavior
     try std.testing.expectEqualStrings("warn", merged.log_level);
     try std.testing.expectEqualStrings("G", merged.claude_settings_path.?);
     try std.testing.expectEqualStrings("P", merged.claude_projects_path.?);
+}
+
+test "projectRoot strips the .veer/config.toml suffix" {
+    var merged = MergedConfig{};
+    merged.project_config_path = "/home/me/proj/.veer/config.toml";
+    try std.testing.expectEqualStrings("/home/me/proj", merged.projectRoot().?);
+
+    var empty = MergedConfig{};
+    try std.testing.expect(empty.projectRoot() == null);
 }
