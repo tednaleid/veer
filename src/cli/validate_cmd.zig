@@ -88,7 +88,7 @@ pub fn run(allocator: std.mem.Allocator, opts: ValidateOptions, writer: anytype)
                 issues_len += 1;
             }
         }
-        if (action == .reject and rule.message == null) {
+        if ((action == .reject or action == .allow) and rule.message == null) {
             if (issues_len < issues_buf.len) {
                 issues_buf[issues_len] = "reject requires message";
                 issues_len += 1;
@@ -103,6 +103,12 @@ pub fn run(allocator: std.mem.Allocator, opts: ValidateOptions, writer: anytype)
                     issues_buf[issues_len] = what;
                     issues_len += 1;
                 }
+            }
+        }
+        if (action == .allow and rule_mod.fieldsUsed(rule.match).command) {
+            if (issues_len < issues_buf.len) {
+                issues_buf[issues_len] = "allow does not accept command matchers";
+                issues_len += 1;
             }
         }
         if (!rule_mod.hasAnyMatchPub(rule.match)) {
@@ -136,7 +142,7 @@ fn validateAll(rules: []const rule_mod.Rule) usize {
 
         const action = rule.effectiveAction();
         if (action == .rewrite and rule.rewrite_to == null) count += 1;
-        if (action == .reject and rule.message == null) count += 1;
+        if ((action == .reject or action == .allow) and rule.message == null) count += 1;
         if (rule_mod.toolFields(rule.tool)) |carried| {
             const used = rule_mod.fieldsUsed(rule.match);
             if ((used.command and !carried.command) or
@@ -146,6 +152,7 @@ fn validateAll(rules: []const rule_mod.Rule) usize {
                 count += 1;
             }
         }
+        if (action == .allow and rule_mod.fieldsUsed(rule.match).command) count += 1;
         if (!rule_mod.hasAnyMatchPub(rule.match)) count += 1;
     }
     return count;

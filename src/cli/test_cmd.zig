@@ -172,7 +172,10 @@ fn checkCall(
                     src_suffix,
                 });
             },
-            .reject => {
+            // engine.check never returns .allow here: a gate that passes
+            // falls through to the next rule, and a gate that fails is
+            // reported as .reject. This arm exists only for exhaustiveness.
+            .reject, .allow => {
                 try writer.print("REJECT\t2\t{s}\t{s}\t{s}{s}\n", .{
                     label,
                     result.rule_id orelse "",

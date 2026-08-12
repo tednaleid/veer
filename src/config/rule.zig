@@ -6,6 +6,11 @@ const std = @import("std");
 pub const Action = enum {
     rewrite,
     reject,
+    /// A gate: the match block is the allowlist of what may pass. A call the
+    /// gate does not match is rejected; one it matches falls through to the
+    /// next rule. A gate never approves-and-stops, which is what makes gates
+    /// monotonically narrowing: adding one can only reduce what passes.
+    allow,
 };
 
 pub const AstMatch = struct {
@@ -121,6 +126,7 @@ pub const ValidationError = error{
     RejectRequiresMessage,
     EmptyMatch,
     MatcherToolMismatch,
+    AllowRequiresPathOrContent,
 };
 
 /// Validate a slice of rules. Returns the first validation error found.
@@ -143,7 +149,7 @@ pub fn validate(rules: []const Rule) ValidationError!void {
             return ValidationError.RewriteRequiresTarget;
         }
 
-        if (action == .reject and rule.message == null) {
+        if ((action == .reject or action == .allow) and rule.message == null) {
             return ValidationError.RejectRequiresMessage;
         }
 
@@ -155,6 +161,11 @@ pub fn validate(rules: []const Rule) ValidationError!void {
             {
                 return ValidationError.MatcherToolMismatch;
             }
+        }
+
+        if (action == .allow) {
+            const used = fieldsUsed(rule.match);
+            if (used.command) return ValidationError.AllowRequiresPathOrContent;
         }
 
         if (!hasAnyMatch(rule.match)) {
@@ -421,6 +432,38 @@ test "path matcher on a Write rule passes validation" {
         .tool = "Write",
         .message = "M",
         .match = .{ .path_any = &.{"**/*.gen.ts"} },
+    }};
+    try validate(&rules);
+}
+
+test "allow requires a message" {
+    const rules = [_]Rule{.{
+        .id = "gate",
+        .action = .allow,
+        .tool = "Write",
+        .match = .{ .path_any = &.{"src/**"} },
+    }};
+    try std.testing.expectError(ValidationError.RejectRequiresMessage, validate(&rules));
+}
+
+test "allow rejects a command matcher" {
+    const rules = [_]Rule{.{
+        .id = "gate",
+        .action = .allow,
+        .tool = "Bash",
+        .message = "Use a just recipe.",
+        .match = .{ .command_any = &.{ "just", "git" } },
+    }};
+    try std.testing.expectError(ValidationError.AllowRequiresPathOrContent, validate(&rules));
+}
+
+test "allow accepts a content matcher" {
+    const rules = [_]Rule{.{
+        .id = "plans-need-testing",
+        .action = .allow,
+        .tool = "ExitPlanMode",
+        .message = "Add a Testing section.",
+        .match = .{ .content_regex = "## Testing" },
     }};
     try validate(&rules);
 }

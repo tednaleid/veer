@@ -82,29 +82,48 @@ pub fn check(
         if (fields.content and call.content == null) continue;
         if (fields.path and resolved == null) continue;
 
+        var matched = true;
         var match_start: ?u32 = null;
         var match_end: ?u32 = null;
 
         if (fields.command) {
             const parsed = info orelse continue;
-            const match_idx = matcher.matchRule(rule, parsed) orelse continue;
-            if (match_idx != matcher.CROSS_COMMAND_MATCH and
-                match_idx < parsed.commands.items.len)
-            {
-                const matched_cmd = parsed.commands.items[match_idx];
-                match_start = matched_cmd.start_byte;
-                match_end = matched_cmd.end_byte;
+            if (matcher.matchRule(rule, parsed)) |match_idx| {
+                if (match_idx != matcher.CROSS_COMMAND_MATCH and
+                    match_idx < parsed.commands.items.len)
+                {
+                    const matched_cmd = parsed.commands.items[match_idx];
+                    match_start = matched_cmd.start_byte;
+                    match_end = matched_cmd.end_byte;
+                }
+            } else {
+                matched = false;
             }
         }
 
-        if (fields.path) {
-            if (!matcher.matchPathMatchers(rule, resolved.?, home)) continue;
+        if (matched and fields.path) {
+            matched = matcher.matchPathMatchers(rule, resolved.?, home);
         }
 
-        if (!matcher.matchContent(allocator, rule, call.content)) continue;
+        if (matched) {
+            matched = matcher.matchContent(allocator, rule, call.content);
+        }
+
+        const action = rule.effectiveAction();
+        if (action == .allow) {
+            // A gate: pass means fall through, fail means reject.
+            if (matched) continue;
+            return .{
+                .action = .reject,
+                .rule_id = rule.id,
+                .message = rule.message,
+            };
+        }
+
+        if (!matched) continue;
 
         return .{
-            .action = rule.effectiveAction(),
+            .action = action,
             .rule_id = rule.id,
             .message = rule.message,
             .rewrite_to = rule.rewrite_to,
@@ -344,4 +363,131 @@ test "a path rule is skipped when the call carries no path" {
 
     const result = check(std.testing.allocator, &rules, .{ .tool_name = "Write" });
     try std.testing.expect(result.action == null);
+}
+
+test "allow gate falls through when the path is in the allowlist" {
+    const rules = [_]Rule{
+        .{
+            .id = "worktree-only-writes",
+            .action = .allow,
+            .tool = "Write",
+            .message = "Work in a worktree.",
+            .match = .{ .path_any = &.{".claude/worktrees/**"} },
+        },
+        .{
+            .id = "no-gen-edits",
+            .tool = "Write",
+            .message = "Generated.",
+            .match = .{ .path_any = &.{"**/*.gen.ts"} },
+        },
+    };
+
+    // In the allowlist, and not generated: falls through both, allowed.
+    const ok = check(std.testing.allocator, &rules, .{
+        .tool_name = "Write",
+        .file_path = "/p/.claude/worktrees/a/src/App.vue",
+        .root = "/p",
+    });
+    try std.testing.expect(ok.action == null);
+
+    // In the allowlist, but generated: gate passes, next rule rejects.
+    const gen = check(std.testing.allocator, &rules, .{
+        .tool_name = "Write",
+        .file_path = "/p/.claude/worktrees/a/src/api.gen.ts",
+        .root = "/p",
+    });
+    try std.testing.expectEqual(Action.reject, gen.action.?);
+    try std.testing.expectEqualStrings("no-gen-edits", gen.rule_id.?);
+}
+
+test "allow gate rejects what is not in the allowlist" {
+    const rules = [_]Rule{.{
+        .id = "worktree-only-writes",
+        .action = .allow,
+        .tool = "Write",
+        .message = "Work in a worktree.",
+        .match = .{ .path_any = &.{".claude/worktrees/**"} },
+    }};
+
+    const result = check(std.testing.allocator, &rules, .{
+        .tool_name = "Write",
+        .file_path = "/p/api/main.py",
+        .root = "/p",
+    });
+    try std.testing.expectEqual(Action.reject, result.action.?);
+    try std.testing.expectEqualStrings("Work in a worktree.", result.message.?);
+    try std.testing.expectEqualStrings("worktree-only-writes", result.rule_id.?);
+}
+
+test "a gate whose field is null does not apply" {
+    const rules = [_]Rule{.{
+        .id = "worktree-only-writes",
+        .action = .allow,
+        .tool = "Write",
+        .message = "Work in a worktree.",
+        .match = .{ .path_any = &.{".claude/worktrees/**"} },
+    }};
+
+    const result = check(std.testing.allocator, &rules, .{ .tool_name = "Write" });
+    try std.testing.expect(result.action == null);
+}
+
+test "two gates on the same tool intersect" {
+    const rules = [_]Rule{
+        .{
+            .id = "src-only",
+            .action = .allow,
+            .tool = "Write",
+            .message = "Writes belong under src.",
+            .match = .{ .path_any = &.{"src/**"} },
+        },
+        .{
+            .id = "vue-only",
+            .action = .allow,
+            .tool = "Write",
+            .message = "Writes must be .vue files.",
+            .match = .{ .path_any = &.{"**/*.vue"} },
+        },
+    };
+
+    // Satisfies both.
+    const both = check(std.testing.allocator, &rules, .{
+        .tool_name = "Write",
+        .file_path = "/p/src/App.vue",
+        .root = "/p",
+    });
+    try std.testing.expect(both.action == null);
+
+    // Satisfies the first only: the second gate rejects.
+    const one = check(std.testing.allocator, &rules, .{
+        .tool_name = "Write",
+        .file_path = "/p/src/main.ts",
+        .root = "/p",
+    });
+    try std.testing.expectEqual(Action.reject, one.action.?);
+    try std.testing.expectEqualStrings("vue-only", one.rule_id.?);
+}
+
+test "stay-in-repo gate rejects a write outside the root" {
+    const rules = [_]Rule{.{
+        .id = "stay-in-repo",
+        .action = .allow,
+        .tool = "Write",
+        .message = "Stay inside the project.",
+        .match = .{ .path_any = &.{"*"} },
+    }};
+
+    const outside = check(std.testing.allocator, &rules, .{
+        .tool_name = "Write",
+        .file_path = "/tmp/scratch.txt",
+        .root = "/p",
+    });
+    try std.testing.expectEqual(Action.reject, outside.action.?);
+
+    const inside = check(std.testing.allocator, &rules, .{
+        .tool_name = "Write",
+        .file_path = "/p/apps/web/main.ts",
+        .root = "/p",
+    });
+    try std.testing.expect(inside.action == null);
 }

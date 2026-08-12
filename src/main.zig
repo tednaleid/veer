@@ -465,7 +465,7 @@ fn runList(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
 fn runAdd(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
     const params = comptime clap.parseParamsComptime(
         \\-h, --help              Display this help and exit.
-        \\    --action <str>      Rule action (reject, rewrite).
+        \\    --action <str>      Rule action (allow, reject, rewrite).
         \\    --command <str>     Command pattern to match.
         \\    --id <str>          Rule identifier.
         \\    --name <str>        Rule name.

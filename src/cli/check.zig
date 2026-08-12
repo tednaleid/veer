@@ -55,7 +55,10 @@ pub fn run(
                 }
                 return hook.ExitCode.rewrite;
             },
-            .reject => {
+            // engine.check never returns .allow here: a gate that passes
+            // falls through to the next rule, and a gate that fails is
+            // reported as .reject. This arm exists only for exhaustiveness.
+            .reject, .allow => {
                 if (result.message) |msg| {
                     if (result.rule_id) |rid| {
                         try stderr_writer.print("[{s}] {s}\n", .{ rid, msg });
