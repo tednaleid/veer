@@ -7,6 +7,7 @@ const MatchConfig = @import("../config/rule.zig").MatchConfig;
 const AstMatch = @import("../config/rule.zig").AstMatch;
 const CommandInfo = @import("command_info.zig").CommandInfo;
 const SingleCommand = @import("command_info.zig").SingleCommand;
+const path_mod = @import("path.zig");
 
 /// Returns the index of the matched command, or null if no match.
 /// For cross-command-only matches (no per-command fields), returns
@@ -230,6 +231,42 @@ pub fn matchContent(allocator: std.mem.Allocator, rule: Rule, content: ?[]const 
     if (m.content_contains) |needle| {
         if (std.mem.indexOf(u8, text, needle) == null) return false;
     }
+    return true;
+}
+
+/// Match a rule's path matchers against a resolved path. Returns true when
+/// all configured path matchers match, and true when the rule has none.
+///
+/// path_regex runs against the root-relative form when the path is inside the
+/// root, and the absolute form otherwise, so a regex sees the same string a
+/// glob would.
+pub fn matchPathMatchers(
+    rule: Rule,
+    resolved: path_mod.Resolved,
+    home: ?[]const u8,
+) bool {
+    const m = rule.match;
+
+    if (m.path) |pattern| {
+        if (!path_mod.matches(pattern, resolved, home)) return false;
+    }
+
+    if (m.path_any) |patterns| {
+        var found = false;
+        for (patterns) |pattern| {
+            if (path_mod.matches(pattern, resolved, home)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+    }
+
+    if (m.path_regex) |pattern| {
+        const text = resolved.relative orelse resolved.absolute;
+        if (!regexMatch(pattern, text)) return false;
+    }
+
     return true;
 }
 
@@ -734,6 +771,78 @@ test "matchContent: content larger than 1KB still matches (heap allocation)" {
         .match = .{ .content_regex = "actually" },
     };
     try std.testing.expect(matchContent(std.testing.allocator, rule, buf.items));
+}
+
+// -- matchPathMatchers tests --
+
+test "matchPathMatchers: no path matchers returns true (tool-name match suffices)" {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const resolved = path_mod.resolve("/p/api/main.py", null, "/p", &buf).?;
+
+    const rule = Rule{ .id = "t", .tool = "Write", .message = "m", .match = .{} };
+    try std.testing.expect(matchPathMatchers(rule, resolved, null));
+}
+
+test "matchPathMatchers: path matches a single glob" {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const resolved = path_mod.resolve("/p/api/schema_pb2.py", null, "/p", &buf).?;
+
+    const rule = Rule{ .id = "t", .tool = "Write", .message = "m", .match = .{ .path = "**/*_pb2.py" } };
+    try std.testing.expect(matchPathMatchers(rule, resolved, null));
+
+    const miss_rule = Rule{ .id = "t", .tool = "Write", .message = "m", .match = .{ .path = "**/*.gen.ts" } };
+    try std.testing.expect(!matchPathMatchers(miss_rule, resolved, null));
+}
+
+test "matchPathMatchers: path_any matches when any pattern matches" {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const resolved = path_mod.resolve("/p/api/schema_pb2.py", null, "/p", &buf).?;
+
+    const rule = Rule{
+        .id = "t",
+        .tool = "Write",
+        .message = "m",
+        .match = .{ .path_any = &.{ "**/*_pb2.py", "**/*.gen.ts" } },
+    };
+    try std.testing.expect(matchPathMatchers(rule, resolved, null));
+}
+
+test "matchPathMatchers: path_regex matches against the root-relative form" {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const resolved = path_mod.resolve("/p/api/schema_pb2.py", null, "/p", &buf).?;
+
+    const rule = Rule{ .id = "t", .tool = "Write", .message = "m", .match = .{ .path_regex = "_pb2\\.py$" } };
+    try std.testing.expect(matchPathMatchers(rule, resolved, null));
+}
+
+test "matchPathMatchers: path_regex matches against the absolute form when outside root" {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const resolved = path_mod.resolve("/tmp/scratch_pb2.py", null, "/p", &buf).?;
+    try std.testing.expect(resolved.relative == null);
+
+    const rule = Rule{ .id = "t", .tool = "Write", .message = "m", .match = .{ .path_regex = "^/tmp/.*_pb2\\.py$" } };
+    try std.testing.expect(matchPathMatchers(rule, resolved, null));
+}
+
+test "matchPathMatchers: all configured matchers must match (AND)" {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const resolved = path_mod.resolve("/p/api/schema_pb2.py", null, "/p", &buf).?;
+
+    const rule = Rule{
+        .id = "t",
+        .tool = "Write",
+        .message = "m",
+        .match = .{ .path = "**/*_pb2.py", .path_regex = "^api/" },
+    };
+    try std.testing.expect(matchPathMatchers(rule, resolved, null));
+
+    const rule_mismatch = Rule{
+        .id = "t",
+        .tool = "Write",
+        .message = "m",
+        .match = .{ .path = "**/*_pb2.py", .path_regex = "^other/" },
+    };
+    try std.testing.expect(!matchPathMatchers(rule_mismatch, resolved, null));
 }
 
 // -- Fuzz tests --

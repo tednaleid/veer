@@ -42,6 +42,12 @@ pub const MatchConfig = struct {
     content_regex: ?[]const u8 = null,
     content_contains: ?[]const u8 = null,
 
+    // Path matching (for tools that carry a target path). Patterns are
+    // gitignore-shaped globs; see README for the anchoring rules.
+    path: ?[]const u8 = null,
+    path_any: ?[]const []const u8 = null,
+    path_regex: ?[]const u8 = null,
+
     // AST structural matching
     ast: ?AstMatch = null,
 };
@@ -63,7 +69,7 @@ pub fn fieldsUsed(m: MatchConfig) FieldSet {
             m.arg != null or m.arg_any != null or m.arg_all != null or
             m.arg_regex != null or m.raw_regex != null or m.ast != null,
         .content = m.content_regex != null or m.content_contains != null,
-        .path = false,
+        .path = m.path != null or m.path_any != null or m.path_regex != null,
     };
 }
 
@@ -177,6 +183,9 @@ fn hasAnyMatch(m: MatchConfig) bool {
         m.raw_regex != null or
         m.content_regex != null or
         m.content_contains != null or
+        m.path != null or
+        m.path_any != null or
+        m.path_regex != null or
         m.ast != null;
 }
 
@@ -334,6 +343,9 @@ test "hasAnyMatch with each field type" {
         MatchConfig{ .raw_regex = "x" },
         MatchConfig{ .content_regex = "x" },
         MatchConfig{ .content_contains = "x" },
+        MatchConfig{ .path = "x" },
+        MatchConfig{ .path_any = &.{"x"} },
+        MatchConfig{ .path_regex = "x" },
         MatchConfig{ .ast = .{} },
     };
     inline for (cases) |m| {
@@ -389,6 +401,26 @@ test "unknown tool names are exempt from compatibility validation" {
         .tool = "mcp__filesystem__write_file",
         .message = "M",
         .match = .{ .raw_regex = "x" },
+    }};
+    try validate(&rules);
+}
+
+test "path matcher on a Bash rule fails validation" {
+    const rules = [_]Rule{.{
+        .id = "probe",
+        .tool = "Bash",
+        .message = "M",
+        .match = .{ .path_any = &.{"src/**"} },
+    }};
+    try std.testing.expectError(ValidationError.MatcherToolMismatch, validate(&rules));
+}
+
+test "path matcher on a Write rule passes validation" {
+    const rules = [_]Rule{.{
+        .id = "no-gen-edits",
+        .tool = "Write",
+        .message = "M",
+        .match = .{ .path_any = &.{"**/*.gen.ts"} },
     }};
     try validate(&rules);
 }

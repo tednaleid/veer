@@ -8,6 +8,7 @@ const MatchConfig = @import("../config/rule.zig").MatchConfig;
 const rule_mod = @import("../config/rule.zig");
 const matcher = @import("matcher.zig");
 const shell = @import("shell.zig");
+const path_mod = @import("path.zig");
 const CommandInfo = @import("command_info.zig").CommandInfo;
 
 pub const CheckResult = struct {
@@ -58,6 +59,13 @@ pub fn check(
         }
     }
 
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const resolved: ?path_mod.Resolved = if (call.file_path) |fp|
+        path_mod.resolve(fp, call.cwd, call.root, &path_buf)
+    else
+        null;
+    const home = std.posix.getenv("HOME");
+
     // Evaluate rules in definition order (first match wins)
     for (rules) |rule| {
         if (!rule.enabled) continue;
@@ -72,6 +80,7 @@ pub fn check(
         const fields = rule_mod.fieldsUsed(rule.match);
         if (fields.command and call.command == null) continue;
         if (fields.content and call.content == null) continue;
+        if (fields.path and resolved == null) continue;
 
         var match_start: ?u32 = null;
         var match_end: ?u32 = null;
@@ -86,6 +95,10 @@ pub fn check(
                 match_start = matched_cmd.start_byte;
                 match_end = matched_cmd.end_byte;
             }
+        }
+
+        if (fields.path) {
+            if (!matcher.matchPathMatchers(rule, resolved.?, home)) continue;
         }
 
         if (!matcher.matchContent(allocator, rule, call.content)) continue;
@@ -295,5 +308,40 @@ test "ExitPlanMode rule with content matcher and null content does not match" {
 
     // Resolver couldn't find/read the plan file: content is null. Fail open.
     const result = check(std.testing.allocator, &rules, .{ .tool_name = "ExitPlanMode" });
+    try std.testing.expect(result.action == null);
+}
+
+test "path_any rejects a Write outside the allowed tree" {
+    const rules = [_]Rule{.{
+        .id = "no-src-writes",
+        .tool = "Write",
+        .message = "Generated. Edit the template.",
+        .match = .{ .path_any = &.{ "**/*_pb2.py", "**/*.gen.ts" } },
+    }};
+
+    const hit = check(std.testing.allocator, &rules, .{
+        .tool_name = "Write",
+        .file_path = "/p/api/schema_pb2.py",
+        .root = "/p",
+    });
+    try std.testing.expectEqual(Action.reject, hit.action.?);
+
+    const miss = check(std.testing.allocator, &rules, .{
+        .tool_name = "Write",
+        .file_path = "/p/api/main.py",
+        .root = "/p",
+    });
+    try std.testing.expect(miss.action == null);
+}
+
+test "a path rule is skipped when the call carries no path" {
+    const rules = [_]Rule{.{
+        .id = "no-src-writes",
+        .tool = "Write",
+        .message = "M",
+        .match = .{ .path_any = &.{"**"} },
+    }};
+
+    const result = check(std.testing.allocator, &rules, .{ .tool_name = "Write" });
     try std.testing.expect(result.action == null);
 }
