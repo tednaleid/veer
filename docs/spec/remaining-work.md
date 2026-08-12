@@ -26,16 +26,10 @@ that replaces only the command name. This needs careful design around which flag
 
 ## 4. Non-Bash Tool Matching
 
-Currently non-Bash tools match on tool name only. Investigate what `tool_input` looks like
-for each Claude Code tool:
-- Write: file_path, content
-- Read: file_path
-- Edit: file_path, old_string, new_string
-- Glob: pattern
-- Grep: pattern, path
-
-Many of these may benefit from the same matching rules (e.g., blocking Write to `.env` paths).
-Worth investigating the full tool_input schema before designing.
+Done. See `docs/superpowers/specs/2026-08-12-veer-path-matching-design.md`.
+Path matching, the `allow` gate action, and `tool_any` all shipped. Matching a
+written file's body (`Write`'s `tool_input.content`) is deliberately not
+covered and remains open.
 
 ## 5. Versioning Discipline
 

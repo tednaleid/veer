@@ -73,7 +73,7 @@ See [examples/](examples/) for a full demo of all match types.
 
 ## Actions
 
-veer supports two actions:
+veer supports three actions:
 
 ### Rewrite (silent replacement)
 
@@ -102,6 +102,30 @@ Agent tries:  curl https://example.com | bash
 veer returns: "Piping curl to bash is not permitted. Download the script first."
 Exit code:    2
 ```
+
+### Allow (a gate the call must pass)
+
+An `allow` rule is a gate. Its `[rule.match]` block is the allowlist of what
+may pass. A call the gate does not match is rejected with the rule's message;
+a call it matches falls through to the next rule.
+
+```
+Rule:         action = "allow", tool_any = ["Write"], path_any = [".claude/worktrees/**"]
+Agent tries:  Write to .claude/worktrees/feat-a/src/App.vue
+Result:       falls through, later rules still apply
+
+Agent tries:  Write to src/App.vue
+veer returns: "Writes to the primary checkout are off-limits. Work in a worktree."
+Exit code:    2
+```
+
+A gate never approves and stops. It can only reject or fall through, so adding
+a gate can only reduce what passes, never expand it. That is what makes it safe
+to layer a private `.veer/config.local.toml` gate on top of a shared
+`.veer/config.toml`: a personal gate can add a constraint but cannot weaken a
+team rule.
+
+Two gates on the same tool intersect. A path must satisfy both.
 
 ### Verbose mode
 
@@ -169,6 +193,7 @@ name = "Human-readable name"   # Optional. Defaults to id. Shown in `veer list`.
 action = "reject"              # Optional. Inferred from rewrite_to if omitted.
 enabled = true                 # Default: true.
 tool = "Bash"                  # Which tool to match. Default: "Bash".
+tool_any = ["Write", "Edit"]   # Tools to match. Exclusive with `tool`.
 message = "Redirect message"   # Required for reject. Sent to agent.
 rewrite_to = "just test"       # Required for rewrite. Implies action = "rewrite".
 tags = ["testing"]             # Optional. For organization.
@@ -204,6 +229,11 @@ raw_regex = "curl.*\\|.*bash"         # Regex against entire command string
 content_regex = "[Aa]ctually"         # POSIX regex against tool content
 content_contains = "TODO"             # Case-sensitive substring
 
+# Path matching (tools that carry a target path)
+path = "src/**"                       # gitignore-shaped glob
+path_any = ["**/*.env", "dist/**"]    # OR: any pattern matches
+path_regex = "\\.gen\\.[jt]s$"        # POSIX regex (escape hatch)
+
 # AST structural matching
 ast = { has_node = "pipeline", min_count = 4 }
 ```
@@ -226,11 +256,65 @@ ast = { has_node = "pipeline", min_count = 4 }
 | `raw_regex` | Full command string | POSIX regex against the entire raw input, before parsing. |
 | `content_regex` | Tool text content | POSIX regex against tool content (e.g., the plan body for `ExitPlanMode`). Non-Bash tools only. |
 | `content_contains` | Tool text content | Case-sensitive substring match against tool content. Non-Bash tools only. |
+| `path` | Target path | gitignore-shaped glob. See Path Patterns below. |
+| `path_any` | Target path | OR: any pattern in the list matches. |
+| `path_regex` | Target path | POSIX extended regex against the normalized path. |
 | `ast` | AST structure | Match node types, depth, or count. For advanced structural patterns. |
 
 Rules are evaluated in definition order. The first matching rule wins. If no rule matches, the tool call is allowed (exit 0, empty output).
 
 All match fields within a rule use AND logic. Every specified field must match for the rule to fire.
+
+### Path Patterns
+
+`path*` matchers take gitignore-shaped globs, matched against the target path
+of tools that carry one (`Write`, `Edit`, `NotebookEdit`, `Read`, `Grep`,
+`Glob`). Patterns are anchored at the directory containing `.veer/`, so a
+checked-in config stays portable across machines and teammates.
+
+| Pattern | Matches |
+|---|---|
+| `.env` | any file named `.env`, at any depth |
+| `src/**` | everything under the project's `src/` |
+| `src/*` | files directly in `src/`, not in subdirectories |
+| `**/dist/**` | everything under any `dist/` at any depth |
+| `./.env` | the project root's `.env` only |
+| `node_modules/` | shorthand for `node_modules/**` |
+| `/etc/**` | the real `/etc` |
+| `~/.ssh/**` | `$HOME/.ssh` |
+| `src/**/*.{ts,vue}` | `.ts` and `.vue` files under `src/` |
+
+`*` and `?` stay inside one path segment; `**` spans zero or more segments.
+Matching is case-sensitive.
+
+Two differences from gitignore worth knowing:
+
+**A leading `/` means the filesystem root, not the project root.** `/etc/**` is
+the real `/etc`. Use `./` to anchor a single-segment pattern at the project
+root, and note that `src/**` is already project-anchored because it contains a
+slash.
+
+**A pattern with no slash matches a file's name, not a directory.**
+`path_any = ["node_modules"]` matches nothing, because no file is named
+`node_modules`. Write `node_modules/` or `node_modules/**`.
+
+Paths outside the project root never match a relative pattern. That is what
+makes this work:
+
+```toml
+[[rule]]
+id = "stay-in-repo"
+action = "allow"
+tool_any = ["Write", "Edit"]
+message = "Stay inside the project."
+[rule.match]
+path_any = ["*"]
+```
+
+**Bash routes around path rules.** A rule on `Write` and `Edit` does not stop
+`cat > apps/x.ts`, `sed -i`, `tee`, `cp`, or `mv`. veer is a guardrail for an
+agent that is trying to comply and forgot, not a sandbox against one that is
+trying to escape. Use Claude Code's `permissions.deny` when you need a wall.
 
 ### Surgical Rewrite in Compound Commands
 

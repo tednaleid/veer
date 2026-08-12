@@ -100,7 +100,7 @@ veer test --file commands.txt            # batch, one command per line
 Running `veer test` is cheap and trustworthy -- it uses the real matching
 engine. Prefer it over reasoning about matchers in your head.
 
-## The two actions
+## The three actions
 
 **reject** (preferred default) -- block with exit 2 and a stderr message.
 The message is sent to the agent, which can then choose a different
@@ -112,6 +112,25 @@ doesn't see the original command run; the hook produces JSON on stdout that
 Claude Code applies before execution. Only use when the match uniquely
 identifies a single operation AND the replacement is always correct (e.g.,
 `pytest` is always test-running, so rewriting to `just test` is safe).
+
+**allow** -- a gate, not an approval. The rule's `[rule.match]` block is the
+allowlist: a call the gate matches falls through to the next rule; a call it
+does not match is rejected with the rule's `message`. Use it to fence a tool
+to a set of paths.
+
+```toml
+[[rule]]
+id = "worktree-only-writes"
+action = "allow"
+tool_any = ["Write", "Edit"]
+message = "Writes to the primary checkout are off-limits. Work in a worktree."
+[rule.match]
+path_any = [".claude/worktrees/**"]
+```
+
+A gate never approves and stops -- it can only reject or fall through, so
+stacking gates can only narrow what passes. Two gates on the same tool
+intersect: a path must satisfy both, not either.
 
 **When in doubt, use reject.** Multi-purpose tools like `npm`, `bun`,
 `yarn`, `cargo`, `zig`, `go`, `python`, and `make` have many subcommands.
@@ -153,6 +172,7 @@ tree-sitter-bash, so `pytest` matches `pytest tests/ -v` but not `not-pytest`.
 | `arg` / `arg_any` / `arg_all` / `arg_regex` | positional args | block `git push --force origin main` via arg match |
 | `raw_regex` | whole input before parsing | catch weird quoting the parser mangles |
 | `content_regex` / `content_contains` | regex/substring on tool content (e.g. plan body) | block ExitPlanMode plans containing "actually" |
+| `path` / `path_any` / `path_regex` | target path (tools that carry one) | reject writes to `.env` via `path_any = ["**/*.env"]` |
 | `ast.has_node` / `min_depth` / `min_count` | AST shape | block command chains deeper than N |
 
 `command_all` is special: it checks every command in a compound pipeline.
@@ -164,6 +184,24 @@ ExitPlanMode the content is the plan file body (resolved from the
 transcript). Both matchers AND together when set on the same rule. Regex
 is POSIX extended (no `\b`, no `(?i)`); use character classes like
 `[Aa]` for case-insensitive matching.
+
+### Path pattern syntax
+
+`path` / `path_any` / `path_regex` match the target path of tools that carry
+one: `Write`, `Edit`, `NotebookEdit`, `Read`, `Grep`, `Glob`. Patterns are
+gitignore-shaped globs, anchored at the directory containing `.veer/`.
+
+| Pattern | Matches |
+|---|---|
+| `.env` | any file named `.env`, at any depth |
+| `src/**` | everything under the project's `src/` |
+| `node_modules/` | shorthand for `node_modules/**` |
+| `./.env` | the project root's `.env` only, not `apps/web/.env` |
+| `/etc/**` | the real `/etc`, not a project-relative path |
+
+`**` spans zero or more path segments; `*` and `?` stay inside one segment;
+`{a,b}` brace expansion works within a segment. Matching is case-sensitive.
+See "Common pitfalls" below for the two patterns that silently match nothing.
 
 ## Justfile / package.json / Makefile redirects
 
@@ -199,9 +237,26 @@ correcting the agent about.
 ## Matching non-Bash tools
 
 veer can match any Claude Code tool, not just Bash. Set `tool` on the rule
-(default is `"Bash"`). The most common non-Bash use case is **ExitPlanMode**
--- a content rule there enforces standards on the plan body before the user
-sees it.
+(default is `"Bash"`), or `tool_any` to cover several tools with one rule.
+Non-Bash rules read one of two fields depending on what the tool carries:
+`content_regex` / `content_contains` against **ExitPlanMode**'s plan body, or
+`path` / `path_any` / `path_regex` against the target path of `Write`,
+`Edit`, `NotebookEdit`, `Read`, `Grep`, and `Glob`.
+
+### Gating writes to a path
+
+`tool_any` lets one rule cover `Write`, `Edit`, and `NotebookEdit` together,
+since all three carry a `file_path`:
+
+```toml
+[[rule]]
+id = "no-env-writes"
+tool_any = ["Write", "Edit", "NotebookEdit"]
+action = "reject"
+message = "Don't write to .env files directly. Ask the user to edit them."
+[rule.match]
+path_any = ["**/*.env"]
+```
 
 ### Banning "actually" in plans
 
@@ -352,6 +407,14 @@ then run `veer test` on a representative input to demonstrate.
   .veer/config.toml found", the message prints the absolute cwd that was
   searched plus `$CLAUDE_PROJECT_DIR` if set -- check both, and put a
   config at one of them or at any ancestor.
+- **A no-slash path pattern matches a file's name, not a directory.**
+  `node_modules` matches nothing, because no file is *named* `node_modules`.
+  Write `node_modules/` or `node_modules/**` instead. This fails silently --
+  the rule loads clean and simply never fires.
+- **A leading `/` in a path pattern is the filesystem root, unlike
+  gitignore.** `/build/**` is the real `/build`; the project's is
+  `build/**` or `./build/**`. This also fails silently: the pattern is
+  valid, it just anchors somewhere the agent didn't intend.
 
 ## Troubleshooting
 
