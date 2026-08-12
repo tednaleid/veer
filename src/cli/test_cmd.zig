@@ -34,11 +34,41 @@ pub fn run(
 ) !u8 {
     if (sources) |s| std.debug.assert(s.len == rules.len);
 
+    const is_bash = std.mem.eql(u8, opts.tool, "Bash");
+
+    // --file means "a file of Bash commands, one per line"; it is exclusive
+    // with the non-Bash options below.
+    if (opts.file_path != null) {
+        if (!is_bash) {
+            try writer.print("veer test: --file cannot be combined with --tool\n", .{});
+            return 1;
+        }
+        if (opts.path != null) {
+            try writer.print("veer test: --file cannot be combined with --path\n", .{});
+            return 1;
+        }
+        if (opts.content_file != null) {
+            try writer.print("veer test: --file cannot be combined with --content-file\n", .{});
+            return 1;
+        }
+    }
+
+    // The positional command and --path/--content-file are different modes:
+    // a Bash command string vs. a target for a path- or content-carrying tool.
+    if (opts.command != null and (opts.path != null or opts.content_file != null)) {
+        try writer.print("veer test: command argument cannot be combined with --path or --content-file\n", .{});
+        return 1;
+    }
+
+    // A non-Bash tool has nothing to evaluate without a target.
+    if (!is_bash and opts.path == null and opts.content_file == null) {
+        try writer.print("veer test: --tool {s} requires --path or --content-file\n", .{opts.tool});
+        return 1;
+    }
+
     if (opts.file_path) |path| {
         return runFile(allocator, rules, sources, path, writer);
     }
-
-    const is_bash = std.mem.eql(u8, opts.tool, "Bash");
 
     if (is_bash and opts.path == null and opts.content_file == null) {
         const command = opts.command orelse {
@@ -314,6 +344,48 @@ test "run with --tool and --path evaluates a non-Bash rule" {
     const out = stream.getWritten();
     try std.testing.expect(std.mem.startsWith(u8, out, "ALLOW\t"));
     try std.testing.expect(std.mem.indexOf(u8, out, "src/App.vue") != null);
+}
+
+test "run rejects --file combined with --tool" {
+    var buf: [512]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    const exit_code = try run(std.testing.allocator, &.{}, null, .{
+        .file_path = "cmds.txt",
+        .tool = "Write",
+    }, stream.writer());
+
+    try std.testing.expectEqual(@as(u8, 1), exit_code);
+    const out = stream.getWritten();
+    try std.testing.expect(std.mem.indexOf(u8, out, "--file") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "--tool") != null);
+}
+
+test "run rejects positional command combined with --path" {
+    var buf: [512]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    const exit_code = try run(std.testing.allocator, &.{}, null, .{
+        .command = "pytest tests/",
+        .path = "foo.py",
+    }, stream.writer());
+
+    try std.testing.expectEqual(@as(u8, 1), exit_code);
+    const out = stream.getWritten();
+    try std.testing.expect(std.mem.indexOf(u8, out, "command") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "--path") != null);
+}
+
+test "run rejects non-Bash --tool without --path or --content-file" {
+    var buf: [512]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    const exit_code = try run(std.testing.allocator, &.{}, null, .{
+        .tool = "Write",
+    }, stream.writer());
+
+    try std.testing.expectEqual(@as(u8, 1), exit_code);
+    const out = stream.getWritten();
+    try std.testing.expect(std.mem.indexOf(u8, out, "--tool") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "--path") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "--content-file") != null);
 }
 
 test "test appends source column when sources are provided" {
