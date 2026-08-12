@@ -650,9 +650,12 @@ fn runScan(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
 
 fn runTest(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
     const params = comptime clap.parseParamsComptime(
-        \\-h, --help          Display this help and exit.
-        \\    --config <str>  Path to config file.
-        \\    --file <str>    File containing commands to test (one per line).
+        \\-h, --help                Display this help and exit.
+        \\    --config <str>        Path to config file.
+        \\    --file <str>          File containing commands to test (one per line).
+        \\    --tool <str>          Tool name to evaluate against (default: Bash).
+        \\    --path <str>          Target path, for tools that carry one.
+        \\    --content-file <str>  File whose body stands in for tool content.
         \\<str>
         \\
     );
@@ -668,6 +671,9 @@ fn runTest(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
     const opts = test_cmd.TestOptions{
         .command = res.positionals[0],
         .file_path = res.args.file,
+        .tool = res.args.tool orelse "Bash",
+        .path = res.args.path,
+        .content_file = res.args.@"content-file",
     };
     const config_path: ?[]const u8 = res.args.config;
 

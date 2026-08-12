@@ -10,7 +10,15 @@ const color = @import("../display/color.zig");
 
 pub const TestOptions = struct {
     command: ?[]const u8 = null,
+    /// File of commands to test, one per line. Bash only.
     file_path: ?[]const u8 = null,
+    /// Tool name to evaluate against. Defaults to Bash so every existing
+    /// invocation is unchanged.
+    tool: []const u8 = "Bash",
+    /// Target path, for rules on tools that carry one.
+    path: ?[]const u8 = null,
+    /// File whose body stands in for the tool's content, e.g. a plan body.
+    content_file: ?[]const u8 = null,
 };
 
 /// Run the test command. Tests command(s) against loaded rules.
@@ -30,14 +38,39 @@ pub fn run(
         return runFile(allocator, rules, sources, path, writer);
     }
 
-    const command = opts.command orelse {
-        try writer.print("veer test: command argument or --file required\n", .{});
-        try writer.print("Usage: veer test \"<command>\" [--config <path>]\n", .{});
-        try writer.print("       veer test --file <path> [--config <path>]\n", .{});
-        return 1;
-    };
+    const is_bash = std.mem.eql(u8, opts.tool, "Bash");
 
-    return checkOne(allocator, rules, sources, command, writer);
+    if (is_bash and opts.path == null and opts.content_file == null) {
+        const command = opts.command orelse {
+            try writer.print("veer test: command argument or --file required\n", .{});
+            try writer.print("Usage: veer test \"<command>\" [--config <path>]\n", .{});
+            try writer.print("       veer test --file <path> [--config <path>]\n", .{});
+            try writer.print("       veer test --tool <Tool> --path <path>\n", .{});
+            return 1;
+        };
+        return checkOne(allocator, rules, sources, command, writer);
+    }
+
+    const content: ?[]u8 = if (opts.content_file) |cf|
+        std.fs.cwd().readFileAlloc(allocator, cf, 4 * 1024 * 1024) catch {
+            try writer.print("veer test: cannot read {s}\n", .{cf});
+            return 1;
+        }
+    else
+        null;
+    defer if (content) |c| allocator.free(c);
+
+    const cwd_abs = std.fs.cwd().realpathAlloc(allocator, ".") catch null;
+    defer if (cwd_abs) |c| allocator.free(c);
+
+    return checkCall(allocator, rules, sources, .{
+        .tool_name = opts.tool,
+        .command = opts.command,
+        .content = content,
+        .file_path = opts.path,
+        .cwd = cwd_abs,
+        .root = cwd_abs,
+    }, opts.path orelse opts.content_file orelse opts.command orelse "", writer);
 }
 
 /// Check every non-empty, non-comment line in a file.
@@ -72,10 +105,21 @@ fn checkOne(
     command: []const u8,
     writer: anytype,
 ) !u8 {
-    const result = engine.check(allocator, rules, .{
+    return checkCall(allocator, rules, sources, .{
         .tool_name = "Bash",
         .command = command,
-    });
+    }, command, writer);
+}
+
+fn checkCall(
+    allocator: std.mem.Allocator,
+    rules: []const Rule,
+    sources: ?[]const config_mod.RuleSource,
+    call: engine.ToolCall,
+    label: []const u8,
+    writer: anytype,
+) !u8 {
+    const result = engine.check(allocator, rules, call);
 
     // TSV: result, return_code, input, id, output [, source]
     // The `source` column is appended only when `sources` is non-null
@@ -87,12 +131,12 @@ fn checkOne(
         switch (action) {
             .rewrite => {
                 const rewritten = if (result.rewrite_to) |target|
-                    spliceRewrite(allocator, command, target, result.match_start, result.match_end)
+                    spliceRewrite(allocator, call.command orelse label, target, result.match_start, result.match_end)
                 else
-                    SpliceResult{ .command = command, .allocated = false };
+                    SpliceResult{ .command = call.command orelse label, .allocated = false };
                 defer if (rewritten.allocated) allocator.free(rewritten.command);
                 try writer.print("REWRITE\t0\t{s}\t{s}\t{s}{s}\n", .{
-                    command,
+                    label,
                     result.rule_id orelse "",
                     rewritten.command,
                     src_suffix,
@@ -100,7 +144,7 @@ fn checkOne(
             },
             .reject => {
                 try writer.print("REJECT\t2\t{s}\t{s}\t{s}{s}\n", .{
-                    command,
+                    label,
                     result.rule_id orelse "",
                     result.message orelse "",
                     src_suffix,
@@ -108,7 +152,7 @@ fn checkOne(
             },
         }
     } else {
-        try writer.print("ALLOW\t0\t{s}\t\t{s}\n", .{ command, src_suffix });
+        try writer.print("ALLOW\t0\t{s}\t\t{s}\n", .{ label, src_suffix });
     }
 
     return 0;
@@ -248,6 +292,28 @@ test "test --file checks each line" {
     try std.testing.expect(std.mem.indexOf(u8, output, "REWRITE\t0\tpytest tests/\tuse-just-test\tjust test") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "REJECT\t2\tchmod 777 foo\tno-chmod\tnope") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "ALLOW\t0\tls -la\t\t") != null);
+}
+
+test "run with --tool and --path evaluates a non-Bash rule" {
+    const rules = [_]Rule{.{
+        .id = "no-plan-todos",
+        .tool = "ExitPlanMode",
+        .message = "Plans must not contain TODO.",
+        .match = .{ .content_contains = "TODO" },
+    }};
+
+    var buf: [1024]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+
+    // A Write call must not trip an ExitPlanMode rule.
+    _ = try run(std.testing.allocator, &rules, null, .{
+        .tool = "Write",
+        .path = "src/App.vue",
+    }, stream.writer());
+
+    const out = stream.getWritten();
+    try std.testing.expect(std.mem.startsWith(u8, out, "ALLOW\t"));
+    try std.testing.expect(std.mem.indexOf(u8, out, "src/App.vue") != null);
 }
 
 test "test appends source column when sources are provided" {
