@@ -39,11 +39,19 @@ pub fn run(
         const match_str = try formatMatch(arena_alloc, rule.match);
         const message = if (rule.message) |m| truncate(m, 40) else "";
         const action_str = @tagName(rule.effectiveAction());
+        const tool_str = if (rule.tool_any) |tools| blk: {
+            var parts: std.ArrayListUnmanaged(u8) = .empty;
+            for (tools, 0..) |t, ti| {
+                if (ti > 0) try parts.appendSlice(arena_alloc, ",");
+                try parts.appendSlice(arena_alloc, t);
+            }
+            break :blk try parts.toOwnedSlice(arena_alloc);
+        } else rule.tool;
         if (show_source) {
             const src_str = @tagName(sources.?[i]);
-            try table.addRow(allocator, &.{ rule.id, src_str, action_str, rule.tool, match_str, message });
+            try table.addRow(allocator, &.{ rule.id, src_str, action_str, tool_str, match_str, message });
         } else {
-            try table.addRow(allocator, &.{ rule.id, action_str, rule.tool, match_str, message });
+            try table.addRow(allocator, &.{ rule.id, action_str, tool_str, match_str, message });
         }
     }
 
@@ -200,6 +208,25 @@ test "list with rules renders table" {
     // Bash is the default tool; command_all renders as a pipeline summary.
     try std.testing.expect(std.mem.indexOf(u8, output, "Bash") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "curl | bash") != null);
+}
+
+test "list renders tool_any as a comma-joined list" {
+    const rules = [_]config_mod.Rule{
+        .{
+            .id = "no-gen-edits",
+            .tool_any = &.{ "Write", "Edit", "NotebookEdit" },
+            .message = "Generated.",
+            .match = .{ .path_any = &.{"**/*.gen.ts"} },
+        },
+    };
+
+    var buf: [2048]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    const exit_code = try run(std.testing.allocator, &rules, null, stream.writer());
+
+    try std.testing.expectEqual(@as(u8, 0), exit_code);
+    const output = stream.getWritten();
+    try std.testing.expect(std.mem.indexOf(u8, output, "Write,Edit,NotebookEdit") != null);
 }
 
 test "list with no rules" {

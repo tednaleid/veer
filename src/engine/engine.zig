@@ -71,7 +71,7 @@ pub fn check(
         if (!rule.enabled) continue;
 
         // Skip rules for different tools
-        if (!std.mem.eql(u8, rule.tool, call.tool_name)) continue;
+        if (!rule.matchesTool(call.tool_name)) continue;
 
         // A matcher that reads a field this call does not carry cannot be
         // evaluated. Skip the whole rule rather than failing the individual
@@ -466,6 +466,44 @@ test "two gates on the same tool intersect" {
     });
     try std.testing.expectEqual(Action.reject, one.action.?);
     try std.testing.expectEqualStrings("vue-only", one.rule_id.?);
+}
+
+test "tool_any matches any listed tool" {
+    const rules = [_]Rule{.{
+        .id = "no-gen-edits",
+        .tool_any = &.{ "Write", "Edit", "NotebookEdit" },
+        .message = "Generated.",
+        .match = .{ .path_any = &.{"**/*.gen.ts"} },
+    }};
+
+    inline for (.{ "Write", "Edit", "NotebookEdit" }) |tool| {
+        const r = check(std.testing.allocator, &rules, .{
+            .tool_name = tool,
+            .file_path = "/p/src/api.gen.ts",
+            .root = "/p",
+        });
+        try std.testing.expectEqual(Action.reject, r.action.?);
+    }
+
+    const bash = check(std.testing.allocator, &rules, .{
+        .tool_name = "Bash",
+        .command = "ls",
+    });
+    try std.testing.expect(bash.action == null);
+}
+
+test "a rule with only a tool filter fires on that tool" {
+    const rules = [_]Rule{.{
+        .id = "no-notebooks",
+        .tool_any = &.{"NotebookEdit"},
+        .message = "Notebooks are off-limits here.",
+    }};
+
+    const hit = check(std.testing.allocator, &rules, .{ .tool_name = "NotebookEdit" });
+    try std.testing.expectEqual(Action.reject, hit.action.?);
+
+    const miss = check(std.testing.allocator, &rules, .{ .tool_name = "Write" });
+    try std.testing.expect(miss.action == null);
 }
 
 test "stay-in-repo gate rejects a write outside the root" {

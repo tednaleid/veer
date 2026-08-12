@@ -101,6 +101,10 @@ pub const Rule = struct {
     action: ?Action = null,
     enabled: bool = true,
     tool: []const u8 = "Bash",
+
+    /// Tools this rule applies to. Exact names, no globbing. Mutually
+    /// exclusive with `tool`.
+    tool_any: ?[]const []const u8 = null,
     message: ?[]const u8 = null,
     rewrite_to: ?[]const u8 = null,
     tags: ?[]const []const u8 = null,
@@ -117,6 +121,18 @@ pub const Rule = struct {
     pub fn displayName(self: Rule) []const u8 {
         return self.name orelse self.id;
     }
+
+    /// True when this rule applies to `tool_name`. Uses `tool_any` when set,
+    /// otherwise the single `tool` field.
+    pub fn matchesTool(self: Rule, tool_name: []const u8) bool {
+        if (self.tool_any) |tools| {
+            for (tools) |t| {
+                if (std.mem.eql(u8, t, tool_name)) return true;
+            }
+            return false;
+        }
+        return std.mem.eql(u8, self.tool, tool_name);
+    }
 };
 
 pub const ValidationError = error{
@@ -127,6 +143,7 @@ pub const ValidationError = error{
     EmptyMatch,
     MatcherToolMismatch,
     AllowRequiresPathOrContent,
+    ToolAndToolAny,
 };
 
 /// Validate a slice of rules. Returns the first validation error found.
@@ -143,6 +160,13 @@ pub fn validate(rules: []const Rule) ValidationError!void {
             }
         }
 
+        // `tool` is non-optional with a default of "Bash", so TOML gives no
+        // way to distinguish "absent" from "explicitly set to Bash". The
+        // check compares against the default rather than testing presence.
+        if (rule.tool_any != null and !std.mem.eql(u8, rule.tool, "Bash")) {
+            return ValidationError.ToolAndToolAny;
+        }
+
         // Validate action (explicit or inferred)
         const action = rule.effectiveAction();
         if (action == .rewrite and rule.rewrite_to == null) {
@@ -153,8 +177,19 @@ pub fn validate(rules: []const Rule) ValidationError!void {
             return ValidationError.RejectRequiresMessage;
         }
 
-        if (toolFields(rule.tool)) |carried| {
-            const used = fieldsUsed(rule.match);
+        const used = fieldsUsed(rule.match);
+        if (rule.tool_any) |tools| {
+            for (tools) |t| {
+                if (toolFields(t)) |carried| {
+                    if ((used.command and !carried.command) or
+                        (used.content and !carried.content) or
+                        (used.path and !carried.path))
+                    {
+                        return ValidationError.MatcherToolMismatch;
+                    }
+                }
+            }
+        } else if (toolFields(rule.tool)) |carried| {
             if ((used.command and !carried.command) or
                 (used.content and !carried.content) or
                 (used.path and !carried.path))
@@ -164,11 +199,10 @@ pub fn validate(rules: []const Rule) ValidationError!void {
         }
 
         if (action == .allow) {
-            const used = fieldsUsed(rule.match);
             if (used.command) return ValidationError.AllowRequiresPathOrContent;
         }
 
-        if (!hasAnyMatch(rule.match)) {
+        if (!hasAnyMatch(rule.match) and rule.tool_any == null) {
             return ValidationError.EmptyMatch;
         }
     }
@@ -455,6 +489,26 @@ test "allow rejects a command matcher" {
         .match = .{ .command_any = &.{ "just", "git" } },
     }};
     try std.testing.expectError(ValidationError.AllowRequiresPathOrContent, validate(&rules));
+}
+
+test "tool and tool_any together fail validation" {
+    const rules = [_]Rule{.{
+        .id = "both",
+        .tool = "Write",
+        .tool_any = &.{"Edit"},
+        .message = "M",
+        .match = .{ .path_any = &.{"src/**"} },
+    }};
+    try std.testing.expectError(ValidationError.ToolAndToolAny, validate(&rules));
+}
+
+test "tool_any with no matchers is a valid tool-name-only rule" {
+    const rules = [_]Rule{.{
+        .id = "no-notebooks",
+        .tool_any = &.{"NotebookEdit"},
+        .message = "M",
+    }};
+    try validate(&rules);
 }
 
 test "allow accepts a content matcher" {

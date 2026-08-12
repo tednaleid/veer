@@ -81,6 +81,13 @@ pub fn run(allocator: std.mem.Allocator, opts: ValidateOptions, writer: anytype)
             }
         }
 
+        if (rule.tool_any != null and !std.mem.eql(u8, rule.tool, "Bash")) {
+            if (issues_len < issues_buf.len) {
+                issues_buf[issues_len] = "tool and tool_any are mutually exclusive";
+                issues_len += 1;
+            }
+        }
+
         const action = rule.effectiveAction();
         if (action == .rewrite and rule.rewrite_to == null) {
             if (issues_len < issues_buf.len) {
@@ -94,24 +101,37 @@ pub fn run(allocator: std.mem.Allocator, opts: ValidateOptions, writer: anytype)
                 issues_len += 1;
             }
         }
-        if (rule_mod.toolFields(rule.tool)) |carried| {
-            const used = rule_mod.fieldsUsed(rule.match);
-            const bad: ?[]const u8 =
-                if (used.command and !carried.command) "command matchers" else if (used.content and !carried.content) "content matchers" else if (used.path and !carried.path) "path matchers" else null;
-            if (bad) |what| {
-                if (issues_len < issues_buf.len) {
-                    issues_buf[issues_len] = what;
-                    issues_len += 1;
+        const used = rule_mod.fieldsUsed(rule.match);
+        const bad: ?[]const u8 = blk: {
+            if (rule.tool_any) |tools| {
+                for (tools) |t| {
+                    if (rule_mod.toolFields(t)) |carried| {
+                        if (used.command and !carried.command) break :blk "command matchers";
+                        if (used.content and !carried.content) break :blk "content matchers";
+                        if (used.path and !carried.path) break :blk "path matchers";
+                    }
                 }
+                break :blk null;
+            }
+            const carried = rule_mod.toolFields(rule.tool) orelse break :blk null;
+            if (used.command and !carried.command) break :blk "command matchers";
+            if (used.content and !carried.content) break :blk "content matchers";
+            if (used.path and !carried.path) break :blk "path matchers";
+            break :blk null;
+        };
+        if (bad) |what| {
+            if (issues_len < issues_buf.len) {
+                issues_buf[issues_len] = what;
+                issues_len += 1;
             }
         }
-        if (action == .allow and rule_mod.fieldsUsed(rule.match).command) {
+        if (action == .allow and used.command) {
             if (issues_len < issues_buf.len) {
                 issues_buf[issues_len] = "allow does not accept command matchers";
                 issues_len += 1;
             }
         }
-        if (!rule_mod.hasAnyMatchPub(rule.match)) {
+        if (!rule_mod.hasAnyMatchPub(rule.match) and rule.tool_any == null) {
             if (issues_len < issues_buf.len) {
                 issues_buf[issues_len] = "empty match";
                 issues_len += 1;
@@ -140,20 +160,34 @@ fn validateAll(rules: []const rule_mod.Rule) usize {
             }
         }
 
+        if (rule.tool_any != null and !std.mem.eql(u8, rule.tool, "Bash")) count += 1;
+
         const action = rule.effectiveAction();
         if (action == .rewrite and rule.rewrite_to == null) count += 1;
         if ((action == .reject or action == .allow) and rule.message == null) count += 1;
-        if (rule_mod.toolFields(rule.tool)) |carried| {
-            const used = rule_mod.fieldsUsed(rule.match);
-            if ((used.command and !carried.command) or
-                (used.content and !carried.content) or
-                (used.path and !carried.path))
-            {
-                count += 1;
+        const used = rule_mod.fieldsUsed(rule.match);
+        const mismatch = blk: {
+            if (rule.tool_any) |tools| {
+                for (tools) |t| {
+                    if (rule_mod.toolFields(t)) |carried| {
+                        if ((used.command and !carried.command) or
+                            (used.content and !carried.content) or
+                            (used.path and !carried.path))
+                        {
+                            break :blk true;
+                        }
+                    }
+                }
+                break :blk false;
             }
-        }
-        if (action == .allow and rule_mod.fieldsUsed(rule.match).command) count += 1;
-        if (!rule_mod.hasAnyMatchPub(rule.match)) count += 1;
+            const carried = rule_mod.toolFields(rule.tool) orelse break :blk false;
+            break :blk (used.command and !carried.command) or
+                (used.content and !carried.content) or
+                (used.path and !carried.path);
+        };
+        if (mismatch) count += 1;
+        if (action == .allow and used.command) count += 1;
+        if (!rule_mod.hasAnyMatchPub(rule.match) and rule.tool_any == null) count += 1;
     }
     return count;
 }
@@ -267,4 +301,34 @@ test "validate reports a rule whose only issue is a matcher/tool mismatch" {
     const out = stream.getWritten();
     try std.testing.expectEqual(@as(u8, 1), code);
     try std.testing.expect(std.mem.indexOf(u8, out, "probe") != null);
+}
+
+test "validate accepts a tool_any rule whose matcher fits every listed tool" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(dir);
+
+    const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/c.toml", .{dir});
+    defer std.testing.allocator.free(path);
+    {
+        const f = try std.fs.cwd().createFile(path, .{});
+        defer f.close();
+        try f.writeAll(
+            \\[[rule]]
+            \\id = "no-gen-edits"
+            \\tool_any = ["Write", "Edit"]
+            \\message = "Generated."
+            \\[rule.match]
+            \\path_any = ["**/*.gen.ts"]
+        );
+    }
+
+    var buf: [1024]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    const code = try run(std.testing.allocator, .{ .config_path = path }, stream.writer());
+
+    const out = stream.getWritten();
+    try std.testing.expectEqual(@as(u8, 0), code);
+    try std.testing.expect(std.mem.indexOf(u8, out, "OK") != null);
 }
