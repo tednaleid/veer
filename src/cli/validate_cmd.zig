@@ -76,6 +76,17 @@ pub fn run(allocator: std.mem.Allocator, opts: ValidateOptions, writer: anytype)
                 issues_len += 1;
             }
         }
+        if (rule_mod.toolFields(rule.tool)) |carried| {
+            const used = rule_mod.fieldsUsed(rule.match);
+            const bad: ?[]const u8 =
+                if (used.command and !carried.command) "command matchers" else if (used.content and !carried.content) "content matchers" else if (used.path and !carried.path) "path matchers" else null;
+            if (bad) |what| {
+                if (issues_len < issues_buf.len) {
+                    issues_buf[issues_len] = what;
+                    issues_len += 1;
+                }
+            }
+        }
         if (!rule_mod.hasAnyMatchPub(rule.match)) {
             if (issues_len < issues_buf.len) {
                 issues_buf[issues_len] = "empty match";

@@ -67,6 +67,23 @@ pub fn fieldsUsed(m: MatchConfig) FieldSet {
     };
 }
 
+/// Fields a known tool's input carries. Returns null for tools veer does not
+/// recognize, including MCP tools, which exempts them from compatibility
+/// validation rather than rejecting them. veer does not bake Claude Code's
+/// tool roster into its schema.
+pub fn toolFields(tool: []const u8) ?FieldSet {
+    if (std.mem.eql(u8, tool, "Bash")) return .{ .command = true };
+    if (std.mem.eql(u8, tool, "ExitPlanMode")) return .{ .content = true };
+
+    const path_tools = [_][]const u8{
+        "Write", "Edit", "NotebookEdit", "Read", "Grep", "Glob",
+    };
+    for (path_tools) |t| {
+        if (std.mem.eql(u8, tool, t)) return .{ .path = true };
+    }
+    return null;
+}
+
 pub const Rule = struct {
     id: []const u8,
     name: ?[]const u8 = null,
@@ -97,6 +114,7 @@ pub const ValidationError = error{
     RewriteRequiresTarget,
     RejectRequiresMessage,
     EmptyMatch,
+    MatcherToolMismatch,
 };
 
 /// Validate a slice of rules. Returns the first validation error found.
@@ -121,6 +139,16 @@ pub fn validate(rules: []const Rule) ValidationError!void {
 
         if (action == .reject and rule.message == null) {
             return ValidationError.RejectRequiresMessage;
+        }
+
+        if (toolFields(rule.tool)) |carried| {
+            const used = fieldsUsed(rule.match);
+            if ((used.command and !carried.command) or
+                (used.content and !carried.content) or
+                (used.path and !carried.path))
+            {
+                return ValidationError.MatcherToolMismatch;
+            }
         }
 
         if (!hasAnyMatch(rule.match)) {
@@ -331,6 +359,36 @@ test "content_regex alone is a valid match" {
         .tool = "ExitPlanMode",
         .message = "Plans should not contain TODO placeholders.",
         .match = .{ .content_regex = "TODO|FIXME" },
+    }};
+    try validate(&rules);
+}
+
+test "raw_regex on a Write rule fails validation" {
+    const rules = [_]Rule{.{
+        .id = "probe",
+        .tool = "Write",
+        .message = "M",
+        .match = .{ .raw_regex = "x" },
+    }};
+    try std.testing.expectError(ValidationError.MatcherToolMismatch, validate(&rules));
+}
+
+test "content matcher on a Bash rule fails validation" {
+    const rules = [_]Rule{.{
+        .id = "probe",
+        .tool = "Bash",
+        .message = "M",
+        .match = .{ .content_contains = "actually" },
+    }};
+    try std.testing.expectError(ValidationError.MatcherToolMismatch, validate(&rules));
+}
+
+test "unknown tool names are exempt from compatibility validation" {
+    const rules = [_]Rule{.{
+        .id = "mcp-rule",
+        .tool = "mcp__filesystem__write_file",
+        .message = "M",
+        .match = .{ .raw_regex = "x" },
     }};
     try validate(&rules);
 }

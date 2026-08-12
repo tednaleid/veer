@@ -185,13 +185,16 @@ test "first matching rule wins (definition order)" {
 
 test "non-Bash tool rule doesn't match Bash" {
     const rules = [_]Rule{.{
-        .id = "no-write",
+        .id = "no-plan-todos",
         .message = "blocked",
-        .tool = "Write",
-        .match = .{ .command = "Write" },
+        .tool = "ExitPlanMode",
+        .match = .{ .content_contains = "TODO" },
     }};
 
-    const result = check(std.testing.allocator, &rules, .{ .tool_name = "Bash", .command = "ls" });
+    const result = check(std.testing.allocator, &rules, .{
+        .tool_name = "Bash",
+        .command = "ls",
+    });
     try std.testing.expect(result.action == null);
 }
 
