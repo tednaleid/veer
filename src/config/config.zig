@@ -564,6 +564,70 @@ test "syntax error reports a line number" {
     try std.testing.expect(d.position.line >= 1);
 }
 
+test "parseFileOnly reports the field path for a schema error" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(dir);
+
+    const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/c.toml", .{dir});
+    defer std.testing.allocator.free(path);
+    {
+        const f = try std.fs.cwd().createFile(path, .{});
+        defer f.close();
+        try f.writeAll(
+            \\[[rule]]
+            \\id = "x"
+            \\action = "nonsense"
+            \\message = "m"
+            \\[rule.match]
+            \\command = "foo"
+        );
+    }
+
+    var detail: ?ParseDetail = null;
+    defer if (detail) |*d| d.deinit(std.testing.allocator);
+
+    const result = parseFileOnly(std.testing.allocator, path, &detail);
+    try std.testing.expectError(error.ParseFailed, result);
+
+    const d = detail orelse return error.TestExpectedDetail;
+    try std.testing.expect(d == .field_path);
+    var joined_seen = false;
+    for (d.field_path) |seg| {
+        if (std.mem.eql(u8, seg, "action")) joined_seen = true;
+    }
+    try std.testing.expect(joined_seen);
+}
+
+test "parseFileOnly reports a line number for a syntax error" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(dir);
+
+    const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/c.toml", .{dir});
+    defer std.testing.allocator.free(path);
+    {
+        const f = try std.fs.cwd().createFile(path, .{});
+        defer f.close();
+        try f.writeAll(
+            \\[[rule]
+            \\id = "x"
+        );
+    }
+
+    var detail: ?ParseDetail = null;
+    defer if (detail) |*d| d.deinit(std.testing.allocator);
+
+    const result = parseFileOnly(std.testing.allocator, path, &detail);
+    try std.testing.expectError(error.ParseFailed, result);
+
+    const d = detail orelse return error.TestExpectedDetail;
+    try std.testing.expect(d == .position);
+    try std.testing.expect(d.position.line >= 1);
+}
+
 test "loadFile returns FileNotFound for missing file" {
     try std.testing.expectError(error.FileNotFound, loadFile(std.testing.allocator, "/nonexistent/path/config.toml"));
 }
