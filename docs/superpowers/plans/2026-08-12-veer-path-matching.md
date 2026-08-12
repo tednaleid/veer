@@ -763,6 +763,15 @@ EOF
 
 **Interfaces:**
 - Produces: `config_mod.ParseDetail` union and `config_mod.loadStringDetailed(allocator, input, detail_out) !toml.Parsed(Config)` / `config_mod.loadFileDetailed(allocator, path, detail_out)`. `loadString` and `loadFile` stay as wrappers so no other caller changes.
+- Produces: `config_mod.parseFileOnly(allocator, path, detail_out) !toml.Parsed(Config)`, which parses without calling `validate()`. This is what makes `validate_cmd`'s per-rule reporting reachable.
+
+**Pre-existing bug this task also fixes.** `validate_cmd.run()`'s entire per-rule detail branch is unreachable and has been since it was written. `loadFile` calls `rule_mod.validate()` internally and returns the `ValidationError`, which `validate_cmd.zig:14` catches in its generic `else` arm and prints as a bare Zig error name. The per-rule loop below only runs when loading succeeds, at which point `validateAll` finds nothing, because it counts exactly the five conditions `validate()` already gated on. So `veer validate` against a config with an invalid rule prints:
+
+```
+/tmp/badrule.toml: error.MatcherToolMismatch
+```
+
+with no rule id, no field, no line, and only the first error, instead of the multi-issue report the command exists to produce. Verified against the built binary at 0.1.11 behavior. Fixing it here rather than in its own task because this task already rewrites both `config.zig`'s load path and `validate_cmd`'s error handling.
 
 - [ ] **Step 1: Write the failing test in `src/config/config.zig`**
 
@@ -976,6 +985,94 @@ In `loadConfigForCheck`, replace the explicit-path branch's `else |_|` arm with 
     }
 ```
 
+- [ ] **Step 5b: Make the per-rule reporting reachable**
+
+Add a parse-only entry point to `src/config/config.zig`, alongside `loadStringDetailed`:
+
+```zig
+/// Parse a config file without running rule validation. `validate_cmd` uses
+/// this so it can report every rule's issues, rather than stopping at the
+/// first error `validate` returns.
+pub fn parseFileOnly(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    detail_out: *?ParseDetail,
+) !toml.Parsed(Config) {
+    const file = std.fs.cwd().openFile(path, .{}) catch {
+        return error.FileNotFound;
+    };
+    defer file.close();
+
+    const content = file.readToEndAlloc(allocator, 1024 * 1024) catch {
+        return error.ReadFailed;
+    };
+    defer allocator.free(content);
+
+    var parser = toml.Parser(Config).init(allocator);
+    defer parser.deinit();
+
+    return parser.parseString(content) catch {
+        if (parser.error_info) |info| {
+            detail_out.* = switch (info) {
+                .parse => |pos| .{ .position = .{ .line = pos.line, .column = pos.pos } },
+                .struct_mapping => |fp| .{ .field_path = allocator.dupe([]const u8, fp) catch null },
+            };
+        }
+        return error.ParseFailed;
+    };
+}
+```
+
+Note `catch null` on the dupe: on allocation failure the detail is simply absent, and the caller falls back to its generic message. `ParseDetail.deinit` must tolerate a null `field_path`, so make the union's `field_path` payload optional or guard the free.
+
+In `src/cli/validate_cmd.zig`, change the loader call from `loadFileDetailed` to `parseFileOnly`. The `FileNotFound` and `ParseFailed` arms are unchanged. Deleting the now-unneeded `else` arm is not required, but the `ValidationError` variants can no longer reach it, because `parseFileOnly` never calls `validate`.
+
+- [ ] **Step 5c: Write the test proving every issue is reported**
+
+In `src/cli/validate_cmd.zig`'s test block:
+
+```zig
+test "validate reports every invalid rule, not just the first" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(dir);
+
+    const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/c.toml", .{dir});
+    defer std.testing.allocator.free(path);
+    {
+        const f = try std.fs.cwd().createFile(path, .{});
+        defer f.close();
+        try f.writeAll(
+            \\[[rule]]
+            \\id = "first-bad"
+            \\tool = "Write"
+            \\message = "m"
+            \\[rule.match]
+            \\raw_regex = "x"
+            \\
+            \\[[rule]]
+            \\id = "second-bad"
+            \\tool = "Bash"
+            \\[rule.match]
+            \\command = "foo"
+        );
+    }
+
+    var buf: [4096]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    const code = try run(std.testing.allocator, .{ .config_path = path }, stream.writer());
+
+    const out = stream.getWritten();
+    try std.testing.expectEqual(@as(u8, 1), code);
+    // Both rules must appear, not just the first.
+    try std.testing.expect(std.mem.indexOf(u8, out, "first-bad") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "second-bad") != null);
+}
+```
+
+The second rule is invalid for a different reason (a reject with no message), so the test proves the loop reports distinct issues across rules rather than repeating one.
+
 - [ ] **Step 6: Run the tests**
 
 Run: `just check`
@@ -987,8 +1084,11 @@ Expected: PASS.
 just build
 printf '[[rule]]\nid = "x"\naction = "nonsense"\nmessage = "m"\n[rule.match]\ncommand = "foo"\n' > /tmp/bad.toml
 ./zig-out/bin/veer validate --config /tmp/bad.toml
+
+printf '[[rule]]\nid = "probe"\ntool = "Write"\nmessage = "M"\n[rule.match]\nraw_regex = "x"\n' > /tmp/badrule.toml
+./zig-out/bin/veer validate --config /tmp/badrule.toml
 ```
-Expected: a line naming `action`, not `TOML parse error`.
+Expected: the first names `action`, not `TOML parse error`. The second names the rule id `probe` and its matcher family, not `error.MatcherToolMismatch`.
 
 - [ ] **Step 8: Commit**
 
