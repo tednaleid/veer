@@ -44,7 +44,7 @@ pub fn main() !void {
     // Warm up
     for (0..100) |_| {
         for (commands) |cmd| {
-            _ = engine.check(allocator, &rules, "Bash", cmd, null);
+            _ = engine.check(allocator, &rules, .{ .tool_name = "Bash", .command = cmd });
         }
     }
 
@@ -53,7 +53,7 @@ pub fn main() !void {
 
     for (0..iterations) |_| {
         for (commands) |cmd| {
-            _ = engine.check(allocator, &rules, "Bash", cmd, null);
+            _ = engine.check(allocator, &rules, .{ .tool_name = "Bash", .command = cmd });
         }
     }
 

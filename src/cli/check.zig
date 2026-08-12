@@ -29,7 +29,11 @@ pub fn run(
     };
     defer hook.freeInput(allocator, &input);
 
-    const result = engine.check(allocator, rules, input.tool_name, input.command, input.content);
+    const result = engine.check(allocator, rules, .{
+        .tool_name = input.tool_name,
+        .command = input.command,
+        .content = input.content,
+    });
 
     // Output based on action
     if (result.action) |action| {

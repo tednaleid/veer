@@ -72,7 +72,10 @@ fn checkOne(
     command: []const u8,
     writer: anytype,
 ) !u8 {
-    const result = engine.check(allocator, rules, "Bash", command, null);
+    const result = engine.check(allocator, rules, .{
+        .tool_name = "Bash",
+        .command = command,
+    });
 
     // TSV: result, return_code, input, id, output [, source]
     // The `source` column is appended only when `sources` is non-null
