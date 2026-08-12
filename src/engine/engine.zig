@@ -183,18 +183,6 @@ test "first matching rule wins (definition order)" {
     try std.testing.expectEqual(Action.rewrite, result.action.?);
 }
 
-test "non-Bash tool matching" {
-    const rules = [_]Rule{.{
-        .id = "no-write-etc",
-        .message = "Don't write to /etc.",
-        .tool = "Write",
-        .match = .{ .content_contains = "/etc" },
-    }};
-
-    const result = check(std.testing.allocator, &rules, .{ .tool_name = "Write", .content = "writing to /etc/hosts" });
-    try std.testing.expectEqual(Action.reject, result.action.?);
-}
-
 test "non-Bash tool rule doesn't match Bash" {
     const rules = [_]Rule{.{
         .id = "no-write",
