@@ -46,6 +46,27 @@ pub const MatchConfig = struct {
     ast: ?AstMatch = null,
 };
 
+/// Which ToolCall fields a rule's matchers read. A matcher whose field is
+/// null on the call makes the whole rule inapplicable.
+pub const FieldSet = struct {
+    command: bool = false,
+    content: bool = false,
+    path: bool = false,
+};
+
+/// Partition a match config by the ToolCall field each matcher family reads.
+pub fn fieldsUsed(m: MatchConfig) FieldSet {
+    return .{
+        .command = m.command != null or m.command_any != null or
+            m.command_all != null or m.command_regex != null or
+            m.flag != null or m.flag_any != null or m.flag_all != null or
+            m.arg != null or m.arg_any != null or m.arg_all != null or
+            m.arg_regex != null or m.raw_regex != null or m.ast != null,
+        .content = m.content_regex != null or m.content_contains != null,
+        .path = false,
+    };
+}
+
 pub const Rule = struct {
     id: []const u8,
     name: ?[]const u8 = null,

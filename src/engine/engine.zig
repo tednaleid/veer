@@ -5,6 +5,7 @@ const std = @import("std");
 const Rule = @import("../config/rule.zig").Rule;
 const Action = @import("../config/rule.zig").Action;
 const MatchConfig = @import("../config/rule.zig").MatchConfig;
+const rule_mod = @import("../config/rule.zig");
 const matcher = @import("matcher.zig");
 const shell = @import("shell.zig");
 const CommandInfo = @import("command_info.zig").CommandInfo;
@@ -64,42 +65,39 @@ pub fn check(
         // Skip rules for different tools
         if (!std.mem.eql(u8, rule.tool, call.tool_name)) continue;
 
-        // For Bash tools: match against parsed CommandInfo
-        if (std.mem.eql(u8, call.tool_name, "Bash")) {
-            if (info) |parsed_info| {
-                if (matcher.matchRule(rule, parsed_info)) |match_idx| {
-                    // Get byte range for surgical rewrite (if per-command match)
-                    var match_start: ?u32 = null;
-                    var match_end: ?u32 = null;
-                    if (match_idx != matcher.CROSS_COMMAND_MATCH and
-                        match_idx < parsed_info.commands.items.len)
-                    {
-                        const matched_cmd = parsed_info.commands.items[match_idx];
-                        match_start = matched_cmd.start_byte;
-                        match_end = matched_cmd.end_byte;
-                    }
-                    return .{
-                        .action = rule.effectiveAction(),
-                        .rule_id = rule.id,
-                        .message = rule.message,
-                        .rewrite_to = rule.rewrite_to,
-                        .match_start = match_start,
-                        .match_end = match_end,
-                    };
-                }
+        // A matcher that reads a field this call does not carry cannot be
+        // evaluated. Skip the whole rule rather than failing the individual
+        // matcher: an unsatisfiable matcher would make a future gate reject
+        // on missing data, and veer fails open.
+        const fields = rule_mod.fieldsUsed(rule.match);
+        if (fields.command and call.command == null) continue;
+        if (fields.content and call.content == null) continue;
+
+        var match_start: ?u32 = null;
+        var match_end: ?u32 = null;
+
+        if (fields.command) {
+            const parsed = info orelse continue;
+            const match_idx = matcher.matchRule(rule, parsed) orelse continue;
+            if (match_idx != matcher.CROSS_COMMAND_MATCH and
+                match_idx < parsed.commands.items.len)
+            {
+                const matched_cmd = parsed.commands.items[match_idx];
+                match_start = matched_cmd.start_byte;
+                match_end = matched_cmd.end_byte;
             }
-        } else {
-            // For non-Bash tools: the rule's tool-name filter has already
-            // matched. Apply content matchers if the rule has any; otherwise
-            // a tool-name match alone is sufficient.
-            if (!matcher.matchContent(allocator, rule, call.content)) continue;
-            return .{
-                .action = rule.effectiveAction(),
-                .rule_id = rule.id,
-                .message = rule.message,
-                .rewrite_to = rule.rewrite_to,
-            };
         }
+
+        if (!matcher.matchContent(allocator, rule, call.content)) continue;
+
+        return .{
+            .action = rule.effectiveAction(),
+            .rule_id = rule.id,
+            .message = rule.message,
+            .rewrite_to = rule.rewrite_to,
+            .match_start = match_start,
+            .match_end = match_end,
+        };
     }
 
     return CheckResult.approve;
@@ -190,10 +188,10 @@ test "non-Bash tool matching" {
         .id = "no-write-etc",
         .message = "Don't write to /etc.",
         .tool = "Write",
-        .match = .{ .command = "Write" },
+        .match = .{ .content_contains = "/etc" },
     }};
 
-    const result = check(std.testing.allocator, &rules, .{ .tool_name = "Write" });
+    const result = check(std.testing.allocator, &rules, .{ .tool_name = "Write", .content = "writing to /etc/hosts" });
     try std.testing.expectEqual(Action.reject, result.action.?);
 }
 
@@ -262,6 +260,37 @@ test "ExitPlanMode rule allows clean plan" {
 
     const plan = "# Plan\n\nStep 1: do X. Step 2: do Y.";
     const result = check(std.testing.allocator, &rules, .{ .tool_name = "ExitPlanMode", .content = plan });
+    try std.testing.expect(result.action == null);
+}
+
+test "raw_regex rule does not fire on a tool that carries no command" {
+    const rules = [_]Rule{.{
+        .id = "probe",
+        .tool = "Write",
+        .action = .reject,
+        .message = "M",
+        .match = .{ .raw_regex = "ZZZNOTPRESENT" },
+    }};
+
+    const result = check(std.testing.allocator, &rules, .{
+        .tool_name = "Write",
+        .file_path = "/tmp/scratch.txt",
+    });
+    try std.testing.expect(result.action == null);
+}
+
+test "content rule does not fire on a Bash call" {
+    const rules = [_]Rule{.{
+        .id = "no-actually",
+        .tool = "Bash",
+        .message = "M",
+        .match = .{ .content_contains = "actually" },
+    }};
+
+    const result = check(std.testing.allocator, &rules, .{
+        .tool_name = "Bash",
+        .command = "ls -la",
+    });
     try std.testing.expect(result.action == null);
 }
 

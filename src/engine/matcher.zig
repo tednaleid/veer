@@ -208,12 +208,12 @@ fn isOnlyCrossField(m: MatchConfig) bool {
 }
 
 /// Match a rule's content matchers (content_regex, content_contains) against
-/// a string. Used by non-Bash tool rules. Returns true when all configured
-/// content matchers match. If the rule has no content matchers, returns true
-/// (the rule's tool-name match is sufficient on its own).
+/// a string. Returns true when all configured content matchers match, and
+/// true when the rule has no content matchers at all.
 ///
-/// When the rule has content matchers but `content` is null, returns false:
-/// a content rule cannot match without content to inspect.
+/// The engine skips any rule whose content matchers have no content to read,
+/// so `content` is non-null whenever this has matchers to apply. The null
+/// branch is kept as a fail-open guard for direct callers.
 ///
 /// Takes an allocator because content (e.g., a plan file) can be larger than
 /// the fixed stack buffer used by the command-line `regexMatch`.
