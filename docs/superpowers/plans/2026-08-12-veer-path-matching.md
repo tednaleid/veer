@@ -16,7 +16,7 @@
 - **Zig 0.15 API shapes.** `std.ArrayListUnmanaged(T)` initialized with `.empty`, allocator passed to `append(allocator, item)` and `deinit(allocator)`. `std.fs.File.stderr()`, not `std.io.getStdErr()`. Prefer `std.debug.print` for simple stderr output.
 - **Use the Justfile.** `just check` (tests + lint, what CI and the pre-commit hook run), `just test`, `just test-summary`, `just lint`, `just build`. Never invoke `zig build` directly when a recipe exists.
 - **Never use `--no-verify` when committing.** The pre-commit hook runs `just check`; every commit in this plan must pass it.
-- **Red/green TDD.** Write the failing test, run it, watch it fail for the right reason, then implement.
+- **Red/green TDD for any behavior change.** Write the failing test, run it, watch it fail for the right reason, then implement. A pure refactor is gated on the existing suite passing unchanged; a text-only change is gated on `just lint`. Tasks 1 and 6 are the only two tasks this exempts, and each says so.
 - **Tests live in `test` blocks at the bottom of the file they test.** Every new test module must be registered in `src/test_all.zig`; cross-directory imports do not work from individual test files in Zig 0.15.
 - **`std.testing.allocator` in every test.** It detects leaks and a leak fails the test.
 - **Table-driven tests via `inline for`** over anonymous struct tuples, matching the existing style in `matcher.zig`.
@@ -55,6 +55,8 @@
 ### Task 1: ToolCall context struct
 
 Pure mechanical refactor. No behavior changes; every existing test must still pass with only its call site rewritten.
+
+**TDD exemption.** This task has no behavior to test, so it writes no failing test. Its gate is the existing suite passing unchanged: 251 tests before, 251 after, with only call sites edited.
 
 **Files:**
 - Modify: `src/engine/engine.zig:30-93` (signature and body), plus all `test` blocks in the same file
@@ -1010,6 +1012,8 @@ EOF
 ### Task 6: Correct the `--action` help text
 
 `main.zig:454` advertises `allow, deny, rewrite, warn`. None of `allow`, `deny`, or `warn` parse. Task 11 adds `allow` and updates this line again; this task makes it true today.
+
+**TDD exemption.** Text-only change with no behavior to test. Its gate is `just check` passing, which includes `zig fmt --check` and the `check-help` smoke recipe.
 
 **Files:**
 - Modify: `src/main.zig:454`
