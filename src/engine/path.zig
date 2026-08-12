@@ -2,6 +2,7 @@
 // ABOUTME: Lexical normalization only; no realpath, no stat, no symlinks.
 
 const std = @import("std");
+const matcher = @import("matcher.zig");
 
 /// A tool call's target path in both the forms a pattern can match against.
 /// `relative` is a slice into `absolute` and is null when the path is not
@@ -95,6 +96,134 @@ fn normalize(path: []const u8, buf: []u8) ?[]const u8 {
     return buf[0..len];
 }
 
+/// Maximum segments in a pattern or a path. Deeper inputs do not match.
+const max_segments = 128;
+
+/// How a pattern's leading and trailing syntax changes what it is matched
+/// against. `body` is a slice of the original pattern with `./` stripped and
+/// a trailing `/` trimmed.
+pub const PathPattern = struct {
+    body: []const u8,
+    /// Matched against the absolute path rather than the root-relative one.
+    absolute: bool = false,
+    /// `body` is relative to $HOME.
+    home_relative: bool = false,
+    /// Prepend an implicit `**` segment: the pattern matches at any depth.
+    any_depth: bool = false,
+    /// Append an implicit `**` segment: the pattern matches a directory's
+    /// contents.
+    dir_contents: bool = false,
+};
+
+/// Classify a pattern by its leading and trailing syntax. A trailing `/` is
+/// handled first, then the leading form decides anchoring.
+pub fn classifyPattern(pattern: []const u8) PathPattern {
+    var result = PathPattern{ .body = pattern };
+    var body = pattern;
+
+    if (body.len > 1 and body[body.len - 1] == '/') {
+        body = body[0 .. body.len - 1];
+        result.dir_contents = true;
+    }
+
+    if (std.mem.startsWith(u8, body, "~/")) {
+        result.absolute = true;
+        result.home_relative = true;
+        body = body[2..];
+    } else if (body.len > 0 and body[0] == '/') {
+        result.absolute = true;
+        body = body[1..];
+    } else if (std.mem.startsWith(u8, body, "./")) {
+        body = body[2..];
+    } else if (std.mem.indexOfScalar(u8, body, '/') == null) {
+        result.any_depth = true;
+    }
+
+    result.body = body;
+    return result;
+}
+
+/// Match a classified pattern against a resolved path. `home` is $HOME, used
+/// only for `~/` patterns; pass null to make them never match.
+pub fn matches(pattern: []const u8, resolved: Resolved, home: ?[]const u8) bool {
+    const pp = classifyPattern(pattern);
+
+    const target: []const u8 = if (pp.absolute) blk: {
+        if (!pp.home_relative) break :blk stripLeadingSlash(resolved.absolute);
+        const h = home orelse return false;
+        if (!isUnder(resolved.absolute, h)) return false;
+        if (resolved.absolute.len <= h.len + 1) return false;
+        break :blk resolved.absolute[h.len + 1 ..];
+    } else resolved.relative orelse return false;
+
+    return matchWithImplicit(pp, target);
+}
+
+fn stripLeadingSlash(s: []const u8) []const u8 {
+    return if (s.len > 0 and s[0] == '/') s[1..] else s;
+}
+
+fn matchWithImplicit(pp: PathPattern, target: []const u8) bool {
+    var pat_buf: [max_segments][]const u8 = undefined;
+    var n: usize = 0;
+
+    if (pp.any_depth) {
+        pat_buf[n] = "**";
+        n += 1;
+    }
+    n = appendSegments(pp.body, &pat_buf, n) orelse return false;
+    if (pp.dir_contents) {
+        if (n >= pat_buf.len) return false;
+        pat_buf[n] = "**";
+        n += 1;
+    }
+
+    var path_buf: [max_segments][]const u8 = undefined;
+    const path_n = appendSegments(target, &path_buf, 0) orelse return false;
+
+    return matchSegments(pat_buf[0..n], path_buf[0..path_n]);
+}
+
+/// Split `s` on `/` into `out` starting at `n`, returning the new count.
+/// Empty segments are dropped, and a `**` immediately following another `**`
+/// is dropped so `a/**/**/b` cannot make the matcher backtrack exponentially.
+fn appendSegments(s: []const u8, out: *[max_segments][]const u8, start: usize) ?usize {
+    var n = start;
+    var iter = std.mem.splitScalar(u8, s, '/');
+    while (iter.next()) |seg| {
+        if (seg.len == 0) continue;
+        if (std.mem.eql(u8, seg, "**") and n > 0 and std.mem.eql(u8, out[n - 1], "**")) continue;
+        if (n >= out.len) return null;
+        out[n] = seg;
+        n += 1;
+    }
+    return n;
+}
+
+fn matchSegments(pat: []const []const u8, path: []const []const u8) bool {
+    if (pat.len == 0) return path.len == 0;
+    if (std.mem.eql(u8, pat[0], "**")) {
+        var i: usize = 0;
+        while (i <= path.len) : (i += 1) {
+            if (matchSegments(pat[1..], path[i..])) return true;
+        }
+        return false;
+    }
+    if (path.len == 0) return false;
+    if (!matcher.globMatch(pat[0], path[0])) return false;
+    return matchSegments(pat[1..], path[1..]);
+}
+
+/// Match a raw pattern against a raw path, both split on `/`. Exposed for
+/// testing the segment semantics without going through classification.
+pub fn pathMatch(pattern: []const u8, path: []const u8) bool {
+    var pat_buf: [max_segments][]const u8 = undefined;
+    var path_buf: [max_segments][]const u8 = undefined;
+    const pat_n = appendSegments(pattern, &pat_buf, 0) orelse return false;
+    const path_n = appendSegments(path, &path_buf, 0) orelse return false;
+    return matchSegments(pat_buf[0..pat_n], path_buf[0..path_n]);
+}
+
 // -- Tests --
 
 test "resolve makes a relative path absolute against cwd" {
@@ -128,4 +257,77 @@ test "resolve falls back to cwd when root is null" {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const r = resolve("/home/me/proj/a.ts", "/home/me/proj", null, &buf).?;
     try std.testing.expectEqualStrings("a.ts", r.relative.?);
+}
+
+test "pathMatch segment semantics" {
+    const cases = .{
+        // pattern, path, expected
+        .{ "src/*", "src/App.vue", true },
+        .{ "src/*", "src/ui/Button.vue", false },
+        .{ "src/**", "src/App.vue", true },
+        .{ "src/**", "src/ui/Button.vue", true },
+        .{ "a/**/b", "a/b", true },
+        .{ "a/**/b", "a/x/b", true },
+        .{ "a/**/b", "a/x/y/b", true },
+        .{ "a/**/b", "a/x/y/c", false },
+        .{ "**/dist/**", "apps/web/dist/index.js", true },
+        .{ "**/dist/**", "dist/index.js", true },
+        .{ "**/*.env", "apps/web/.env", true },
+        .{ "src/**/*.{ts,vue}", "src/ui/Button.vue", true },
+        .{ "src/**/*.{ts,vue}", "src/ui/Button.css", false },
+        .{ "a/**/**/**/b", "a/x/y/z/b", true },
+    };
+    inline for (cases) |c| {
+        try std.testing.expectEqual(c[2], pathMatch(c[0], c[1]));
+    }
+}
+
+test "classifyPattern" {
+    const abs = classifyPattern("/etc/**");
+    try std.testing.expect(abs.absolute);
+    try std.testing.expectEqualStrings("etc/**", abs.body);
+
+    const home = classifyPattern("~/.ssh/**");
+    try std.testing.expect(home.absolute);
+    try std.testing.expect(home.home_relative);
+
+    const anchored = classifyPattern("./.env");
+    try std.testing.expect(!anchored.absolute);
+    try std.testing.expect(!anchored.any_depth);
+    try std.testing.expectEqualStrings(".env", anchored.body);
+
+    const slashed = classifyPattern("src/**");
+    try std.testing.expect(!slashed.any_depth);
+
+    const bare = classifyPattern(".env");
+    try std.testing.expect(bare.any_depth);
+
+    const dir = classifyPattern("node_modules/");
+    try std.testing.expect(dir.dir_contents);
+    try std.testing.expectEqualStrings("node_modules", dir.body);
+}
+
+test "matches applies classification to a resolved path" {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const r = resolve("/home/me/proj/apps/web/.env", null, "/home/me/proj", &buf).?;
+
+    try std.testing.expect(matches(".env", r, null));
+    try std.testing.expect(!matches("./.env", r, null));
+    try std.testing.expect(matches("apps/**", r, null));
+    try std.testing.expect(!matches("/etc/**", r, null));
+
+    var out_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const outside = resolve("/tmp/scratch.txt", null, "/home/me/proj", &out_buf).?;
+    // A relative pattern never reaches outside the root, not even via basename.
+    try std.testing.expect(!matches("*", outside, null));
+    try std.testing.expect(matches("/tmp/**", outside, null));
+}
+
+test "node_modules needs a slash form" {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const r = resolve("/p/node_modules/left-pad/index.js", null, "/p", &buf).?;
+    // Documented limitation: a no-slash pattern matches file names only.
+    try std.testing.expect(!matches("node_modules", r, null));
+    try std.testing.expect(matches("node_modules/", r, null));
+    try std.testing.expect(matches("node_modules/**", r, null));
 }
