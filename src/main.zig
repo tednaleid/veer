@@ -145,7 +145,10 @@ fn printNoConfigSearchPath(allocator: std.mem.Allocator) void {
 /// purpose of the hook.
 fn loadConfigForCheck(allocator: std.mem.Allocator, config_path: ?[]const u8) LoadedConfig {
     if (config_path) |path| {
-        if (config_mod.loadFile(allocator, path)) |result| {
+        var detail: ?config_mod.ParseDetail = null;
+        defer if (detail) |*d| d.deinit(allocator);
+
+        if (config_mod.loadFileDetailed(allocator, path, &detail)) |result| {
             return .{
                 .rules = result.value.rule,
                 .settings = result.value.settings,
@@ -154,11 +157,19 @@ fn loadConfigForCheck(allocator: std.mem.Allocator, config_path: ?[]const u8) Lo
                 .sources = null,
             };
         } else |_| {
-            std.debug.print(
-                \\veer: failed to load config at {s}
-                \\Fix the file or run 'veer uninstall' to remove the hook.
-                \\
-            , .{path});
+            std.debug.print("veer: failed to load config at {s}\n", .{path});
+            if (detail) |d| switch (d) {
+                .position => |pos| std.debug.print("  TOML syntax error at line {d}, column {d}\n", .{ pos.line, pos.column }),
+                .field_path => |fp| {
+                    std.debug.print("  invalid value for ", .{});
+                    for (fp, 0..) |seg, i| {
+                        if (i > 0) std.debug.print(".", .{});
+                        std.debug.print("{s}", .{seg});
+                    }
+                    std.debug.print("\n", .{});
+                },
+            };
+            std.debug.print("Fix the file or run 'veer uninstall' to remove the hook.\n", .{});
             std.process.exit(2);
         }
     }

@@ -76,12 +76,53 @@ pub const MergedConfig = struct {
     }
 };
 
+/// Why a config file failed to parse. `position` is a TOML syntax error;
+/// `field_path` is a schema error, such as an invalid enum value, and names
+/// the struct path that failed to map.
+pub const ParseDetail = union(enum) {
+    position: struct { line: usize, column: usize },
+    field_path: []const []const u8,
+
+    pub fn deinit(self: *ParseDetail, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .field_path => |fp| allocator.free(fp),
+            .position => {},
+        }
+    }
+};
+
 /// Parse a TOML string into a Config. Caller owns the returned Parsed value.
 pub fn loadString(allocator: std.mem.Allocator, input: []const u8) !toml.Parsed(Config) {
+    var detail: ?ParseDetail = null;
+    defer if (detail) |*d| d.deinit(allocator);
+    return loadStringDetailed(allocator, input, &detail);
+}
+
+/// Like loadString, but writes the reason for a parse failure to `detail_out`
+/// when one is available. The caller owns `detail_out` and must call its
+/// deinit. The parser frees its own copy on deinit, so the field path is
+/// duped here; its segments are comptime struct field names and outlive us.
+pub fn loadStringDetailed(
+    allocator: std.mem.Allocator,
+    input: []const u8,
+    detail_out: *?ParseDetail,
+) !toml.Parsed(Config) {
     var parser = toml.Parser(Config).init(allocator);
     defer parser.deinit();
 
     var result = parser.parseString(input) catch {
+        if (parser.error_info) |info| {
+            switch (info) {
+                .parse => |pos| detail_out.* = .{
+                    .position = .{ .line = pos.line, .column = pos.pos },
+                },
+                .struct_mapping => |fp| {
+                    if (allocator.dupe([]const u8, fp)) |duped| {
+                        detail_out.* = .{ .field_path = duped };
+                    } else |_| {}
+                },
+            }
+        }
         return error.ParseFailed;
     };
 
@@ -106,6 +147,64 @@ pub fn loadFile(allocator: std.mem.Allocator, path: []const u8) !toml.Parsed(Con
     defer allocator.free(content);
 
     return loadString(allocator, content);
+}
+
+/// Like loadFile, but writes the reason for a parse failure to `detail_out`.
+/// See loadStringDetailed.
+pub fn loadFileDetailed(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    detail_out: *?ParseDetail,
+) !toml.Parsed(Config) {
+    const file = std.fs.cwd().openFile(path, .{}) catch {
+        return error.FileNotFound;
+    };
+    defer file.close();
+
+    const content = file.readToEndAlloc(allocator, 1024 * 1024) catch {
+        return error.ReadFailed;
+    };
+    defer allocator.free(content);
+
+    return loadStringDetailed(allocator, content, detail_out);
+}
+
+/// Parse a config file without running rule validation. `validate_cmd` uses
+/// this so it can report every rule's issues, rather than stopping at the
+/// first error `validate` returns.
+pub fn parseFileOnly(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    detail_out: *?ParseDetail,
+) !toml.Parsed(Config) {
+    const file = std.fs.cwd().openFile(path, .{}) catch {
+        return error.FileNotFound;
+    };
+    defer file.close();
+
+    const content = file.readToEndAlloc(allocator, 1024 * 1024) catch {
+        return error.ReadFailed;
+    };
+    defer allocator.free(content);
+
+    var parser = toml.Parser(Config).init(allocator);
+    defer parser.deinit();
+
+    return parser.parseString(content) catch {
+        if (parser.error_info) |info| {
+            switch (info) {
+                .parse => |pos| detail_out.* = .{
+                    .position = .{ .line = pos.line, .column = pos.pos },
+                },
+                .struct_mapping => |fp| {
+                    if (allocator.dupe([]const u8, fp)) |duped| {
+                        detail_out.* = .{ .field_path = duped };
+                    } else |_| {}
+                },
+            }
+        }
+        return error.ParseFailed;
+    };
 }
 
 /// Fold an ordered list of tiers into one merged rule set. Earlier tiers
@@ -422,6 +521,47 @@ test "loadString rejects rewrite without target" {
 
 test "loadString rejects invalid TOML" {
     try std.testing.expectError(error.ParseFailed, loadString(std.testing.allocator, "this is not valid toml [[["));
+}
+
+test "invalid enum value reports the field path" {
+    const input =
+        \\[[rule]]
+        \\id = "x"
+        \\action = "nonsense"
+        \\message = "m"
+        \\[rule.match]
+        \\command = "foo"
+    ;
+    var detail: ?ParseDetail = null;
+    defer if (detail) |*d| d.deinit(std.testing.allocator);
+
+    const result = loadStringDetailed(std.testing.allocator, input, &detail);
+    try std.testing.expectError(error.ParseFailed, result);
+
+    const d = detail orelse return error.TestExpectedDetail;
+    try std.testing.expect(d == .field_path);
+    // The failing field is `action` under the `rule` array.
+    var joined_seen = false;
+    for (d.field_path) |seg| {
+        if (std.mem.eql(u8, seg, "action")) joined_seen = true;
+    }
+    try std.testing.expect(joined_seen);
+}
+
+test "syntax error reports a line number" {
+    const input =
+        \\[[rule]
+        \\id = "x"
+    ;
+    var detail: ?ParseDetail = null;
+    defer if (detail) |*d| d.deinit(std.testing.allocator);
+
+    const result = loadStringDetailed(std.testing.allocator, input, &detail);
+    try std.testing.expectError(error.ParseFailed, result);
+
+    const d = detail orelse return error.TestExpectedDetail;
+    try std.testing.expect(d == .position);
+    try std.testing.expect(d.position.line >= 1);
 }
 
 test "loadFile returns FileNotFound for missing file" {

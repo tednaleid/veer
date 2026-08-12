@@ -11,14 +11,32 @@ pub const ValidateOptions = struct {
 
 /// Run the validate command. Reports all validation errors.
 pub fn run(allocator: std.mem.Allocator, opts: ValidateOptions, writer: anytype) !u8 {
-    var result = config_mod.loadFile(allocator, opts.config_path) catch |err| {
+    var detail: ?config_mod.ParseDetail = null;
+    defer if (detail) |*d| d.deinit(allocator);
+
+    var result = config_mod.parseFileOnly(allocator, opts.config_path, &detail) catch |err| {
         switch (err) {
             error.FileNotFound => {
                 try writer.print("{s}: file not found\n", .{opts.config_path});
                 return 1;
             },
             error.ParseFailed => {
-                try writer.print("{s}: TOML parse error\n", .{opts.config_path});
+                if (detail) |d| switch (d) {
+                    .position => |pos| try writer.print(
+                        "{s}:{d}:{d}: TOML syntax error\n",
+                        .{ opts.config_path, pos.line, pos.column },
+                    ),
+                    .field_path => |fp| {
+                        try writer.print("{s}: invalid value for ", .{opts.config_path});
+                        for (fp, 0..) |seg, i| {
+                            if (i > 0) try writer.print(".", .{});
+                            try writer.print("{s}", .{seg});
+                        }
+                        try writer.print("\n", .{});
+                    },
+                } else {
+                    try writer.print("{s}: TOML parse error\n", .{opts.config_path});
+                }
                 return 1;
             },
             else => {
@@ -119,6 +137,15 @@ fn validateAll(rules: []const rule_mod.Rule) usize {
         const action = rule.effectiveAction();
         if (action == .rewrite and rule.rewrite_to == null) count += 1;
         if (action == .reject and rule.message == null) count += 1;
+        if (rule_mod.toolFields(rule.tool)) |carried| {
+            const used = rule_mod.fieldsUsed(rule.match);
+            if ((used.command and !carried.command) or
+                (used.content and !carried.content) or
+                (used.path and !carried.path))
+            {
+                count += 1;
+            }
+        }
         if (!rule_mod.hasAnyMatchPub(rule.match)) count += 1;
     }
     return count;
@@ -165,4 +192,72 @@ test "validate missing file reports error" {
     try std.testing.expectEqual(@as(u8, 1), exit_code);
     const output = stream.getWritten();
     try std.testing.expect(std.mem.indexOf(u8, output, "not found") != null);
+}
+
+test "validate reports every invalid rule, not just the first" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(dir);
+
+    const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/c.toml", .{dir});
+    defer std.testing.allocator.free(path);
+    {
+        const f = try std.fs.cwd().createFile(path, .{});
+        defer f.close();
+        try f.writeAll(
+            \\[[rule]]
+            \\id = "first-bad"
+            \\tool = "Write"
+            \\message = "m"
+            \\[rule.match]
+            \\raw_regex = "x"
+            \\
+            \\[[rule]]
+            \\id = "second-bad"
+            \\tool = "Bash"
+            \\[rule.match]
+            \\command = "foo"
+        );
+    }
+
+    var buf: [4096]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    const code = try run(std.testing.allocator, .{ .config_path = path }, stream.writer());
+
+    const out = stream.getWritten();
+    try std.testing.expectEqual(@as(u8, 1), code);
+    // Both rules must appear, not just the first.
+    try std.testing.expect(std.mem.indexOf(u8, out, "first-bad") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "second-bad") != null);
+}
+
+test "validate reports a rule whose only issue is a matcher/tool mismatch" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(dir);
+
+    const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/c.toml", .{dir});
+    defer std.testing.allocator.free(path);
+    {
+        const f = try std.fs.cwd().createFile(path, .{});
+        defer f.close();
+        try f.writeAll(
+            \\[[rule]]
+            \\id = "probe"
+            \\tool = "Write"
+            \\message = "M"
+            \\[rule.match]
+            \\raw_regex = "x"
+        );
+    }
+
+    var buf: [1024]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    const code = try run(std.testing.allocator, .{ .config_path = path }, stream.writer());
+
+    const out = stream.getWritten();
+    try std.testing.expectEqual(@as(u8, 1), code);
+    try std.testing.expect(std.mem.indexOf(u8, out, "probe") != null);
 }
