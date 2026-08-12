@@ -42,7 +42,7 @@ pub fn run(parent_allocator: std.mem.Allocator, opts: AddOptions, writer: anytyp
     }
     // Reject and allow require --message
     if ((action == .reject or action == .allow) and opts.message == null) {
-        try writer.print("veer add: --message is required for reject rules\n", .{});
+        try writer.print("veer add: --message is required for reject and allow rules\n", .{});
         return 1;
     }
 
