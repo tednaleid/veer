@@ -4,6 +4,7 @@
 const std = @import("std");
 const engine = @import("engine/engine.zig");
 const Rule = @import("config/rule.zig").Rule;
+const path_mod = @import("engine/path.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -78,4 +79,37 @@ pub fn main() !void {
     });
 
     if (per_check_us >= 2000) std.process.exit(1);
+
+    // Path matching: a gate's allowlist pattern against a deep, nested path.
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const resolved = path_mod.resolve(
+        "/p/apps/web/src/components/Button.vue",
+        null,
+        "/p",
+        &path_buf,
+    ).?;
+    const path_iterations: usize = 100_000;
+
+    // Warm up
+    for (0..1_000) |_| {
+        std.mem.doNotOptimizeAway(path_mod.matches("apps/**/*.vue", resolved, null));
+    }
+
+    var path_timer = try std.time.Timer.start();
+    for (0..path_iterations) |_| {
+        std.mem.doNotOptimizeAway(path_mod.matches("apps/**/*.vue", resolved, null));
+    }
+    const path_elapsed_ns = path_timer.read();
+    const path_per_check_ns = path_elapsed_ns / path_iterations;
+
+    std.debug.print(
+        \\
+        \\Path match: {d} checks in {d}ms
+        \\Per match: {d}ns
+        \\
+    , .{
+        path_iterations,
+        path_elapsed_ns / 1_000_000,
+        path_per_check_ns,
+    });
 }
