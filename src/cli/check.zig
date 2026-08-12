@@ -33,6 +33,8 @@ pub fn run(
         .tool_name = input.tool_name,
         .command = input.command,
         .content = input.content,
+        .file_path = input.file_path,
+        .cwd = input.cwd,
     });
 
     // Output based on action

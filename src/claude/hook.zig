@@ -14,6 +14,13 @@ pub const HookInput = struct {
     /// for tools where no content extractor is wired up (or where extraction
     /// failed -- callers must treat null as "no match" rather than "match").
     content: ?[]const u8,
+    /// Target path, from tool_input.file_path, notebook_path, or path,
+    /// whichever appears first. Tool-name agnostic, so an MCP tool carrying
+    /// file_path works without a veer release.
+    file_path: ?[]const u8,
+    /// Session working directory, from the envelope root. Used to resolve a
+    /// relative file_path.
+    cwd: ?[]const u8,
 };
 
 pub const ExitCode = struct {
@@ -62,6 +69,26 @@ pub fn parseInput(allocator: std.mem.Allocator, json_str: []const u8) !HookInput
     };
     errdefer if (transcript_path) |tp| allocator.free(tp);
 
+    const file_path: ?[]const u8 = blk: {
+        const tool_input = root.object.get("tool_input") orelse break :blk null;
+        if (tool_input != .object) break :blk null;
+        const keys = [_][]const u8{ "file_path", "notebook_path", "path" };
+        for (keys) |key| {
+            const val = tool_input.object.get(key) orelse continue;
+            if (val != .string) continue;
+            break :blk try allocator.dupe(u8, val.string);
+        }
+        break :blk null;
+    };
+    errdefer if (file_path) |fp| allocator.free(fp);
+
+    const cwd: ?[]const u8 = blk: {
+        const val = root.object.get("cwd") orelse break :blk null;
+        if (val != .string) break :blk null;
+        break :blk try allocator.dupe(u8, val.string);
+    };
+    errdefer if (cwd) |c| allocator.free(c);
+
     // Tool-specific content extraction. Fail-open: any error producing
     // content yields null, which the engine treats as "rule does not match"
     // for content rules. We don't want a transient FS or parse glitch to
@@ -77,6 +104,8 @@ pub fn parseInput(allocator: std.mem.Allocator, json_str: []const u8) !HookInput
         .session_id = session_id,
         .transcript_path = transcript_path,
         .content = content,
+        .file_path = file_path,
+        .cwd = cwd,
     };
 }
 
@@ -107,6 +136,8 @@ pub fn freeInput(allocator: std.mem.Allocator, input: *HookInput) void {
     if (input.session_id) |sid| allocator.free(sid);
     if (input.transcript_path) |tp| allocator.free(tp);
     if (input.content) |c| allocator.free(c);
+    if (input.file_path) |fp| allocator.free(fp);
+    if (input.cwd) |c| allocator.free(c);
 }
 
 /// Format a rewrite result for stdout using the modern hook response envelope.
@@ -218,9 +249,9 @@ test "parseInput Bash tool with command" {
     try std.testing.expectEqualStrings("abc-123", input.session_id.?);
 }
 
-test "parseInput non-Bash tool" {
+test "parseInput extracts file_path for a Write" {
     const json =
-        \\{"tool_name":"Write","tool_input":{"file_path":"/etc/passwd","content":"..."}}
+        \\{"tool_name":"Write","tool_input":{"file_path":"/etc/passwd","content":"..."},"cwd":"/home/me/proj"}
     ;
     var input = try parseInput(std.testing.allocator, json);
     defer freeInput(std.testing.allocator, &input);
@@ -228,6 +259,33 @@ test "parseInput non-Bash tool" {
     try std.testing.expectEqualStrings("Write", input.tool_name);
     try std.testing.expect(input.command == null);
     try std.testing.expect(input.content == null);
+    try std.testing.expectEqualStrings("/etc/passwd", input.file_path.?);
+    try std.testing.expectEqualStrings("/home/me/proj", input.cwd.?);
+}
+
+test "parseInput falls back to notebook_path then path" {
+    const notebook =
+        \\{"tool_name":"NotebookEdit","tool_input":{"notebook_path":"/a/nb.ipynb"}}
+    ;
+    var nb = try parseInput(std.testing.allocator, notebook);
+    defer freeInput(std.testing.allocator, &nb);
+    try std.testing.expectEqualStrings("/a/nb.ipynb", nb.file_path.?);
+
+    const grep =
+        \\{"tool_name":"Grep","tool_input":{"pattern":"foo","path":"/a/src"}}
+    ;
+    var g = try parseInput(std.testing.allocator, grep);
+    defer freeInput(std.testing.allocator, &g);
+    try std.testing.expectEqualStrings("/a/src", g.file_path.?);
+}
+
+test "parseInput leaves file_path null when no path key is present" {
+    const json =
+        \\{"tool_name":"Bash","tool_input":{"command":"ls"}}
+    ;
+    var input = try parseInput(std.testing.allocator, json);
+    defer freeInput(std.testing.allocator, &input);
+    try std.testing.expect(input.file_path == null);
 }
 
 test "parseInput extracts transcript_path" {
