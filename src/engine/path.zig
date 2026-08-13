@@ -225,18 +225,49 @@ fn appendSegments(s: []const u8, out: *[max_segments][]const u8, start: usize) ?
     return n;
 }
 
+/// Bounds a (pattern_index, path_index) memo: both indices can reach their
+/// slice's length (the "consumed everything" state), so each dimension
+/// needs max_segments + 1 slots.
+const MemoSet = std.StaticBitSet((max_segments + 1) * (max_segments + 1));
+
 fn matchSegments(pat: []const []const u8, path: []const []const u8) bool {
-    if (pat.len == 0) return path.len == 0;
-    if (std.mem.eql(u8, pat[0], "**")) {
-        var i: usize = 0;
-        while (i <= path.len) : (i += 1) {
-            if (matchSegments(pat[1..], path[i..])) return true;
+    var memo = MemoSet.initEmpty();
+    return matchFrom(pat, 0, path, 0, &memo);
+}
+
+/// Match `pat[pi..]` against `path[pj..]`, memoizing failed states so a
+/// `**` is not re-explored from the same position twice. Without this, two
+/// non-adjacent `**` segments each try every split point, and their
+/// combinations grow exponentially with the number of `**` in the pattern.
+/// `memo` records only failures: a match short-circuits the whole search
+/// via its `true` return, so successes never need to be cached.
+fn matchFrom(
+    pat: []const []const u8,
+    pi: usize,
+    path: []const []const u8,
+    pj: usize,
+    memo: *MemoSet,
+) bool {
+    if (pi == pat.len) return pj == path.len;
+
+    const key = pi * (max_segments + 1) + pj;
+    if (memo.isSet(key)) return false;
+
+    const found = blk: {
+        if (std.mem.eql(u8, pat[pi], "**")) {
+            var i = pj;
+            while (i <= path.len) : (i += 1) {
+                if (matchFrom(pat, pi + 1, path, i, memo)) break :blk true;
+            }
+            break :blk false;
         }
-        return false;
-    }
-    if (path.len == 0) return false;
-    if (!matcher.globMatch(pat[0], path[0])) return false;
-    return matchSegments(pat[1..], path[1..]);
+        if (pj == path.len) break :blk false;
+        if (!matcher.globMatch(pat[pi], path[pj])) break :blk false;
+        break :blk matchFrom(pat, pi + 1, path, pj + 1, memo);
+    };
+
+    if (!found) memo.set(key);
+    return found;
 }
 
 /// Match a raw pattern against a raw path, both split on `/`. Exposed for
@@ -338,6 +369,48 @@ test "pathMatch segment semantics" {
     inline for (cases) |c| {
         try std.testing.expectEqual(c[2], pathMatch(c[0], c[1]));
     }
+}
+
+test "matchSegments does not backtrack exponentially on many non-adjacent wildcards" {
+    // (**/a/)*6 zzz against 60 "a" segments: every "**" can split at every
+    // remaining position, and none of them are adjacent so appendSegments'
+    // consecutive-"**" collapse does not help. Without memoization this
+    // pattern takes seconds; memoized it should be effectively instant.
+    var pattern_buf: [256]u8 = undefined;
+    var pattern_len: usize = 0;
+    var n: usize = 0;
+    while (n < 6) : (n += 1) {
+        const group = "**/a/";
+        @memcpy(pattern_buf[pattern_len..][0..group.len], group);
+        pattern_len += group.len;
+    }
+    const tail = "zzz";
+    @memcpy(pattern_buf[pattern_len..][0..tail.len], tail);
+    pattern_len += tail.len;
+    const pattern = pattern_buf[0..pattern_len];
+
+    var path_buf: [256]u8 = undefined;
+    var path_len: usize = 0;
+    var i: usize = 0;
+    while (i < 60) : (i += 1) {
+        if (i > 0) {
+            path_buf[path_len] = '/';
+            path_len += 1;
+        }
+        path_buf[path_len] = 'a';
+        path_len += 1;
+    }
+    const path = path_buf[0..path_len];
+
+    var timer = try std.time.Timer.start();
+    // The path is all "a" segments and the pattern requires a trailing
+    // "zzz" segment, so this can never match.
+    try std.testing.expect(!pathMatch(pattern, path));
+    const elapsed_ns = timer.read();
+
+    // The unmemoized matcher takes several seconds on this input; a
+    // memoized matcher finishes in well under a second.
+    try std.testing.expect(elapsed_ns < 1 * std.time.ns_per_s);
 }
 
 test "classifyPattern" {
