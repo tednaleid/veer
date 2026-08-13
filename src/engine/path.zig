@@ -175,7 +175,13 @@ pub fn matches(pattern: []const u8, resolved: Resolved, home: ?[]const u8) bool 
 
     const target: []const u8 = if (pp.absolute) blk: {
         if (!pp.home_relative) break :blk stripLeadingSlash(resolved.absolute);
-        const h = home orelse return false;
+        const raw_home = home orelse return false;
+        // `home` comes straight from the HOME env var, which is not
+        // guaranteed to be free of a trailing separator. Normalizing it
+        // keeps isUnder's prefix comparison and the slice below aligned on
+        // segment boundaries, the same way resolve() normalizes root/cwd.
+        var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const h = normalize(raw_home, &home_buf) orelse return false;
         if (!isUnder(resolved.absolute, h)) return false;
         if (resolved.absolute.len <= h.len + 1) return false;
         break :blk resolved.absolute[h.len + 1 ..];
@@ -452,6 +458,13 @@ test "matches applies classification to a resolved path" {
     // A relative pattern never reaches outside the root, not even via basename.
     try std.testing.expect(!matches("*", outside, null));
     try std.testing.expect(matches("/tmp/**", outside, null));
+}
+
+test "matches treats a trailing slash on home the same as no trailing slash" {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const r = resolve("/home/me/.ssh/id_rsa", null, "/home/me/proj", &buf).?;
+    try std.testing.expect(matches("~/.ssh/**", r, "/home/me/"));
+    try std.testing.expect(matches("~/.ssh/**", r, "/home/me"));
 }
 
 test "node_modules needs a slash form" {
