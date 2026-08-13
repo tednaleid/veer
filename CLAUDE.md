@@ -53,7 +53,7 @@ earlier versions. Key differences:
 - `src/claude/` -- Claude Code integration (hook protocol, settings, transcripts).
 - `src/store/` -- Storage abstraction. Never import sqlite3 outside this dir.
 - `src/cli/` -- Command implementations.
-- `src/display/` -- Terminal output (table, color).
+- `src/display/` -- Terminal output (table).
 - `vendor/` -- Vendored C code (SQLite, tree-sitter-bash). Do not modify.
 
 ## Key Conventions
