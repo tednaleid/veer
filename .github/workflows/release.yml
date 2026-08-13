@@ -18,11 +18,14 @@ jobs:
     strategy:
       matrix:
         include:
+          # Pinned rather than macos-latest: Zig 0.15.2 cannot link against the
+          # macOS 26 SDK, and fails on libSystem symbols while compiling its own
+          # build runner. Revisit when the Zig 0.16 upgrade lands.
           - target: aarch64-macos
-            os: macos-latest
+            os: macos-15
             zig_target: -Dtarget=aarch64-macos
           - target: x86_64-macos
-            os: macos-latest
+            os: macos-15
             zig_target: -Dtarget=x86_64-macos
           - target: aarch64-linux-musl
             os: ubuntu-latest
