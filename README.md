@@ -119,11 +119,17 @@ veer returns: "Writes to the primary checkout are off-limits. Work in a worktree
 Exit code:    2
 ```
 
-A gate never approves and stops. It can only reject or fall through, so adding
-a gate can only reduce what passes, never expand it. That is what makes it safe
-to layer a private `.veer/config.local.toml` gate on top of a shared
-`.veer/config.toml`: a personal gate can add a constraint but cannot weaken a
-team rule.
+A gate never approves and stops. It can only reject or fall through, so
+stacking a gate on top of another gate or a reject can only narrow what
+passes, never expand it. That is what makes it safe to layer a private
+`.veer/config.local.toml` gate on top of a shared `.veer/config.toml` gate:
+the personal gate can only add a constraint, never loosen the team's.
+
+That narrowing guarantee does not extend across a rewrite. Rules run in file
+order and the first match wins, so a rewrite above a gate returns before the
+gate is ever consulted, skipping it and every rule below. Rewrite only
+applies to commands (the Bash tool), so this matters for Bash rule ordering:
+put gates and rejects above any rewrite that could match the same call.
 
 Two gates on the same tool intersect. A path must satisfy both.
 
@@ -279,13 +285,20 @@ checked-in config stays portable across machines and teammates.
 | `src/*` | files directly in `src/`, not in subdirectories |
 | `**/dist/**` | everything under any `dist/` at any depth |
 | `./.env` | the project root's `.env` only |
-| `node_modules/` | shorthand for `node_modules/**` |
+| `node_modules/` | any `node_modules` directory, at any depth |
+| `node_modules/**` | contents of the project root's `node_modules` only |
 | `/etc/**` | the real `/etc` |
 | `~/.ssh/**` | `$HOME/.ssh` |
 | `src/**/*.{ts,vue}` | `.ts` and `.vue` files under `src/` |
 
 `*` and `?` stay inside one path segment; `**` spans zero or more segments.
 Matching is case-sensitive.
+
+`node_modules/` and `node_modules/**` are not interchangeable. The trailing
+`/` matches the directory itself at any depth, which is why it also reaches
+`apps/web/node_modules`. `node_modules/**` is anchored at the project root
+like any pattern containing a `/`, so it only reaches the root-level
+`node_modules` -- in a monorepo it silently misses every nested copy.
 
 Two differences from gitignore worth knowing:
 

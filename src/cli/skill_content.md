@@ -195,7 +195,7 @@ gitignore-shaped globs, anchored at the directory containing `.veer/`.
 |---|---|
 | `.env` | any file named `.env`, at any depth |
 | `src/**` | everything under the project's `src/` |
-| `node_modules/` | shorthand for `node_modules/**` |
+| `node_modules/` | any `node_modules` directory, at any depth |
 | `./.env` | the project root's `.env` only, not `apps/web/.env` |
 | `/etc/**` | the real `/etc`, not a project-relative path |
 
@@ -409,8 +409,13 @@ then run `veer test` on a representative input to demonstrate.
   config at one of them or at any ancestor.
 - **A no-slash path pattern matches a file's name, not a directory.**
   `node_modules` matches nothing, because no file is *named* `node_modules`.
-  Write `node_modules/` or `node_modules/**` instead. This fails silently --
-  the rule loads clean and simply never fires.
+  Write `node_modules/` to match the directory instead. This fails
+  silently -- the rule loads clean and simply never fires.
+- **A trailing slash and a `/**` suffix reach different scopes.**
+  `node_modules/` matches the directory at any depth, so it also reaches
+  `apps/web/node_modules`. `node_modules/**` is anchored at the project
+  root like any pattern with a `/` in it, so in a monorepo it silently
+  misses every nested copy.
 - **A leading `/` in a path pattern is the filesystem root, unlike
   gitignore.** `/build/**` is the real `/build`; the project's is
   `build/**` or `./build/**`. This also fails silently: the pattern is
