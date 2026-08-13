@@ -47,12 +47,40 @@ veer fills this gap. It parses shell commands into ASTs via tree-sitter-bash and
 
 It turns out that `claude` is great at creating these rules. Just let it know about `veer` and ask it to write rules for everything in your just/make files.
 
+## Install
+
+### Homebrew
+
+```
+brew install tednaleid/veer/veer
+```
+
+To upgrade to the latest version:
+
+```
+brew update && brew upgrade veer
+```
+
+### From source
+
+Requires Zig 0.16.
+
+```
+git clone https://github.com/tednaleid/veer.git
+cd veer
+just install    # builds release binary, symlinks to ~/.local/bin/veer
+```
+
+### From GitHub releases
+
+Prebuilt binaries for macOS (Apple silicon and Intel) and Linux (x86_64 and
+aarch64, static musl) are attached to every
+[release](https://github.com/tednaleid/veer/releases). Download the tarball for
+your platform, extract it, and put `veer` on your `PATH`.
+
 ## Quick Start
 
 ```bash
-# Build and install (requires Zig 0.16)
-just install    # builds release binary, symlinks to ~/.local/bin/veer
-
 # Register veer as a Claude Code hook
 veer install
 
@@ -710,7 +738,10 @@ The Zig built-in fuzzer has [known bugs](https://github.com/ziglang/zig/issues/2
 that prevent `--fuzz` mode from running. Fuzz functions still execute as regular tests.
 See [docs/fuzzing.md](docs/fuzzing.md) for details and status.
 
-## Building
+## Development
+
+To install veer for use, see [Install](#install). This section covers working
+on veer itself.
 
 Requires **Zig 0.16.0**. On macOS:
 

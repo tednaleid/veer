@@ -18,13 +18,13 @@ rewrite_to = "just lint"
 command_any = ["ruff", "uvx", "flake8"]
 
 # Surgical rewrite: fix quoted echo separator (avoids Claude Code permission prompt).
-# tree-sitter preserves quotes in args, so we match the quoted form.
+# Args are matched with quotes stripped, so the pattern is the bare separator.
 [[rule]]
 id = "fix-echo-separator"
 rewrite_to = "echo ---"
 [rule.match]
 command = "echo"
-arg = '"---"'
+arg = "---"
 
 # --- Rejects (block with message) ---
 
