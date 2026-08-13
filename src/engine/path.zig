@@ -28,13 +28,23 @@ pub fn resolve(
     root: ?[]const u8,
     buf: []u8,
 ) ?Resolved {
-    const base = root orelse cwd;
+    // `cwd` and `root` arrive as raw strings from the hook envelope and the
+    // discovered project directory -- neither is guaranteed to be free of a
+    // trailing separator. Normalizing them here keeps the prefix comparison
+    // in `isUnder` and the relative slice below aligned on segment
+    // boundaries regardless of how they were spelled.
+    var cwd_norm_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var root_norm_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const norm_cwd: ?[]const u8 = if (cwd) |c| normalize(c, &cwd_norm_buf) orelse return null else null;
+    const norm_root: ?[]const u8 = if (root) |r| normalize(r, &root_norm_buf) orelse return null else null;
+
+    const base = norm_root orelse norm_cwd;
 
     var joined_buf: [std.fs.max_path_bytes]u8 = undefined;
     const joined: []const u8 = if (raw.len > 0 and raw[0] == '/')
         raw
     else blk: {
-        const anchor = cwd orelse base orelse return null;
+        const anchor = norm_cwd orelse base orelse return null;
         const need = anchor.len + 1 + raw.len;
         if (need > joined_buf.len) return null;
         @memcpy(joined_buf[0..anchor.len], anchor);
@@ -47,16 +57,31 @@ pub fn resolve(
 
     const r = base orelse return .{ .absolute = absolute, .relative = null };
     if (!isUnder(absolute, r)) return .{ .absolute = absolute, .relative = null };
+    return .{ .absolute = absolute, .relative = relativeTo(absolute, r) };
+}
 
+/// The portion of `path` after `root`, or null when `path` is `root` itself
+/// (which has no relative form). Both must already be normalized: no
+/// trailing separator, except `root` may be exactly `/`. Callers must check
+/// `isUnder(path, root)` first.
+fn relativeTo(path: []const u8, root: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, root, "/")) {
+        // root has no separator of its own to skip; path is already "/..."
+        if (path.len <= 1) return null;
+        return path[1..];
+    }
     // +1 skips the separator. Equal-length means the path IS the root, which
     // has no relative form.
-    if (absolute.len <= r.len + 1) return .{ .absolute = absolute, .relative = null };
-    return .{ .absolute = absolute, .relative = absolute[r.len + 1 ..] };
+    if (path.len <= root.len + 1) return null;
+    return path[root.len + 1 ..];
 }
 
 /// True when `path` is `root` itself or lives inside it. Compares whole
-/// segments, so /a/proj-other is not inside /a/proj.
+/// segments, so /a/proj-other is not inside /a/proj. Both must already be
+/// normalized: no trailing separator, except `root` may be exactly `/`, in
+/// which case every absolute `path` is under it by definition.
 fn isUnder(path: []const u8, root: []const u8) bool {
+    if (std.mem.eql(u8, root, "/")) return true;
     if (!std.mem.startsWith(u8, path, root)) return false;
     if (path.len == root.len) return true;
     return path[root.len] == '/';
@@ -257,6 +282,39 @@ test "resolve falls back to cwd when root is null" {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const r = resolve("/home/me/proj/a.ts", "/home/me/proj", null, &buf).?;
     try std.testing.expectEqualStrings("a.ts", r.relative.?);
+}
+
+test "resolve treats a trailing slash on root the same as no trailing slash" {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const r = resolve("/home/me/proj/src/a.ts", null, "/home/me/proj/", &buf).?;
+    try std.testing.expectEqualStrings("/home/me/proj/src/a.ts", r.absolute);
+    try std.testing.expectEqualStrings("src/a.ts", r.relative.?);
+}
+
+test "resolve treats a trailing slash on cwd the same as no trailing slash" {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const r = resolve("/home/me/proj/src/a.ts", "/home/me/proj/", null, &buf).?;
+    try std.testing.expectEqualStrings("src/a.ts", r.relative.?);
+}
+
+test "resolve treats root as the whole filesystem" {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const r = resolve("/home/me/proj/src/a.ts", null, "/", &buf).?;
+    try std.testing.expectEqualStrings("/home/me/proj/src/a.ts", r.absolute);
+    try std.testing.expectEqualStrings("home/me/proj/src/a.ts", r.relative.?);
+}
+
+test "resolve treats cwd as the whole filesystem" {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const r = resolve("/home/me/proj/src/a.ts", "/", null, &buf).?;
+    try std.testing.expectEqualStrings("home/me/proj/src/a.ts", r.relative.?);
+}
+
+test "resolve at exactly root itself has no relative form" {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const r = resolve("/", null, "/", &buf).?;
+    try std.testing.expectEqualStrings("/", r.absolute);
+    try std.testing.expect(r.relative == null);
 }
 
 test "pathMatch segment semantics" {
