@@ -10,11 +10,11 @@ pub const ValidateOptions = struct {
 };
 
 /// Run the validate command. Reports all validation errors.
-pub fn run(allocator: std.mem.Allocator, opts: ValidateOptions, writer: anytype) !u8 {
+pub fn run(allocator: std.mem.Allocator, io: std.Io, opts: ValidateOptions, writer: anytype) !u8 {
     var detail: ?config_mod.ParseDetail = null;
     defer if (detail) |*d| d.deinit(allocator);
 
-    var result = config_mod.parseFileOnly(allocator, opts.config_path, &detail) catch |err| {
+    var result = config_mod.parseFileOnly(allocator, io, opts.config_path, &detail) catch |err| {
         switch (err) {
             error.FileNotFound => {
                 try writer.print("{s}: file not found\n", .{opts.config_path});
@@ -223,14 +223,14 @@ test "validate valid config reports OK" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(path);
     const config_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/config.toml", .{path});
     defer std.testing.allocator.free(config_path);
 
     // Write a valid config
-    const file = try std.fs.cwd().createFile(config_path, .{});
-    try file.writeAll(
+    const file = try std.Io.Dir.cwd().createFile(std.testing.io, config_path, .{});
+    try file.writeStreamingAll(std.testing.io,
         \\[[rule]]
         \\id = "use-just-test"
         \\action = "rewrite"
@@ -238,40 +238,40 @@ test "validate valid config reports OK" {
         \\[rule.match]
         \\command = "pytest"
     );
-    file.close();
+    file.close(std.testing.io);
 
     var buf: [1024]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = try run(std.testing.allocator, .{ .config_path = config_path }, stream.writer());
+    var stream = std.Io.Writer.fixed(&buf);
+    const exit_code = try run(std.testing.allocator, std.testing.io, .{ .config_path = config_path }, &stream);
 
     try std.testing.expectEqual(@as(u8, 0), exit_code);
-    const output = stream.getWritten();
+    const output = stream.buffered();
     try std.testing.expect(std.mem.indexOf(u8, output, "OK") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "1 rule") != null);
 }
 
 test "validate missing file reports error" {
     var buf: [1024]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = try run(std.testing.allocator, .{ .config_path = "/nonexistent/config.toml" }, stream.writer());
+    var stream = std.Io.Writer.fixed(&buf);
+    const exit_code = try run(std.testing.allocator, std.testing.io, .{ .config_path = "/nonexistent/config.toml" }, &stream);
 
     try std.testing.expectEqual(@as(u8, 1), exit_code);
-    const output = stream.getWritten();
+    const output = stream.buffered();
     try std.testing.expect(std.mem.indexOf(u8, output, "not found") != null);
 }
 
 test "validate reports every invalid rule, not just the first" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dir = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(dir);
 
     const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/c.toml", .{dir});
     defer std.testing.allocator.free(path);
     {
-        const f = try std.fs.cwd().createFile(path, .{});
-        defer f.close();
-        try f.writeAll(
+        const f = try std.Io.Dir.cwd().createFile(std.testing.io, path, .{});
+        defer f.close(std.testing.io);
+        try f.writeStreamingAll(std.testing.io,
             \\[[rule]]
             \\id = "first-bad"
             \\tool = "Write"
@@ -288,10 +288,10 @@ test "validate reports every invalid rule, not just the first" {
     }
 
     var buf: [4096]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const code = try run(std.testing.allocator, .{ .config_path = path }, stream.writer());
+    var stream = std.Io.Writer.fixed(&buf);
+    const code = try run(std.testing.allocator, std.testing.io, .{ .config_path = path }, &stream);
 
-    const out = stream.getWritten();
+    const out = stream.buffered();
     try std.testing.expectEqual(@as(u8, 1), code);
     // Both rules must appear, not just the first.
     try std.testing.expect(std.mem.indexOf(u8, out, "first-bad") != null);
@@ -301,15 +301,15 @@ test "validate reports every invalid rule, not just the first" {
 test "validate reports a rule whose only issue is a matcher/tool mismatch" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dir = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(dir);
 
     const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/c.toml", .{dir});
     defer std.testing.allocator.free(path);
     {
-        const f = try std.fs.cwd().createFile(path, .{});
-        defer f.close();
-        try f.writeAll(
+        const f = try std.Io.Dir.cwd().createFile(std.testing.io, path, .{});
+        defer f.close(std.testing.io);
+        try f.writeStreamingAll(std.testing.io,
             \\[[rule]]
             \\id = "probe"
             \\tool = "Write"
@@ -320,10 +320,10 @@ test "validate reports a rule whose only issue is a matcher/tool mismatch" {
     }
 
     var buf: [1024]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const code = try run(std.testing.allocator, .{ .config_path = path }, stream.writer());
+    var stream = std.Io.Writer.fixed(&buf);
+    const code = try run(std.testing.allocator, std.testing.io, .{ .config_path = path }, &stream);
 
-    const out = stream.getWritten();
+    const out = stream.buffered();
     try std.testing.expectEqual(@as(u8, 1), code);
     try std.testing.expect(std.mem.indexOf(u8, out, "probe") != null);
 }
@@ -331,15 +331,15 @@ test "validate reports a rule whose only issue is a matcher/tool mismatch" {
 test "validate rejects a rewrite rule on a tool with no command field" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dir = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(dir);
 
     const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/c.toml", .{dir});
     defer std.testing.allocator.free(path);
     {
-        const f = try std.fs.cwd().createFile(path, .{});
-        defer f.close();
-        try f.writeAll(
+        const f = try std.Io.Dir.cwd().createFile(std.testing.io, path, .{});
+        defer f.close(std.testing.io);
+        try f.writeStreamingAll(std.testing.io,
             \\[[rule]]
             \\id = "local-escape"
             \\action = "rewrite"
@@ -351,10 +351,10 @@ test "validate rejects a rewrite rule on a tool with no command field" {
     }
 
     var buf: [1024]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const code = try run(std.testing.allocator, .{ .config_path = path }, stream.writer());
+    var stream = std.Io.Writer.fixed(&buf);
+    const code = try run(std.testing.allocator, std.testing.io, .{ .config_path = path }, &stream);
 
-    const out = stream.getWritten();
+    const out = stream.buffered();
     // The count-only path and the per-rule display path must agree: exit
     // nonzero AND explain why.
     try std.testing.expectEqual(@as(u8, 1), code);
@@ -365,15 +365,15 @@ test "validate rejects a rewrite rule on a tool with no command field" {
 test "validate accepts a tool_any rule whose matcher fits every listed tool" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dir = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(dir);
 
     const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/c.toml", .{dir});
     defer std.testing.allocator.free(path);
     {
-        const f = try std.fs.cwd().createFile(path, .{});
-        defer f.close();
-        try f.writeAll(
+        const f = try std.Io.Dir.cwd().createFile(std.testing.io, path, .{});
+        defer f.close(std.testing.io);
+        try f.writeStreamingAll(std.testing.io,
             \\[[rule]]
             \\id = "no-gen-edits"
             \\tool_any = ["Write", "Edit"]
@@ -384,10 +384,10 @@ test "validate accepts a tool_any rule whose matcher fits every listed tool" {
     }
 
     var buf: [1024]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const code = try run(std.testing.allocator, .{ .config_path = path }, stream.writer());
+    var stream = std.Io.Writer.fixed(&buf);
+    const code = try run(std.testing.allocator, std.testing.io, .{ .config_path = path }, &stream);
 
-    const out = stream.getWritten();
+    const out = stream.buffered();
     try std.testing.expectEqual(@as(u8, 0), code);
     try std.testing.expect(std.mem.indexOf(u8, out, "OK") != null);
 }

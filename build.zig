@@ -37,19 +37,19 @@ pub fn build(b: *std.Build) void {
     });
 
     // tree-sitter-bash grammar (vendored C sources)
-    exe.addCSourceFiles(.{
+    exe_mod.addCSourceFiles(.{
         .root = b.path("vendor/tree-sitter-bash/src"),
         .files = &.{ "parser.c", "scanner.c" },
         .flags = &.{"-std=c11"},
     });
-    exe.addIncludePath(b.path("vendor/tree-sitter-bash/src"));
+    exe_mod.addIncludePath(b.path("vendor/tree-sitter-bash/src"));
 
     // POSIX regex wrapper (vendored C, avoids opaque regex_t issue on Linux)
-    exe.addCSourceFile(.{
+    exe_mod.addCSourceFile(.{
         .file = b.path("vendor/regex/veer_regex.c"),
         .flags = &.{},
     });
-    exe.addIncludePath(b.path("vendor/regex"));
+    exe_mod.addIncludePath(b.path("vendor/regex"));
 
     b.installArtifact(exe);
 
@@ -74,18 +74,18 @@ pub fn build(b: *std.Build) void {
 
     const t = b.addTest(.{ .root_module = test_mod });
 
-    t.addCSourceFiles(.{
+    test_mod.addCSourceFiles(.{
         .root = b.path("vendor/tree-sitter-bash/src"),
         .files = &.{ "parser.c", "scanner.c" },
         .flags = &.{"-std=c11"},
     });
-    t.addIncludePath(b.path("vendor/tree-sitter-bash/src"));
+    test_mod.addIncludePath(b.path("vendor/tree-sitter-bash/src"));
 
-    t.addCSourceFile(.{
+    test_mod.addCSourceFile(.{
         .file = b.path("vendor/regex/veer_regex.c"),
         .flags = &.{},
     });
-    t.addIncludePath(b.path("vendor/regex"));
+    test_mod.addIncludePath(b.path("vendor/regex"));
 
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&b.addRunArtifact(t).step);
@@ -105,18 +105,18 @@ pub fn build(b: *std.Build) void {
         .root_module = bench_mod,
     });
 
-    bench_exe.addCSourceFiles(.{
+    bench_mod.addCSourceFiles(.{
         .root = b.path("vendor/tree-sitter-bash/src"),
         .files = &.{ "parser.c", "scanner.c" },
         .flags = &.{"-std=c11"},
     });
-    bench_exe.addIncludePath(b.path("vendor/tree-sitter-bash/src"));
+    bench_mod.addIncludePath(b.path("vendor/tree-sitter-bash/src"));
 
-    bench_exe.addCSourceFile(.{
+    bench_mod.addCSourceFile(.{
         .file = b.path("vendor/regex/veer_regex.c"),
         .flags = &.{},
     });
-    bench_exe.addIncludePath(b.path("vendor/regex"));
+    bench_mod.addIncludePath(b.path("vendor/regex"));
 
     const bench_run = b.addRunArtifact(bench_exe);
     const bench_step = b.step("bench", "Run benchmarks");

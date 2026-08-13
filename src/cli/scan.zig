@@ -144,12 +144,12 @@ test "scanContent extracts and aggregates commands" {
     const content = transcript.test_jsonl;
 
     var buf: [4096]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
 
-    const exit_code = try scanContent(std.testing.allocator, content, .{}, null, stream.writer());
+    const exit_code = try scanContent(std.testing.allocator, content, .{}, null, &stream);
 
     try std.testing.expectEqual(@as(u8, 0), exit_code);
-    const output = stream.getWritten();
+    const output = stream.buffered();
     try std.testing.expect(std.mem.indexOf(u8, output, "pytest") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "just") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "python3") != null);
@@ -159,13 +159,13 @@ test "scanContent with min-count filter" {
     const content = transcript.test_jsonl;
 
     var buf: [4096]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
 
     // pytest appears twice, others once. min_count=2 should only show pytest
-    const exit_code = try scanContent(std.testing.allocator, content, .{ .min_count = 2 }, null, stream.writer());
+    const exit_code = try scanContent(std.testing.allocator, content, .{ .min_count = 2 }, null, &stream);
 
     try std.testing.expectEqual(@as(u8, 0), exit_code);
-    const output = stream.getWritten();
+    const output = stream.buffered();
     try std.testing.expect(std.mem.indexOf(u8, output, "pytest") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "python3") == null);
 }
@@ -174,12 +174,12 @@ test "scanContent toml output" {
     const content = transcript.test_jsonl;
 
     var buf: [4096]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
 
-    const exit_code = try scanContent(std.testing.allocator, content, .{ .output_toml = true }, null, stream.writer());
+    const exit_code = try scanContent(std.testing.allocator, content, .{ .output_toml = true }, null, &stream);
 
     try std.testing.expectEqual(@as(u8, 0), exit_code);
-    const output = stream.getWritten();
+    const output = stream.buffered();
     try std.testing.expect(std.mem.indexOf(u8, output, "[[rule]]") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "command = ") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "Auto-generated") != null);
@@ -193,12 +193,12 @@ test "scanContent with permissions" {
     defer reader.deinit();
 
     var buf: [4096]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
 
-    const exit_code = try scanContent(std.testing.allocator, jsonl, .{ .permissions = true }, reader, stream.writer());
+    const exit_code = try scanContent(std.testing.allocator, jsonl, .{ .permissions = true }, reader, &stream);
 
     try std.testing.expectEqual(@as(u8, 0), exit_code);
-    const output = stream.getWritten();
+    const output = stream.buffered();
     // Should have Permission column
     try std.testing.expect(std.mem.indexOf(u8, output, "Permission") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "denied") != null);
@@ -206,11 +206,11 @@ test "scanContent with permissions" {
 
 test "scanContent with empty input" {
     var buf: [256]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
 
-    const exit_code = try scanContent(std.testing.allocator, "", .{}, null, stream.writer());
+    const exit_code = try scanContent(std.testing.allocator, "", .{}, null, &stream);
 
     try std.testing.expectEqual(@as(u8, 0), exit_code);
-    const output = stream.getWritten();
+    const output = stream.buffered();
     try std.testing.expect(std.mem.indexOf(u8, output, "No Bash commands") != null);
 }

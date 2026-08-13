@@ -28,23 +28,25 @@ just fuzz       # Interactive, runs until Ctrl-C
 just fuzz-ci 20 # CI mode, runs for 20 seconds
 ```
 
-## Current Status: Zig 0.15.x Fuzzer Broken
+## Current Status: `--fuzz` Broken In The Toolchain
 
-The `zig build test --fuzz` mode crashes due to known bugs in Zig's stdlib:
+`zig build test --fuzz` does not run. The build fails inside Zig's own bundled
+test runner, before any veer code is reached:
 
-- [ziglang/zig#25470](https://github.com/ziglang/zig/issues/25470) -- "zig build test --fuzz stopped working in 0.15.1" (our exact crash)
+```
+compiler/test_runner.zig:566:55: error: expected type '*const debug.StackTrace',
+found '*builtin.StackTrace'
+```
+
+Related upstream issues:
+
 - [ziglang/zig#26040](https://github.com/ziglang/zig/issues/26040) -- multiple fuzz tests segfault
 - [ziglang/zig#20986](https://github.com/ziglang/zig/issues/20986) -- macOS not supported
 - [ziglang/zig#25883](https://github.com/ziglang/zig/issues/25883) -- fuzz tests ignored if more tests than CPU threads
 
-The crash is in `Build/Fuzz.zig:429` where LLVM coverage instrumentation produces
-empty PC address tables. This likely happens because our vendored C code (tree-sitter,
-SQLite, regex wrapper) does not get properly instrumented. There is no workaround --
-`FuzzInputOptions` only exposes `corpus`, with no way to disable coverage tracking.
-
-The fuzz test functions are correct and compile fine. They run as regular tests via
-`just test`. Only the `--fuzz` mode (coverage-guided mutation) is broken at the Zig
-toolchain level.
+The fuzz test functions themselves are correct and compile. They run as ordinary
+tests via `just test`, which still exercises their assertions against the corpus
+and an empty input. Only the coverage-guided mutation mode is unavailable.
 
 ### macOS
 

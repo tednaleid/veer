@@ -7,9 +7,13 @@ const Rule = @import("config/rule.zig").Rule;
 const path_mod = @import("engine/path.zig");
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
 
     // Representative rules (10 rules, mix of types)
     const rules = [_]Rule{
@@ -50,7 +54,7 @@ pub fn main() !void {
     }
 
     // Benchmark
-    var timer = try std.time.Timer.start();
+    const start: std.Io.Timestamp = .now(io, .awake);
 
     for (0..iterations) |_| {
         for (commands) |cmd| {
@@ -58,7 +62,7 @@ pub fn main() !void {
         }
     }
 
-    const elapsed_ns = timer.read();
+    const elapsed_ns: u64 = @intCast(start.durationTo(.now(io, .awake)).nanoseconds);
     const per_check_ns = elapsed_ns / total_checks;
     const per_check_us = per_check_ns / 1000;
     const total_ms = elapsed_ns / 1_000_000;
@@ -95,11 +99,11 @@ pub fn main() !void {
         std.mem.doNotOptimizeAway(path_mod.matches("apps/**/*.vue", resolved, null));
     }
 
-    var path_timer = try std.time.Timer.start();
+    const path_start: std.Io.Timestamp = .now(io, .awake);
     for (0..path_iterations) |_| {
         std.mem.doNotOptimizeAway(path_mod.matches("apps/**/*.vue", resolved, null));
     }
-    const path_elapsed_ns = path_timer.read();
+    const path_elapsed_ns: u64 = @intCast(path_start.durationTo(.now(io, .awake)).nanoseconds);
     const path_per_check_ns = path_elapsed_ns / path_iterations;
 
     std.debug.print(

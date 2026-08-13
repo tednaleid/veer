@@ -21,10 +21,16 @@ const settings_mod = @import("claude/settings.zig");
 
 const Command = enum { check, install, uninstall, list, add, remove, stats, scan, @"test", validate };
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+pub fn main(init: std.process.Init.Minimal) !void {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+
+    const environ = init.environ;
+
+    var threaded: std.Io.Threaded = .init(allocator, .{ .environ = environ });
+    defer threaded.deinit();
+    const io = threaded.io();
 
     const main_params = comptime clap.parseParamsComptime(
         \\-h, --help     Display this help and exit.
@@ -34,7 +40,7 @@ pub fn main() !void {
     );
     const main_parsers = .{ .command = clap.parsers.enumeration(Command) };
 
-    var iter = try std.process.ArgIterator.initWithAllocator(allocator);
+    var iter = try init.args.iterateAllocator(allocator);
     defer iter.deinit();
     _ = iter.next(); // skip program name
 
@@ -44,7 +50,7 @@ pub fn main() !void {
         .allocator = allocator,
         .terminating_positional = 0,
     }) catch |err| {
-        diag.reportToFile(.stderr(), err) catch {};
+        diag.reportToFile(io, .stderr(), err) catch {};
         std.debug.print("Try 'veer --help' for usage.\n", .{});
         std.process.exit(1);
     };
@@ -65,16 +71,16 @@ pub fn main() !void {
     };
 
     switch (cmd) {
-        .check => try runCheck(allocator, &iter),
-        .install => try runInstall(allocator, &iter),
-        .uninstall => try runUninstall(allocator, &iter),
-        .list => try runList(allocator, &iter),
-        .add => try runAdd(allocator, &iter),
-        .remove => try runRemove(allocator, &iter),
-        .stats => try runStats(allocator, &iter),
-        .scan => try runScan(allocator, &iter),
-        .@"test" => try runTest(allocator, &iter),
-        .validate => try runValidate(allocator, &iter),
+        .check => try runCheck(allocator, io, environ, &iter),
+        .install => try runInstall(allocator, io, environ, &iter),
+        .uninstall => try runUninstall(allocator, io, environ, &iter),
+        .list => try runList(allocator, io, environ, &iter),
+        .add => try runAdd(allocator, io, environ, &iter),
+        .remove => try runRemove(allocator, io, environ, &iter),
+        .stats => try runStats(allocator, io, environ, &iter),
+        .scan => try runScan(allocator, io, &iter),
+        .@"test" => try runTest(allocator, io, environ, &iter),
+        .validate => try runValidate(allocator, io, environ, &iter),
     }
 }
 
@@ -90,9 +96,9 @@ const LoadedConfig = struct {
 };
 
 /// Load config from explicit path or auto-discover. Exits on failure.
-fn loadConfig(allocator: std.mem.Allocator, config_path: ?[]const u8) LoadedConfig {
+fn loadConfig(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ, config_path: ?[]const u8) LoadedConfig {
     if (config_path) |path| {
-        if (config_mod.loadFile(allocator, path)) |result| {
+        if (config_mod.loadFile(allocator, io, path)) |result| {
             return .{
                 .rules = result.value.rule,
                 .settings = result.value.settings,
@@ -106,7 +112,7 @@ fn loadConfig(allocator: std.mem.Allocator, config_path: ?[]const u8) LoadedConf
         }
     }
 
-    if (config_mod.loadMerged(allocator)) |result| {
+    if (config_mod.loadMerged(allocator, io, environ)) |result| {
         return .{
             .rules = result.config.rule,
             .settings = result.config.settings,
@@ -116,7 +122,7 @@ fn loadConfig(allocator: std.mem.Allocator, config_path: ?[]const u8) LoadedConf
         };
     } else |err| {
         if (err == error.NoConfigFound) {
-            printNoConfigSearchPath(allocator);
+            printNoConfigSearchPath(allocator, io, environ);
             std.debug.print("Create .veer/config.toml or run `veer install`.\n", .{});
         } else {
             std.debug.print("veer: failed to load config: {}\n", .{err});
@@ -128,13 +134,13 @@ fn loadConfig(allocator: std.mem.Allocator, config_path: ?[]const u8) LoadedConf
 /// Print "no config found" plus the cwd that was searched and
 /// `$CLAUDE_PROJECT_DIR` if it was set. Best-effort: if cwd resolution fails
 /// we still print a useful header.
-fn printNoConfigSearchPath(allocator: std.mem.Allocator) void {
+fn printNoConfigSearchPath(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ) void {
     std.debug.print("veer: no config found (looked for .veer/config.local.toml, .veer/config.toml, and ~/.config/veer/config.toml)\n", .{});
-    if (std.fs.cwd().realpathAlloc(allocator, ".")) |cwd| {
+    if (std.process.currentPathAlloc(io, allocator)) |cwd| {
         defer allocator.free(cwd);
         std.debug.print("  cwd: {s} (walked up to /, no config)\n", .{cwd});
     } else |_| {}
-    if (std.posix.getenv("CLAUDE_PROJECT_DIR")) |dir| {
+    if (environ.getPosix("CLAUDE_PROJECT_DIR")) |dir| {
         std.debug.print("  CLAUDE_PROJECT_DIR: {s} (no .veer/config.toml there either)\n", .{dir});
     }
 }
@@ -143,12 +149,12 @@ fn printNoConfigSearchPath(allocator: std.mem.Allocator) void {
 /// with a hook-oriented message that reaches the LLM via Claude Code's
 /// exit-2 semantics. Silently allowing on misconfiguration would defeat the
 /// purpose of the hook.
-fn loadConfigForCheck(allocator: std.mem.Allocator, config_path: ?[]const u8) LoadedConfig {
+fn loadConfigForCheck(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ, config_path: ?[]const u8) LoadedConfig {
     if (config_path) |path| {
         var detail: ?config_mod.ParseDetail = null;
         defer if (detail) |*d| d.deinit(allocator);
 
-        if (config_mod.loadFileDetailed(allocator, path, &detail)) |result| {
+        if (config_mod.loadFileDetailed(allocator, io, path, &detail)) |result| {
             return .{
                 .rules = result.value.rule,
                 .settings = result.value.settings,
@@ -174,7 +180,7 @@ fn loadConfigForCheck(allocator: std.mem.Allocator, config_path: ?[]const u8) Lo
         }
     }
 
-    if (config_mod.loadMerged(allocator)) |result| {
+    if (config_mod.loadMerged(allocator, io, environ)) |result| {
         return .{
             .rules = result.config.rule,
             .settings = result.config.settings,
@@ -184,7 +190,7 @@ fn loadConfigForCheck(allocator: std.mem.Allocator, config_path: ?[]const u8) Lo
         };
     } else |err| {
         if (err == error.NoConfigFound) {
-            printNoConfigSearchPath(allocator);
+            printNoConfigSearchPath(allocator, io, environ);
             std.debug.print(
                 \\The veer PreToolUse hook is installed but has no rules loaded, so every Bash
                 \\tool call is being blocked. Fix with:
@@ -200,15 +206,15 @@ fn loadConfigForCheck(allocator: std.mem.Allocator, config_path: ?[]const u8) Lo
 }
 
 /// Handle a subcommand parse error by reporting it and exiting nonzero.
-fn subcommandParseFail(diag: *clap.Diagnostic, err: anyerror, name: []const u8) noreturn {
-    diag.reportToFile(.stderr(), err) catch {};
+fn subcommandParseFail(io: std.Io, diag: *clap.Diagnostic, err: anyerror, name: []const u8) noreturn {
+    diag.reportToFile(io, .stderr(), err) catch {};
     std.debug.print("Try 'veer {s} --help' for usage.\n", .{name});
     std.process.exit(1);
 }
 
 /// Print per-subcommand help to stdout and exit 0.
-fn printSubHelp(comptime params: []const clap.Param(clap.Help)) noreturn {
-    clap.helpToFile(.stdout(), clap.Help, params, .{}) catch {};
+fn printSubHelp(io: std.Io, comptime params: []const clap.Param(clap.Help)) noreturn {
+    clap.helpToFile(io, .stdout(), clap.Help, params, .{}) catch {};
     std.process.exit(0);
 }
 
@@ -216,9 +222,9 @@ fn printSubHelp(comptime params: []const clap.Param(clap.Help)) noreturn {
 /// Uses a single buffered writer so description and flags stay in order
 /// (clap.helpToFile uses a positioned-write writer that would overwrite
 /// anything already written to the file).
-fn printSubHelpWithDesc(desc: []const u8, comptime params: []const clap.Param(clap.Help)) noreturn {
+fn printSubHelpWithDesc(io: std.Io, desc: []const u8, comptime params: []const clap.Param(clap.Help)) noreturn {
     var buf: [2048]u8 = undefined;
-    var file_writer = std.fs.File.stdout().writer(&buf);
+    var file_writer = std.Io.File.stdout().writer(io, &buf);
     const w = &file_writer.interface;
     w.writeAll(desc) catch {};
     w.writeAll("\n") catch {};
@@ -227,7 +233,7 @@ fn printSubHelpWithDesc(desc: []const u8, comptime params: []const clap.Param(cl
     std.process.exit(0);
 }
 
-fn runCheck(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
+fn runCheck(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ, iter: *std.process.Args.Iterator) !void {
     const params = comptime clap.parseParamsComptime(
         \\-h, --help          Display this help and exit.
         \\    --config <str>  Path to config file.
@@ -241,53 +247,57 @@ fn runCheck(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void 
     var res = clap.parseEx(clap.Help, &params, clap.parsers.default, iter, .{
         .diagnostic = &diag,
         .allocator = allocator,
-    }) catch |err| subcommandParseFail(&diag, err, "check");
+    }) catch |err| subcommandParseFail(io, &diag, err, "check");
     defer res.deinit();
 
-    if (res.args.help != 0) printSubHelp(&params);
+    if (res.args.help != 0) printSubHelp(io, &params);
 
     const config_path: ?[]const u8 = res.args.config;
     const verbose: bool = res.args.verbose != 0;
 
-    var loaded = loadConfigForCheck(allocator, config_path);
+    var loaded = loadConfigForCheck(allocator, io, environ, config_path);
     defer if (loaded.parsed_file) |*pf| pf.deinit();
     defer if (loaded.merged) |*m| m.deinit(allocator);
 
-    const stdin_data = std.fs.File.stdin().readToEndAlloc(allocator, 1024 * 1024) catch {
+    var stdin_buf: [4096]u8 = undefined;
+    var stdin_reader = std.Io.File.stdin().readerStreaming(io, &stdin_buf);
+    const stdin_data = stdin_reader.interface.allocRemaining(allocator, .limited(1024 * 1024)) catch {
         std.debug.print("veer: failed to read stdin\n", .{});
         std.process.exit(1);
     };
     defer allocator.free(stdin_data);
 
     var stdout_buf: [4096]u8 = undefined;
-    var stdout_stream = std.io.fixedBufferStream(&stdout_buf);
+    var stdout_stream = std.Io.Writer.fixed(&stdout_buf);
     var stderr_buf: [4096]u8 = undefined;
-    var stderr_stream = std.io.fixedBufferStream(&stderr_buf);
+    var stderr_stream = std.Io.Writer.fixed(&stderr_buf);
 
     const root: ?[]const u8 = if (loaded.merged) |m| m.projectRoot() else null;
 
     const exit_code = check_cmd.run(
         allocator,
+        io,
         loaded.rules,
         root,
+        environ.getPosix("HOME"),
         stdin_data,
-        stdout_stream.writer(),
-        stderr_stream.writer(),
+        &stdout_stream,
+        &stderr_stream,
         verbose,
     ) catch {
         std.debug.print("veer: internal error during check\n", .{});
         std.process.exit(1);
     };
 
-    const stdout_output = stdout_stream.getWritten();
-    const stderr_output = stderr_stream.getWritten();
-    if (stdout_output.len > 0) _ = std.fs.File.stdout().write(stdout_output) catch {};
-    if (stderr_output.len > 0) _ = std.fs.File.stderr().write(stderr_output) catch {};
+    const stdout_output = stdout_stream.buffered();
+    const stderr_output = stderr_stream.buffered();
+    if (stdout_output.len > 0) std.Io.File.stdout().writeStreamingAll(io, stdout_output) catch {};
+    if (stderr_output.len > 0) std.Io.File.stderr().writeStreamingAll(io, stderr_output) catch {};
 
     std.process.exit(exit_code);
 }
 
-fn runInstall(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
+fn runInstall(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ, iter: *std.process.Args.Iterator) !void {
     const params = comptime clap.parseParamsComptime(
         \\-h, --help     Display this help and exit.
         \\    --local    Fully private install: hook in settings.local.json, config.local.toml, no project skill.
@@ -329,23 +339,23 @@ fn runInstall(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !voi
     var res = clap.parseEx(clap.Help, &params, clap.parsers.default, iter, .{
         .diagnostic = &diag,
         .allocator = allocator,
-    }) catch |err| subcommandParseFail(&diag, err, "install");
+    }) catch |err| subcommandParseFail(io, &diag, err, "install");
     defer res.deinit();
 
-    if (res.args.help != 0) printSubHelpWithDesc(install_desc, &params);
+    if (res.args.help != 0) printSubHelpWithDesc(io, install_desc, &params);
 
     const scope = resolveScope(res.args.local != 0, res.args.global != 0, "install");
     const verbose: bool = res.args.verbose != 0;
 
-    const paths = install_cmd.resolvePaths(allocator, scope) catch |err| {
+    const paths = install_cmd.resolvePaths(allocator, environ, scope) catch |err| {
         std.debug.print("veer install: {}\n", .{err});
         std.process.exit(1);
     };
     defer install_cmd.freePaths(allocator, paths, scope);
 
     var buf: [4096]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = install_cmd.install(allocator, paths, verbose, stream.writer()) catch |err| {
+    var stream = std.Io.Writer.fixed(&buf);
+    const exit_code = install_cmd.install(allocator, io, paths, verbose, &stream) catch |err| {
         std.debug.print("veer install: {}\n", .{err});
         std.process.exit(1);
     };
@@ -353,17 +363,17 @@ fn runInstall(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !voi
     if (exit_code == 0 and scope == .local) {
         // Best-effort: keep .veer/config.local.toml out of git via the repo's
         // per-repo, uncommitted .git/info/exclude. No-op outside a git repo.
-        install_cmd.ensureLocalConfigExcluded(allocator, paths.config, stream.writer()) catch |err| {
+        install_cmd.ensureLocalConfigExcluded(allocator, io, paths.config, &stream) catch |err| {
             std.debug.print("veer install: warning: could not register .git/info/exclude entry: {}\n", .{err});
         };
     }
 
-    const output = stream.getWritten();
-    if (output.len > 0) _ = std.fs.File.stdout().write(output) catch {};
+    const output = stream.buffered();
+    if (output.len > 0) std.Io.File.stdout().writeStreamingAll(io, output) catch {};
     std.process.exit(exit_code);
 }
 
-fn runUninstall(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
+fn runUninstall(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ, iter: *std.process.Args.Iterator) !void {
     const params = comptime clap.parseParamsComptime(
         \\-h, --help    Display this help and exit.
         \\    --local   Uninstall the private install: settings.local.json hook and config.local.toml.
@@ -394,28 +404,28 @@ fn runUninstall(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !v
     var res = clap.parseEx(clap.Help, &params, clap.parsers.default, iter, .{
         .diagnostic = &diag,
         .allocator = allocator,
-    }) catch |err| subcommandParseFail(&diag, err, "uninstall");
+    }) catch |err| subcommandParseFail(io, &diag, err, "uninstall");
     defer res.deinit();
 
-    if (res.args.help != 0) printSubHelpWithDesc(uninstall_desc, &params);
+    if (res.args.help != 0) printSubHelpWithDesc(io, uninstall_desc, &params);
 
     const scope = resolveScope(res.args.local != 0, res.args.global != 0, "uninstall");
 
-    const paths = install_cmd.resolvePaths(allocator, scope) catch |err| {
+    const paths = install_cmd.resolvePaths(allocator, environ, scope) catch |err| {
         std.debug.print("veer uninstall: {}\n", .{err});
         std.process.exit(1);
     };
     defer install_cmd.freePaths(allocator, paths, scope);
 
     var buf: [4096]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = install_cmd.uninstall(allocator, paths, stream.writer()) catch |err| {
+    var stream = std.Io.Writer.fixed(&buf);
+    const exit_code = install_cmd.uninstall(allocator, io, paths, &stream) catch |err| {
         std.debug.print("veer uninstall: {}\n", .{err});
         std.process.exit(1);
     };
 
-    const output = stream.getWritten();
-    if (output.len > 0) _ = std.fs.File.stdout().write(output) catch {};
+    const output = stream.buffered();
+    if (output.len > 0) std.Io.File.stdout().writeStreamingAll(io, output) catch {};
     std.process.exit(exit_code);
 }
 
@@ -429,7 +439,7 @@ fn resolveScope(local: bool, global: bool, verb: []const u8) install_cmd.Scope {
     return .project;
 }
 
-fn runList(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
+fn runList(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ, iter: *std.process.Args.Iterator) !void {
     const params = comptime clap.parseParamsComptime(
         \\-h, --help          Display this help and exit.
         \\    --config <str>  Path to config file.
@@ -439,30 +449,30 @@ fn runList(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
     var res = clap.parseEx(clap.Help, &params, clap.parsers.default, iter, .{
         .diagnostic = &diag,
         .allocator = allocator,
-    }) catch |err| subcommandParseFail(&diag, err, "list");
+    }) catch |err| subcommandParseFail(io, &diag, err, "list");
     defer res.deinit();
 
-    if (res.args.help != 0) printSubHelp(&params);
+    if (res.args.help != 0) printSubHelp(io, &params);
 
     const config_path: ?[]const u8 = res.args.config;
 
-    var loaded = loadConfig(allocator, config_path);
+    var loaded = loadConfig(allocator, io, environ, config_path);
     defer if (loaded.parsed_file) |*pf| pf.deinit();
     defer if (loaded.merged) |*m| m.deinit(allocator);
 
     var buf: [4096]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = list_cmd.run(allocator, loaded.rules, loaded.sources, stream.writer()) catch {
+    var stream = std.Io.Writer.fixed(&buf);
+    const exit_code = list_cmd.run(allocator, loaded.rules, loaded.sources, &stream) catch {
         std.debug.print("veer list: internal error\n", .{});
         std.process.exit(1);
     };
 
-    const output = stream.getWritten();
-    if (output.len > 0) _ = std.fs.File.stdout().write(output) catch {};
+    const output = stream.buffered();
+    if (output.len > 0) std.Io.File.stdout().writeStreamingAll(io, output) catch {};
     std.process.exit(exit_code);
 }
 
-fn runAdd(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
+fn runAdd(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ, iter: *std.process.Args.Iterator) !void {
     const params = comptime clap.parseParamsComptime(
         \\-h, --help              Display this help and exit.
         \\    --action <str>      Rule action (allow, reject, rewrite).
@@ -482,12 +492,12 @@ fn runAdd(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
     var res = clap.parseEx(clap.Help, &params, clap.parsers.default, iter, .{
         .diagnostic = &diag,
         .allocator = allocator,
-    }) catch |err| subcommandParseFail(&diag, err, "add");
+    }) catch |err| subcommandParseFail(io, &diag, err, "add");
     defer res.deinit();
 
-    if (res.args.help != 0) printSubHelp(&params);
+    if (res.args.help != 0) printSubHelp(io, &params);
 
-    var resolved = resolveRuleConfigPathOrExit(allocator, res.args.local != 0, res.args.global != 0, res.args.config, "add");
+    var resolved = resolveRuleConfigPathOrExit(allocator, environ, res.args.local != 0, res.args.global != 0, res.args.config, "add");
     defer resolved.deinit(allocator);
 
     const opts = add_cmd.AddOptions{
@@ -503,18 +513,18 @@ fn runAdd(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
     };
 
     var buf: [1024]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = add_cmd.run(allocator, opts, stream.writer()) catch {
+    var stream = std.Io.Writer.fixed(&buf);
+    const exit_code = add_cmd.run(allocator, io, opts, &stream) catch {
         std.debug.print("veer add: internal error\n", .{});
         std.process.exit(1);
     };
 
-    const output = stream.getWritten();
-    if (output.len > 0) _ = std.fs.File.stdout().write(output) catch {};
+    const output = stream.buffered();
+    if (output.len > 0) std.Io.File.stdout().writeStreamingAll(io, output) catch {};
     std.process.exit(exit_code);
 }
 
-fn runRemove(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
+fn runRemove(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ, iter: *std.process.Args.Iterator) !void {
     const params = comptime clap.parseParamsComptime(
         \\-h, --help          Display this help and exit.
         \\    --config <str>  Path to config file (default: .veer/config.toml).
@@ -527,10 +537,10 @@ fn runRemove(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void
     var res = clap.parseEx(clap.Help, &params, clap.parsers.default, iter, .{
         .diagnostic = &diag,
         .allocator = allocator,
-    }) catch |err| subcommandParseFail(&diag, err, "remove");
+    }) catch |err| subcommandParseFail(io, &diag, err, "remove");
     defer res.deinit();
 
-    if (res.args.help != 0) printSubHelp(&params);
+    if (res.args.help != 0) printSubHelp(io, &params);
 
     const rule_id = res.positionals[0] orelse {
         std.debug.print("veer remove: rule ID required\n", .{});
@@ -538,22 +548,22 @@ fn runRemove(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void
         std.process.exit(1);
     };
 
-    var resolved = resolveRuleConfigPathOrExit(allocator, res.args.local != 0, res.args.global != 0, res.args.config, "remove");
+    var resolved = resolveRuleConfigPathOrExit(allocator, environ, res.args.local != 0, res.args.global != 0, res.args.config, "remove");
     defer resolved.deinit(allocator);
 
     var buf: [1024]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = remove_cmd.run(allocator, rule_id, resolved.path, stream.writer()) catch {
+    var stream = std.Io.Writer.fixed(&buf);
+    const exit_code = remove_cmd.run(allocator, io, rule_id, resolved.path, &stream) catch {
         std.debug.print("veer remove: internal error\n", .{});
         std.process.exit(1);
     };
 
-    const output = stream.getWritten();
-    if (output.len > 0) _ = std.fs.File.stdout().write(output) catch {};
+    const output = stream.buffered();
+    if (output.len > 0) std.Io.File.stdout().writeStreamingAll(io, output) catch {};
     std.process.exit(exit_code);
 }
 
-fn runStats(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
+fn runStats(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ, iter: *std.process.Args.Iterator) !void {
     const params = comptime clap.parseParamsComptime(
         \\-h, --help              Display this help and exit.
         \\    --since <str>       Time window (e.g. "1h", "24h", "7d"). Default: all time.
@@ -564,10 +574,10 @@ fn runStats(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void 
     var res = clap.parseEx(clap.Help, &params, clap.parsers.default, iter, .{
         .diagnostic = &diag,
         .allocator = allocator,
-    }) catch |err| subcommandParseFail(&diag, err, "stats");
+    }) catch |err| subcommandParseFail(io, &diag, err, "stats");
     defer res.deinit();
 
-    if (res.args.help != 0) printSubHelp(&params);
+    if (res.args.help != 0) printSubHelp(io, &params);
 
     const since_ms: ?u64 = if (res.args.since) |s| blk: {
         const parsed = stats_cmd.parseSince(s) orelse {
@@ -580,29 +590,28 @@ fn runStats(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void 
     const projects_root: []const u8 = if (res.args.projects) |p|
         try allocator.dupe(u8, p)
     else blk: {
-        const home = std.process.getEnvVarOwned(allocator, "HOME") catch {
+        const home = environ.getPosix("HOME") orelse {
             std.debug.print("veer stats: $HOME not set; pass --projects <path>\n", .{});
             std.process.exit(1);
         };
-        defer allocator.free(home);
         break :blk try std.fmt.allocPrint(allocator, "{s}/.claude/projects", .{home});
     };
     defer allocator.free(projects_root);
 
     // Stream output to stdout directly; transcripts can produce > a few KB.
     var stdout_buf: [16 * 1024]u8 = undefined;
-    var stdout_stream = std.io.fixedBufferStream(&stdout_buf);
-    const exit_code = stats_cmd.run(allocator, projects_root, since_ms, stdout_stream.writer()) catch {
+    var stdout_stream = std.Io.Writer.fixed(&stdout_buf);
+    const exit_code = stats_cmd.run(allocator, io, projects_root, since_ms, &stdout_stream) catch {
         std.debug.print("veer stats: internal error\n", .{});
         std.process.exit(1);
     };
 
-    const output = stdout_stream.getWritten();
-    if (output.len > 0) _ = std.fs.File.stdout().write(output) catch {};
+    const output = stdout_stream.buffered();
+    if (output.len > 0) std.Io.File.stdout().writeStreamingAll(io, output) catch {};
     std.process.exit(exit_code);
 }
 
-fn runScan(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
+fn runScan(allocator: std.mem.Allocator, io: std.Io, iter: *std.process.Args.Iterator) !void {
     const params = comptime clap.parseParamsComptime(
         \\-h, --help                Display this help and exit.
         \\    --global              Scan global transcripts.
@@ -617,10 +626,10 @@ fn runScan(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
     var res = clap.parseEx(clap.Help, &params, clap.parsers.default, iter, .{
         .diagnostic = &diag,
         .allocator = allocator,
-    }) catch |err| subcommandParseFail(&diag, err, "scan");
+    }) catch |err| subcommandParseFail(io, &diag, err, "scan");
     defer res.deinit();
 
-    if (res.args.help != 0) printSubHelp(&params);
+    if (res.args.help != 0) printSubHelp(io, &params);
 
     var opts = scan_cmd.ScanOptions{};
     opts.global = res.args.global != 0;
@@ -633,7 +642,7 @@ fn runScan(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
 
     // Load transcript content
     const content = if (transcript_path) |path|
-        std.fs.cwd().readFileAlloc(allocator, path, 100 * 1024 * 1024) catch {
+        std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(100 * 1024 * 1024)) catch {
             std.debug.print("veer scan: cannot read {s}\n", .{path});
             std.process.exit(1);
         }
@@ -650,23 +659,23 @@ fn runScan(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
     defer if (settings) |*sr| sr.deinit();
     if (opts.permissions) {
         if (settings_path) |path| {
-            settings = settings_mod.SettingsReader.loadFile(allocator, path) catch null;
+            settings = settings_mod.SettingsReader.loadFile(allocator, io, path) catch null;
         }
     }
 
     var buf: [16384]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = scan_cmd.scanContent(allocator, content, opts, settings, stream.writer()) catch {
+    var stream = std.Io.Writer.fixed(&buf);
+    const exit_code = scan_cmd.scanContent(allocator, content, opts, settings, &stream) catch {
         std.debug.print("veer scan: internal error\n", .{});
         std.process.exit(1);
     };
 
-    const output = stream.getWritten();
-    if (output.len > 0) _ = std.fs.File.stdout().write(output) catch {};
+    const output = stream.buffered();
+    if (output.len > 0) std.Io.File.stdout().writeStreamingAll(io, output) catch {};
     std.process.exit(exit_code);
 }
 
-fn runTest(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
+fn runTest(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ, iter: *std.process.Args.Iterator) !void {
     const params = comptime clap.parseParamsComptime(
         \\-h, --help                Display this help and exit.
         \\    --config <str>        Path to config file.
@@ -681,10 +690,10 @@ fn runTest(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
     var res = clap.parseEx(clap.Help, &params, clap.parsers.default, iter, .{
         .diagnostic = &diag,
         .allocator = allocator,
-    }) catch |err| subcommandParseFail(&diag, err, "test");
+    }) catch |err| subcommandParseFail(io, &diag, err, "test");
     defer res.deinit();
 
-    if (res.args.help != 0) printSubHelp(&params);
+    if (res.args.help != 0) printSubHelp(io, &params);
 
     const opts = test_cmd.TestOptions{
         .command = res.positionals[0],
@@ -692,26 +701,27 @@ fn runTest(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
         .tool = res.args.tool orelse "Bash",
         .path = res.args.path,
         .content_file = res.args.@"content-file",
+        .home = environ.getPosix("HOME"),
     };
     const config_path: ?[]const u8 = res.args.config;
 
-    var loaded = loadConfig(allocator, config_path);
+    var loaded = loadConfig(allocator, io, environ, config_path);
     defer if (loaded.parsed_file) |*pf| pf.deinit();
     defer if (loaded.merged) |*m| m.deinit(allocator);
 
     var buf: [4096]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = test_cmd.run(allocator, loaded.rules, loaded.sources, opts, stream.writer()) catch {
+    var stream = std.Io.Writer.fixed(&buf);
+    const exit_code = test_cmd.run(allocator, io, loaded.rules, loaded.sources, opts, &stream) catch {
         std.debug.print("veer test: internal error\n", .{});
         std.process.exit(1);
     };
 
-    const output = stream.getWritten();
-    if (output.len > 0) _ = std.fs.File.stdout().write(output) catch {};
+    const output = stream.buffered();
+    if (output.len > 0) std.Io.File.stdout().writeStreamingAll(io, output) catch {};
     std.process.exit(exit_code);
 }
 
-fn runValidate(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
+fn runValidate(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ, iter: *std.process.Args.Iterator) !void {
     const params = comptime clap.parseParamsComptime(
         \\-h, --help          Display this help and exit.
         \\    --config <str>  Path to config file (default: .veer/config.toml).
@@ -723,35 +733,35 @@ fn runValidate(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !vo
     var res = clap.parseEx(clap.Help, &params, clap.parsers.default, iter, .{
         .diagnostic = &diag,
         .allocator = allocator,
-    }) catch |err| subcommandParseFail(&diag, err, "validate");
+    }) catch |err| subcommandParseFail(io, &diag, err, "validate");
     defer res.deinit();
 
-    if (res.args.help != 0) printSubHelp(&params);
+    if (res.args.help != 0) printSubHelp(io, &params);
 
-    var resolved = resolveRuleConfigPathOrExit(allocator, res.args.local != 0, res.args.global != 0, res.args.config, "validate");
+    var resolved = resolveRuleConfigPathOrExit(allocator, environ, res.args.local != 0, res.args.global != 0, res.args.config, "validate");
     defer resolved.deinit(allocator);
 
     var buf: [4096]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = validate_cmd.run(allocator, .{ .config_path = resolved.path }, stream.writer()) catch {
+    var stream = std.Io.Writer.fixed(&buf);
+    const exit_code = validate_cmd.run(allocator, io, .{ .config_path = resolved.path }, &stream) catch {
         std.debug.print("veer validate: internal error\n", .{});
         std.process.exit(1);
     };
 
-    const output = stream.getWritten();
-    if (output.len > 0) _ = std.fs.File.stdout().write(output) catch {};
+    const output = stream.buffered();
+    if (output.len > 0) std.Io.File.stdout().writeStreamingAll(io, output) catch {};
     std.process.exit(exit_code);
 }
 
 /// Wrapper around `config_path_mod.resolve` that maps errors to user-facing
 /// messages and exits the process. Keeps the runAdd/runRemove/runValidate
 /// dispatchers compact.
-fn resolveRuleConfigPathOrExit(allocator: std.mem.Allocator, local: bool, global: bool, config_arg: ?[]const u8, verb: []const u8) config_path_mod.Resolved {
+fn resolveRuleConfigPathOrExit(allocator: std.mem.Allocator, environ: std.process.Environ, local: bool, global: bool, config_arg: ?[]const u8, verb: []const u8) config_path_mod.Resolved {
     const target = config_path_mod.targetFromFlags(local, global, config_arg) catch {
         std.debug.print("veer {s}: --local, --global, and --config are mutually exclusive\n", .{verb});
         std.process.exit(1);
     };
-    return config_path_mod.resolve(allocator, target) catch |err| switch (err) {
+    return config_path_mod.resolve(allocator, environ, target) catch |err| switch (err) {
         error.NoHome => {
             std.debug.print("veer {s}: --global requires $HOME to be set\n", .{verb});
             std.process.exit(1);

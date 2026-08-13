@@ -18,20 +18,33 @@ See `Justfile` for all build, test, and smoke test recipes. Key commands:
 Red/green testing: write a failing test before implementing, then make it pass.
 All commits should pass `just check`.
 
-Requires **Zig 0.15.2** (install via `brew install zig@0.15`). The stdlib source
+Requires **Zig 0.16.0** (install via `brew install zig`). The stdlib source
 is the best API reference:
-`/opt/homebrew/Cellar/zig@0.15/0.15.2/lib/zig/std/`
+`/opt/homebrew/Cellar/zig/0.16.0/lib/zig/std/`
 
-Does not build on Zig 0.16 -- see README "Zig 0.16 compatibility" for the
-upstream blocker (`zig-tree-sitter` using removed/relocated Build APIs).
-
-Zig 0.15 has breaking changes from 0.14 -- do not trust code examples from
+Zig 0.16 has breaking changes from 0.15 -- do not trust code examples from
 earlier versions. Key differences:
-- `addExecutable` takes a `root_module` (created via `b.createModule`), not `root_source_file`
-- `ArrayList` is now unmanaged: use `std.ArrayListUnmanaged(T)`, init with `.empty`,
-  pass allocator to `append(allocator, item)` and `deinit(allocator)`
-- `std.io.getStdErr()` is gone; use `std.fs.File.stderr()`
-- `File.writer()` requires a buffer argument; prefer `std.debug.print` for simple stderr output
+- `std.io` is gone; writers are `*std.Io.Writer`. Build one over a buffer with
+  `std.Io.Writer.fixed(&buf)`, read back with `stream.buffered()`, and repeat a
+  byte with `writer.splatByteAll(c, n)`.
+- `Io` is an explicit parameter on every filesystem and timing call. Construct it
+  once in `main` via `std.Io.Threaded` and thread `io: std.Io` through, positioned
+  immediately after `allocator`. Tests use `std.testing.io`.
+- Filesystem calls take `io` first: `std.Io.Dir.cwd()`, `dir.openFile(io, sub_path, .{})`,
+  `dir.createDirPath(io, sub_path)`, `std.process.currentPathAlloc(io, allocator)`.
+  `realpath`/`getCwd` are gone; `dir.realPath(io, &buf)` returns a length, and
+  `dir.realPathFileAlloc(io, sub_path, allocator)` allocates instead.
+- Fuzz bodies are `fn (context, *std.testing.Smith) anyerror!void`; get bytes with
+  `smith.slice(&buf)`, which returns the filled length.
+- `std.heap.GeneralPurposeAllocator` is now `std.heap.DebugAllocator`.
+- Args and environment arrive through `main`'s parameter: `main(init: std.process.Init.Minimal)`.
+  `std.process.ArgIterator` and `std.posix.getenv` are gone. Get an arg iterator with
+  `init.args.iterateAllocator(allocator)` and read variables with
+  `environ.getPosix("NAME")`, threading `environ: std.process.Environ` through like `io`.
+  Tests build one from a literal block rather than reading the real environment:
+  `.{ .block = .{ .slice = &[_:null]?[*:0]const u8{"HOME=/home/tester"} } }`.
+- `addExecutable` takes a `root_module` (created via `b.createModule`), and C source
+  and include paths attach to that Module, not to the `Compile` step.
 
 ## Architecture
 
@@ -47,7 +60,7 @@ earlier versions. Key differences:
 
 - Tests live alongside source code in `test` blocks at bottom of each file.
 - `src/test_all.zig` is the unified test root -- add new test modules there.
-  Cross-directory imports don't work from individual test files in Zig 0.15.
+  Cross-directory imports don't work from individual test files.
 - Use `std.testing.allocator` in all tests (detects leaks).
 - Table-driven tests via `inline for` over anonymous struct tuples.
 - The `Store` interface in `src/store/store.zig` is the ONLY way to access storage.

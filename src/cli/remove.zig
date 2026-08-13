@@ -4,8 +4,8 @@
 const std = @import("std");
 
 /// Run the remove command. Removes a [[rule]] block with matching id.
-pub fn run(allocator: std.mem.Allocator, rule_id: []const u8, config_path: []const u8, writer: anytype) !u8 {
-    const content = std.fs.cwd().readFileAlloc(allocator, config_path, 1024 * 1024) catch {
+pub fn run(allocator: std.mem.Allocator, io: std.Io, rule_id: []const u8, config_path: []const u8, writer: anytype) !u8 {
+    const content = std.Io.Dir.cwd().readFileAlloc(io, config_path, allocator, .limited(1024 * 1024)) catch {
         try writer.print("veer remove: cannot read {s}\n", .{config_path});
         return 1;
     };
@@ -14,7 +14,6 @@ pub fn run(allocator: std.mem.Allocator, rule_id: []const u8, config_path: []con
     // Find the [[rule]] block with matching id and remove it
     var result = std.ArrayListUnmanaged(u8).empty;
     defer result.deinit(allocator);
-    const w = result.writer(allocator);
 
     var in_target_rule = false;
     var found = false;
@@ -62,7 +61,7 @@ pub fn run(allocator: std.mem.Allocator, rule_id: []const u8, config_path: []con
             }
         }
 
-        try w.print("{s}\n", .{line});
+        try result.print(allocator, "{s}\n", .{line});
     }
 
     if (!found) {
@@ -71,9 +70,7 @@ pub fn run(allocator: std.mem.Allocator, rule_id: []const u8, config_path: []con
     }
 
     // Write back
-    const file = try std.fs.cwd().createFile(config_path, .{});
-    defer file.close();
-    try file.writeAll(result.items);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = config_path, .data = result.items });
 
     try writer.print("Removed rule '{s}' from {s}\n", .{ rule_id, config_path });
     return 0;
@@ -94,7 +91,7 @@ test "remove existing rule" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(path);
     const config_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/config.toml", .{path});
     defer std.testing.allocator.free(config_path);
@@ -117,18 +114,18 @@ test "remove existing rule" {
         \\[rule.match]
         \\command = "bar"
     ;
-    const file = try std.fs.cwd().createFile(config_path, .{});
-    try file.writeAll(config_content);
-    file.close();
+    const file = try std.Io.Dir.cwd().createFile(std.testing.io, config_path, .{});
+    try file.writeStreamingAll(std.testing.io, config_content);
+    file.close(std.testing.io);
 
     var buf: [512]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
 
-    const exit_code = try run(std.testing.allocator, "remove-this", config_path, stream.writer());
+    const exit_code = try run(std.testing.allocator, std.testing.io, "remove-this", config_path, &stream);
     try std.testing.expectEqual(@as(u8, 0), exit_code);
 
     // Verify the rule was removed
-    const result = try std.fs.cwd().readFileAlloc(std.testing.allocator, config_path, 4096);
+    const result = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, config_path, std.testing.allocator, .limited(4096));
     defer std.testing.allocator.free(result);
 
     try std.testing.expect(std.mem.indexOf(u8, result, "keep-this") != null);
@@ -139,18 +136,18 @@ test "remove nonexistent rule fails" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(path);
     const config_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/config.toml", .{path});
     defer std.testing.allocator.free(config_path);
 
-    const file = try std.fs.cwd().createFile(config_path, .{});
-    try file.writeAll("[settings]\nlog_level = \"warn\"\n");
-    file.close();
+    const file = try std.Io.Dir.cwd().createFile(std.testing.io, config_path, .{});
+    try file.writeStreamingAll(std.testing.io, "[settings]\nlog_level = \"warn\"\n");
+    file.close(std.testing.io);
 
     var buf: [512]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
 
-    const exit_code = try run(std.testing.allocator, "nonexistent", config_path, stream.writer());
+    const exit_code = try run(std.testing.allocator, std.testing.io, "nonexistent", config_path, &stream);
     try std.testing.expectEqual(@as(u8, 1), exit_code);
 }

@@ -35,7 +35,7 @@ pub const Table = struct {
                 try writer.print("{s}", .{h});
                 if (i < num_cols - 1) {
                     const padding = widths[i] - h.len + 2;
-                    try writer.writeByteNTimes(' ', padding);
+                    try writer.splatByteAll(' ', padding);
                 }
             }
         }
@@ -44,7 +44,7 @@ pub const Table = struct {
         // Print separator
         for (self.headers, 0..) |_, i| {
             if (i < MAX_COLS) {
-                try writer.writeByteNTimes('-', widths[i]);
+                try writer.splatByteAll('-', widths[i]);
                 if (i < num_cols - 1) {
                     try writer.writeAll("  ");
                 }
@@ -59,7 +59,7 @@ pub const Table = struct {
                     try writer.print("{s}", .{cell});
                     if (i < num_cols - 1) {
                         const padding = widths[i] - cell.len + 2;
-                        try writer.writeByteNTimes(' ', padding);
+                        try writer.splatByteAll(' ', padding);
                     }
                 }
             }
@@ -86,10 +86,10 @@ test "table renders with aligned columns" {
     try t.addRow(allocator, &.{ "no-curl-bash", "reject", "pipeline:curl|bash" });
 
     var buf: [1024]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    try t.render(stream.writer());
+    var stream = std.Io.Writer.fixed(&buf);
+    try t.render(&stream);
 
-    const output = stream.getWritten();
+    const output = stream.buffered();
     // Verify headers are present
     try std.testing.expect(std.mem.indexOf(u8, output, "ID") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "Action") != null);
@@ -101,9 +101,9 @@ test "table renders with aligned columns" {
 test "table with no rows renders headers only" {
     var t = Table{ .headers = &.{ "A", "B" } };
     var buf: [256]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    try t.render(stream.writer());
+    var stream = std.Io.Writer.fixed(&buf);
+    try t.render(&stream);
 
-    const output = stream.getWritten();
+    const output = stream.buffered();
     try std.testing.expect(std.mem.indexOf(u8, output, "A") != null);
 }

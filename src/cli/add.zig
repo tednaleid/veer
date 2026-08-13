@@ -17,7 +17,7 @@ pub const AddOptions = struct {
 };
 
 /// Run the add command. Appends a rule to the config file.
-pub fn run(parent_allocator: std.mem.Allocator, opts: AddOptions, writer: anytype) !u8 {
+pub fn run(parent_allocator: std.mem.Allocator, io: std.Io, opts: AddOptions, writer: anytype) !u8 {
     var arena = std.heap.ArenaAllocator.init(parent_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -70,9 +70,9 @@ pub fn run(parent_allocator: std.mem.Allocator, opts: AddOptions, writer: anytyp
     const name_str = opts.name orelse try autoName(allocator, action, opts.command, opts.path);
 
     // Format TOML block
-    var toml_buf = std.ArrayListUnmanaged(u8).empty;
-    defer toml_buf.deinit(allocator);
-    const w = toml_buf.writer(allocator);
+    var toml_buf: std.Io.Writer.Allocating = .init(allocator);
+    defer toml_buf.deinit();
+    const w = &toml_buf.writer;
 
     try w.print("\n[[rule]]\n", .{});
     try w.print("id = \"{s}\"\n", .{id});
@@ -101,19 +101,19 @@ pub fn run(parent_allocator: std.mem.Allocator, opts: AddOptions, writer: anytyp
 
     // Ensure config directory exists
     if (std.mem.lastIndexOfScalar(u8, opts.config_path, '/')) |sep| {
-        std.fs.cwd().makePath(opts.config_path[0..sep]) catch {};
+        std.Io.Dir.cwd().createDirPath(io, opts.config_path[0..sep]) catch {};
     }
 
     // Append to config file
-    const file = std.fs.cwd().createFile(opts.config_path, .{
+    const file = std.Io.Dir.cwd().createFile(io, opts.config_path, .{
         .truncate = false,
     }) catch |err| {
         try writer.print("veer add: cannot open {s}: {}\n", .{ opts.config_path, err });
         return 1;
     };
-    defer file.close();
-    try file.seekFromEnd(0);
-    try file.writeAll(toml_buf.items);
+    defer file.close(io);
+    const end = (try file.stat(io)).size;
+    try file.writePositionalAll(io, toml_buf.written(), end);
 
     try writer.print("Added rule '{s}' to {s}\n", .{ id, opts.config_path });
     return 0;
@@ -179,28 +179,26 @@ test "add rewrite rule appends TOML" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(path);
     const config_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/config.toml", .{path});
     defer std.testing.allocator.free(config_path);
 
     var buf: [1024]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
 
-    const exit_code = try run(std.testing.allocator, .{
+    const exit_code = try run(std.testing.allocator, std.testing.io, .{
         .action = "rewrite",
         .command = "pytest",
         .rewrite_to = "just test",
         .message = "Use just test.",
         .config_path = config_path,
-    }, stream.writer());
+    }, &stream);
 
     try std.testing.expectEqual(@as(u8, 0), exit_code);
 
     // Verify TOML was written
-    const file = try std.fs.cwd().openFile(config_path, .{});
-    defer file.close();
-    const content = try file.readToEndAlloc(std.testing.allocator, 4096);
+    const content = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, config_path, std.testing.allocator, .limited(4096));
     defer std.testing.allocator.free(content);
 
     try std.testing.expect(std.mem.indexOf(u8, content, "[[rule]]") != null);
@@ -210,23 +208,23 @@ test "add rewrite rule appends TOML" {
 
 test "add without required action fails" {
     var buf: [256]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
 
-    const exit_code = try run(std.testing.allocator, .{
+    const exit_code = try run(std.testing.allocator, std.testing.io, .{
         .command = "pytest",
-    }, stream.writer());
+    }, &stream);
 
     try std.testing.expectEqual(@as(u8, 1), exit_code);
 }
 
 test "add rewrite without rewrite-to fails" {
     var buf: [256]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
 
-    const exit_code = try run(std.testing.allocator, .{
+    const exit_code = try run(std.testing.allocator, std.testing.io, .{
         .action = "rewrite",
         .command = "pytest",
-    }, stream.writer());
+    }, &stream);
 
     try std.testing.expectEqual(@as(u8, 1), exit_code);
 }
@@ -237,26 +235,26 @@ test "add allow rule with --path produces a config that loads and validates" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(path);
     const config_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/config.toml", .{path});
     defer std.testing.allocator.free(config_path);
 
     var buf: [1024]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
 
-    const exit_code = try run(std.testing.allocator, .{
+    const exit_code = try run(std.testing.allocator, std.testing.io, .{
         .action = "allow",
         .path = "src/**",
         .message = "Stay under src.",
         .config_path = config_path,
-    }, stream.writer());
+    }, &stream);
 
     try std.testing.expectEqual(@as(u8, 0), exit_code);
 
     // loadFile runs the same rule_mod.validate the "veer validate" and
     // "veer check" commands do -- a load error here reproduces the bug.
-    var parsed = try config_mod.loadFile(std.testing.allocator, config_path);
+    var parsed = try config_mod.loadFile(std.testing.allocator, std.testing.io, config_path);
     defer parsed.deinit();
 
     try std.testing.expectEqual(@as(usize, 1), parsed.value.rule.len);
@@ -271,55 +269,55 @@ test "add allow rule with --command fails with a clear message and writes nothin
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(path);
     const config_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/config.toml", .{path});
     defer std.testing.allocator.free(config_path);
 
     var buf: [256]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
 
-    const exit_code = try run(std.testing.allocator, .{
+    const exit_code = try run(std.testing.allocator, std.testing.io, .{
         .action = "allow",
         .command = "git",
         .message = "only git",
         .config_path = config_path,
-    }, stream.writer());
+    }, &stream);
 
     try std.testing.expectEqual(@as(u8, 1), exit_code);
-    const output = stream.getWritten();
+    const output = stream.buffered();
     try std.testing.expect(std.mem.indexOf(u8, output, "allow rules take a path") != null);
-    try std.testing.expectError(error.FileNotFound, std.fs.cwd().openFile(config_path, .{}));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().openFile(std.testing.io, config_path, .{}));
 }
 
 test "add with --command and --path together fails" {
     var buf: [256]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
 
-    const exit_code = try run(std.testing.allocator, .{
+    const exit_code = try run(std.testing.allocator, std.testing.io, .{
         .action = "reject",
         .command = "git",
         .path = "src/**",
         .message = "m",
-    }, stream.writer());
+    }, &stream);
 
     try std.testing.expectEqual(@as(u8, 1), exit_code);
-    const output = stream.getWritten();
+    const output = stream.buffered();
     try std.testing.expect(std.mem.indexOf(u8, output, "mutually exclusive") != null);
 }
 
 test "add rewrite rule with --path fails, since rewrite needs a command matcher" {
     var buf: [256]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
 
-    const exit_code = try run(std.testing.allocator, .{
+    const exit_code = try run(std.testing.allocator, std.testing.io, .{
         .action = "rewrite",
         .path = "src/**",
         .rewrite_to = "noop",
-    }, stream.writer());
+    }, &stream);
 
     try std.testing.expectEqual(@as(u8, 1), exit_code);
-    const output = stream.getWritten();
+    const output = stream.buffered();
     try std.testing.expect(std.mem.indexOf(u8, output, "rewrite rules take a command") != null);
 }
 
@@ -327,46 +325,46 @@ test "add with --path and no --tool defaults id to a slug of the path" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(path);
     const config_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/config.toml", .{path});
     defer std.testing.allocator.free(config_path);
 
     var buf: [1024]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
 
-    _ = try run(std.testing.allocator, .{
+    _ = try run(std.testing.allocator, std.testing.io, .{
         .action = "allow",
         .path = "src/**",
         .message = "m",
         .config_path = config_path,
-    }, stream.writer());
+    }, &stream);
 
-    try std.testing.expect(std.mem.indexOf(u8, stream.getWritten(), "Added rule 'allow-src' to ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stream.buffered(), "Added rule 'allow-src' to ") != null);
 }
 
 test "add with --path and --tool overrides the default tool_any" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(path);
     const config_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/config.toml", .{path});
     defer std.testing.allocator.free(config_path);
 
     var buf: [1024]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
 
-    const exit_code = try run(std.testing.allocator, .{
+    const exit_code = try run(std.testing.allocator, std.testing.io, .{
         .action = "reject",
         .path = "**/*.env",
         .tool = "Read",
         .message = "m",
         .config_path = config_path,
-    }, stream.writer());
+    }, &stream);
     try std.testing.expectEqual(@as(u8, 0), exit_code);
 
-    var parsed = try config_mod.loadFile(std.testing.allocator, config_path);
+    var parsed = try config_mod.loadFile(std.testing.allocator, std.testing.io, config_path);
     defer parsed.deinit();
     const rule = parsed.value.rule[0];
     try std.testing.expectEqualStrings("Read", rule.tool);

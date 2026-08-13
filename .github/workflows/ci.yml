@@ -11,14 +11,15 @@ jobs:
       - uses: actions/checkout@v6
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.16.0
       - uses: taiki-e/install-action@v2
         with:
           tool: just
       - run: just check
-      # Fuzz: disabled until Zig fixes stdlib fuzzer bug (Build/Fuzz.zig:429).
+      # Fuzz: disabled because `zig build test --fuzz` fails to compile Zig's
+      # own test runner (compiler/test_runner.zig, StackTrace type mismatch).
       # Fuzz test functions still run as regular tests above.
-      # Re-evaluate on Zig 0.16: timeout 20 zig build test --fuzz; test $? -eq 124
+      # Re-enable once that is fixed: timeout 20 zig build test --fuzz; test $? -eq 124
 
   bench:
     runs-on: ubuntu-latest
@@ -26,7 +27,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.16.0
       - name: Benchmark
         run: zig build bench -Doptimize=ReleaseFast
 
@@ -36,7 +37,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.16.0
       - name: Build release
         run: zig build -Doptimize=ReleaseSmall
       - name: Check binary size

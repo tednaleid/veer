@@ -350,8 +350,10 @@ test "parse command with flag" {
 
 test "fuzz shell parser never panics" {
     try std.testing.fuzz({}, struct {
-        fn run(_: void, input: []const u8) anyerror!void {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
             // Feed arbitrary bytes to the parser -- must not panic.
+            var buf: [256]u8 = undefined;
+            const input = buf[0..smith.slice(&buf)];
             var info = parse(std.testing.allocator, input) catch return;
             info.deinit(std.testing.allocator);
         }

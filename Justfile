@@ -302,7 +302,7 @@ fuzz:
     if ! zig build test --fuzz; then
         if [[ "$(uname)" == "Darwin" ]]; then
             echo ""
-            echo "Note: Zig 0.15 fuzzer has known issues on macOS (InvalidElfMagic)."
+            echo "Note: the Zig fuzzer has known issues on macOS (InvalidElfMagic)."
             echo "Fuzz tests run correctly on Linux. Try: just fuzz-ci on a Linux host or CI."
         else
             exit 1

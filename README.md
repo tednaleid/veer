@@ -50,7 +50,7 @@ It turns out that `claude` is great at creating these rules. Just let it know ab
 ## Quick Start
 
 ```bash
-# Build and install (requires Zig 0.15+)
+# Build and install (requires Zig 0.16)
 just install    # builds release binary, symlinks to ~/.local/bin/veer
 
 # Register veer as a Claude Code hook
@@ -706,18 +706,16 @@ just demo     # Regenerate examples/output.txt
 ```
 
 Fuzz test targets exist for the shell parser, glob matcher, and regex matcher.
-The Zig 0.15.x built-in fuzzer has [known bugs](https://github.com/ziglang/zig/issues/25470)
+The Zig built-in fuzzer has [known bugs](https://github.com/ziglang/zig/issues/25470)
 that prevent `--fuzz` mode from running. Fuzz functions still execute as regular tests.
 See [docs/fuzzing.md](docs/fuzzing.md) for details and status.
 
 ## Building
 
-Requires **Zig 0.15.2**. On macOS:
+Requires **Zig 0.16.0**. On macOS:
 
 ```bash
-brew install zig@0.15
-# if a newer zig is already linked:
-brew unlink zig && brew link zig@0.15
+brew install zig
 ```
 
 Then:
@@ -729,15 +727,6 @@ zig build -Doptimize=ReleaseSmall  # Optimized release build
 ```
 
 See the `Justfile` for all recipes: `just check`, `just bench`, `just fmt`, `just demo`, `just fuzz`.
-
-### Zig 0.16 compatibility
-
-veer does **not** build on Zig 0.16 yet. Upgrading is blocked upstream, not in this repo:
-
-- `zig-tree-sitter` (our only direct dep with its own `build.zig`) calls `addCSourceFile` on a `Compile` step and uses `std.process.argsWithAllocator`. In 0.16, `addCSourceFile`/`addCSourceFiles` moved from `Compile` to `Module`, and `argsWithAllocator` was removed. Both 0.25.0 and 0.26.0 of `zig-tree-sitter` have this issue as of 2026-04-20.
-- Our own `build.zig` uses the same `addCSourceFile(...)` API on `Compile`. That's a trivial fix on our side (call through `exe.root_module` / the per-step `Module` we already create) and will be done in the same change that bumps the dep.
-
-**Tracking:** watch `tree-sitter/zig-tree-sitter` for a release that compiles under Zig 0.16. Once that lands, bumping the dep in `build.zig.zon` and switching our own `addCSourceFile` calls to the Module variants is a ~15-minute change.
 
 ## License
 

@@ -64,8 +64,8 @@ pub fn run(
 /// AND-combined fields are space-separated; lists use brace expansion; regex
 /// fields are wrapped in `/.../`. Memory comes from `arena`.
 pub fn formatMatch(arena: std.mem.Allocator, m: config_mod.MatchConfig) ![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    var aw = buf.writer(arena);
+    var out: std.Io.Writer.Allocating = .init(arena);
+    const aw = &out.writer;
 
     // -- command portion --
     if (m.command_all) |cmds| {
@@ -74,7 +74,7 @@ pub fn formatMatch(arena: std.mem.Allocator, m: config_mod.MatchConfig) ![]const
             try aw.writeAll(c);
         }
     } else if (m.command_any) |cmds| {
-        try writeBraceList(&aw, cmds);
+        try writeBraceList(aw, cmds);
     } else if (m.command) |c| {
         try aw.writeAll(c);
     } else if (m.command_regex) |r| {
@@ -82,63 +82,63 @@ pub fn formatMatch(arena: std.mem.Allocator, m: config_mod.MatchConfig) ![]const
     }
 
     // -- positional args --
-    if (m.arg) |a| try writeAfterSep(&aw, &buf, a);
-    if (m.arg_all) |args| for (args) |a| try writeAfterSep(&aw, &buf, a);
+    if (m.arg) |a| try writeAfterSep(&out, a);
+    if (m.arg_all) |args| for (args) |a| try writeAfterSep(&out, a);
     if (m.arg_any) |args| {
-        try ensureSep(&aw, &buf);
-        try writeBraceList(&aw, args);
+        try ensureSep(&out);
+        try writeBraceList(aw, args);
     }
     if (m.arg_regex) |r| {
-        try ensureSep(&aw, &buf);
+        try ensureSep(&out);
         try aw.print("arg /{s}/", .{r});
     }
 
     // -- flags --
-    if (m.flag) |f| try writeFlag(&aw, &buf, f);
-    if (m.flag_all) |fs| for (fs) |f| try writeFlag(&aw, &buf, f);
+    if (m.flag) |f| try writeFlag(&out, f);
+    if (m.flag_all) |fs| for (fs) |f| try writeFlag(&out, f);
     if (m.flag_any) |fs| {
-        try ensureSep(&aw, &buf);
+        try ensureSep(&out);
         try aw.writeByte('{');
         for (fs, 0..) |f, i| {
             if (i > 0) try aw.writeByte(',');
-            try writeFlagBare(&aw, f);
+            try writeFlagBare(aw, f);
         }
         try aw.writeByte('}');
     }
 
     // -- whole-input regex --
     if (m.raw_regex) |r| {
-        try ensureSep(&aw, &buf);
+        try ensureSep(&out);
         try aw.print("raw /{s}/", .{r});
     }
 
     // -- content (non-Bash) --
     if (m.content_regex) |r| {
-        try ensureSep(&aw, &buf);
+        try ensureSep(&out);
         try aw.print("/{s}/", .{r});
     }
     if (m.content_contains) |s| {
-        try ensureSep(&aw, &buf);
+        try ensureSep(&out);
         try aw.print("\"{s}\"", .{s});
     }
 
     // -- path (non-Bash) --
     if (m.path) |p| {
-        try ensureSep(&aw, &buf);
+        try ensureSep(&out);
         try aw.writeAll(p);
     }
     if (m.path_any) |paths| {
-        try ensureSep(&aw, &buf);
-        try writeBraceList(&aw, paths);
+        try ensureSep(&out);
+        try writeBraceList(aw, paths);
     }
     if (m.path_regex) |r| {
-        try ensureSep(&aw, &buf);
+        try ensureSep(&out);
         try aw.print("/{s}/", .{r});
     }
 
     // -- ast shape --
     if (m.ast) |a| {
-        try ensureSep(&aw, &buf);
+        try ensureSep(&out);
         try aw.writeAll("ast(");
         var first = true;
         if (a.has_node) |n| {
@@ -157,17 +157,17 @@ pub fn formatMatch(arena: std.mem.Allocator, m: config_mod.MatchConfig) ![]const
         try aw.writeByte(')');
     }
 
-    if (buf.items.len == 0) try aw.writeAll("(any)");
-    return buf.items;
+    if (out.written().len == 0) try aw.writeAll("(any)");
+    return out.written();
 }
 
-fn ensureSep(aw: anytype, buf: *std.ArrayListUnmanaged(u8)) !void {
-    if (buf.items.len > 0) try aw.writeByte(' ');
+fn ensureSep(out: *std.Io.Writer.Allocating) !void {
+    if (out.written().len > 0) try out.writer.writeByte(' ');
 }
 
-fn writeAfterSep(aw: anytype, buf: *std.ArrayListUnmanaged(u8), s: []const u8) !void {
-    try ensureSep(aw, buf);
-    try aw.writeAll(s);
+fn writeAfterSep(out: *std.Io.Writer.Allocating, s: []const u8) !void {
+    try ensureSep(out);
+    try out.writer.writeAll(s);
 }
 
 fn writeBraceList(aw: anytype, items: []const []const u8) !void {
@@ -179,9 +179,9 @@ fn writeBraceList(aw: anytype, items: []const []const u8) !void {
     try aw.writeByte('}');
 }
 
-fn writeFlag(aw: anytype, buf: *std.ArrayListUnmanaged(u8), name: []const u8) !void {
-    try ensureSep(aw, buf);
-    try writeFlagBare(aw, name);
+fn writeFlag(out: *std.Io.Writer.Allocating, name: []const u8) !void {
+    try ensureSep(out);
+    try writeFlagBare(&out.writer, name);
 }
 
 /// Single-char names render as `-X`, longer names as `--XX`. Mirrors the
@@ -206,11 +206,11 @@ test "list with rules renders table" {
     };
 
     var buf: [2048]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = try run(std.testing.allocator, &rules, null, stream.writer());
+    var stream = std.Io.Writer.fixed(&buf);
+    const exit_code = try run(std.testing.allocator, &rules, null, &stream);
 
     try std.testing.expectEqual(@as(u8, 0), exit_code);
-    const output = stream.getWritten();
+    const output = stream.buffered();
     try std.testing.expect(std.mem.indexOf(u8, output, "use-just-test") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "rewrite") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "2 rule(s)") != null);
@@ -235,11 +235,11 @@ test "list renders tool_any as a comma-joined list" {
     };
 
     var buf: [2048]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = try run(std.testing.allocator, &rules, null, stream.writer());
+    var stream = std.Io.Writer.fixed(&buf);
+    const exit_code = try run(std.testing.allocator, &rules, null, &stream);
 
     try std.testing.expectEqual(@as(u8, 0), exit_code);
-    const output = stream.getWritten();
+    const output = stream.buffered();
     try std.testing.expect(std.mem.indexOf(u8, output, "Write,Edit,NotebookEdit") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "**/*.gen.ts") != null);
 }
@@ -256,22 +256,22 @@ test "list renders a path gate's match instead of (any)" {
     };
 
     var buf: [2048]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = try run(std.testing.allocator, &rules, null, stream.writer());
+    var stream = std.Io.Writer.fixed(&buf);
+    const exit_code = try run(std.testing.allocator, &rules, null, &stream);
 
     try std.testing.expectEqual(@as(u8, 0), exit_code);
-    const output = stream.getWritten();
+    const output = stream.buffered();
     try std.testing.expect(std.mem.indexOf(u8, output, "{src/**}") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "(any)") == null);
 }
 
 test "list with no rules" {
     var buf: [256]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = try run(std.testing.allocator, &.{}, null, stream.writer());
+    var stream = std.Io.Writer.fixed(&buf);
+    const exit_code = try run(std.testing.allocator, &.{}, null, &stream);
 
     try std.testing.expectEqual(@as(u8, 0), exit_code);
-    const output = stream.getWritten();
+    const output = stream.buffered();
     try std.testing.expect(std.mem.indexOf(u8, output, "No rules") != null);
 }
 
@@ -283,11 +283,11 @@ test "list with sources renders Source column" {
     const sources = [_]config_mod.RuleSource{ .project, .global };
 
     var buf: [2048]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = try run(std.testing.allocator, &rules, &sources, stream.writer());
+    var stream = std.Io.Writer.fixed(&buf);
+    const exit_code = try run(std.testing.allocator, &rules, &sources, &stream);
 
     try std.testing.expectEqual(@as(u8, 0), exit_code);
-    const output = stream.getWritten();
+    const output = stream.buffered();
     try std.testing.expect(std.mem.indexOf(u8, output, "Source") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "project") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "global") != null);
@@ -300,11 +300,11 @@ test "list with local source renders local in Source column" {
     const sources = [_]config_mod.RuleSource{.local};
 
     var buf: [2048]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = try run(std.testing.allocator, &rules, &sources, stream.writer());
+    var stream = std.Io.Writer.fixed(&buf);
+    const exit_code = try run(std.testing.allocator, &rules, &sources, &stream);
 
     try std.testing.expectEqual(@as(u8, 0), exit_code);
-    const output = stream.getWritten();
+    const output = stream.buffered();
     try std.testing.expect(std.mem.indexOf(u8, output, "Source") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "local") != null);
 }

@@ -143,16 +143,27 @@ pub fn loadStringDetailed(
     return result;
 }
 
-/// Load config from a file path. Caller owns the returned Parsed value.
-pub fn loadFile(allocator: std.mem.Allocator, path: []const u8) !toml.Parsed(Config) {
-    const file = std.fs.cwd().openFile(path, .{}) catch {
+const max_config_bytes = 1024 * 1024;
+
+/// Read a config file relative to cwd. `error.FileNotFound` when it cannot be
+/// opened, `error.ReadFailed` when it opens but cannot be read. Caller owns
+/// the returned bytes.
+fn readConfigFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch {
         return error.FileNotFound;
     };
-    defer file.close();
+    defer file.close(io);
 
-    const content = file.readToEndAlloc(allocator, 1024 * 1024) catch {
+    var read_buf: [4096]u8 = undefined;
+    var file_reader = file.reader(io, &read_buf);
+    return file_reader.interface.allocRemaining(allocator, .limited(max_config_bytes)) catch {
         return error.ReadFailed;
     };
+}
+
+/// Load config from a file path. Caller owns the returned Parsed value.
+pub fn loadFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !toml.Parsed(Config) {
+    const content = try readConfigFile(allocator, io, path);
     defer allocator.free(content);
 
     return loadString(allocator, content);
@@ -162,17 +173,11 @@ pub fn loadFile(allocator: std.mem.Allocator, path: []const u8) !toml.Parsed(Con
 /// See loadStringDetailed.
 pub fn loadFileDetailed(
     allocator: std.mem.Allocator,
+    io: std.Io,
     path: []const u8,
     detail_out: *?ParseDetail,
 ) !toml.Parsed(Config) {
-    const file = std.fs.cwd().openFile(path, .{}) catch {
-        return error.FileNotFound;
-    };
-    defer file.close();
-
-    const content = file.readToEndAlloc(allocator, 1024 * 1024) catch {
-        return error.ReadFailed;
-    };
+    const content = try readConfigFile(allocator, io, path);
     defer allocator.free(content);
 
     return loadStringDetailed(allocator, content, detail_out);
@@ -183,17 +188,11 @@ pub fn loadFileDetailed(
 /// first error `validate` returns.
 pub fn parseFileOnly(
     allocator: std.mem.Allocator,
+    io: std.Io,
     path: []const u8,
     detail_out: *?ParseDetail,
 ) !toml.Parsed(Config) {
-    const file = std.fs.cwd().openFile(path, .{}) catch {
-        return error.FileNotFound;
-    };
-    defer file.close();
-
-    const content = file.readToEndAlloc(allocator, 1024 * 1024) catch {
-        return error.ReadFailed;
-    };
+    const content = try readConfigFile(allocator, io, path);
     defer allocator.free(content);
 
     var parser = toml.Parser(Config).init(allocator);
@@ -272,11 +271,11 @@ pub const local_config_relpath = ".veer/config.local.toml";
 
 /// Build the global config path: $XDG_CONFIG_HOME/veer/config.toml or ~/.config/veer/config.toml.
 /// Caller owns the returned string.
-pub fn globalConfigPath(allocator: std.mem.Allocator) ![]const u8 {
-    if (std.posix.getenv("XDG_CONFIG_HOME")) |xdg| {
+pub fn globalConfigPath(allocator: std.mem.Allocator, environ: std.process.Environ) ![]const u8 {
+    if (environ.getPosix("XDG_CONFIG_HOME")) |xdg| {
         return std.fmt.allocPrint(allocator, "{s}/veer/config.toml", .{xdg});
     }
-    const home = std.posix.getenv("HOME") orelse return error.FileNotFound;
+    const home = environ.getPosix("HOME") orelse return error.FileNotFound;
     return std.fmt.allocPrint(allocator, "{s}/.config/veer/config.toml", .{home});
 }
 
@@ -295,6 +294,7 @@ pub fn globalConfigPath(allocator: std.mem.Allocator) ![]const u8 {
 /// Caller owns the returned slice.
 pub fn findConfigUpwards(
     allocator: std.mem.Allocator,
+    io: std.Io,
     cwd_abs: []const u8,
     project_dir_hint: ?[]const u8,
     relpath: []const u8,
@@ -302,7 +302,7 @@ pub fn findConfigUpwards(
     if (project_dir_hint) |hint| {
         if (hint.len > 0) {
             const candidate = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ hint, relpath });
-            if (fileExists(candidate)) return candidate;
+            if (fileExists(io, candidate)) return candidate;
             allocator.free(candidate);
         }
     }
@@ -310,7 +310,7 @@ pub fn findConfigUpwards(
     var current: []const u8 = cwd_abs;
     while (true) {
         const candidate = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ current, relpath });
-        if (fileExists(candidate)) return candidate;
+        if (fileExists(io, candidate)) return candidate;
         allocator.free(candidate);
 
         const parent = std.fs.path.dirname(current) orelse return null;
@@ -322,15 +322,16 @@ pub fn findConfigUpwards(
 /// Locate the project's `.veer/config.toml`. See `findConfigUpwards`.
 pub fn findProjectConfigPath(
     allocator: std.mem.Allocator,
+    io: std.Io,
     cwd_abs: []const u8,
     project_dir_hint: ?[]const u8,
 ) !?[]u8 {
-    return findConfigUpwards(allocator, cwd_abs, project_dir_hint, project_config_relpath);
+    return findConfigUpwards(allocator, io, cwd_abs, project_dir_hint, project_config_relpath);
 }
 
-fn fileExists(path: []const u8) bool {
-    const file = std.fs.openFileAbsolute(path, .{}) catch return false;
-    file.close();
+fn fileExists(io: std.Io, path: []const u8) bool {
+    const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return false;
+    file.close(io);
     return true;
 }
 
@@ -342,18 +343,18 @@ fn fileExists(path: []const u8) bool {
 /// `~/.config/veer/config.toml` (or `$XDG_CONFIG_HOME/veer/config.toml`).
 /// Returns error.NoConfigFound only if none of the local, project, or global
 /// configs exist.
-pub fn loadMerged(allocator: std.mem.Allocator) !MergedConfig {
+pub fn loadMerged(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ) !MergedConfig {
     var result = MergedConfig{};
     errdefer result.deinit(allocator);
 
-    const cwd_abs = std.fs.cwd().realpathAlloc(allocator, ".") catch null;
+    const cwd_abs = std.process.currentPathAlloc(io, allocator) catch null;
     defer if (cwd_abs) |c| allocator.free(c);
 
     if (cwd_abs) |cwd| {
-        const hint = std.posix.getenv("CLAUDE_PROJECT_DIR");
-        if (try findProjectConfigPath(allocator, cwd, hint)) |project_path| {
+        const hint = environ.getPosix("CLAUDE_PROJECT_DIR");
+        if (try findProjectConfigPath(allocator, io, cwd, hint)) |project_path| {
             result.project_config_path = project_path;
-            result.project_parsed = loadFile(allocator, project_path) catch |err| blk: {
+            result.project_parsed = loadFile(allocator, io, project_path) catch |err| blk: {
                 if (err == error.FileNotFound) break :blk null;
                 return err;
             };
@@ -367,14 +368,14 @@ pub fn loadMerged(allocator: std.mem.Allocator) !MergedConfig {
             const veer_dir = std.fs.path.dirname(pp) orelse break :blk null;
             const root = std.fs.path.dirname(veer_dir) orelse break :blk null;
             const lp = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ root, local_config_relpath });
-            if (fileExists(lp)) break :blk lp;
+            if (fileExists(io, lp)) break :blk lp;
             allocator.free(lp);
             break :blk null;
-        } else try findConfigUpwards(allocator, cwd, hint, local_config_relpath);
+        } else try findConfigUpwards(allocator, io, cwd, hint, local_config_relpath);
 
         if (local_path) |lp| {
             defer allocator.free(lp);
-            result.local_parsed = loadFile(allocator, lp) catch |err| blk: {
+            result.local_parsed = loadFile(allocator, io, lp) catch |err| blk: {
                 if (err == error.FileNotFound) break :blk null;
                 return err;
             };
@@ -382,11 +383,11 @@ pub fn loadMerged(allocator: std.mem.Allocator) !MergedConfig {
     }
 
     // Try global config
-    const global_path = globalConfigPath(allocator) catch null;
+    const global_path = globalConfigPath(allocator, environ) catch null;
     defer if (global_path) |p| allocator.free(p);
 
     if (global_path) |path| {
-        result.global_parsed = loadFile(allocator, path) catch |err| blk: {
+        result.global_parsed = loadFile(allocator, io, path) catch |err| blk: {
             if (err == error.FileNotFound) break :blk null;
             return err;
         };
@@ -576,15 +577,15 @@ test "syntax error reports a line number" {
 test "parseFileOnly reports the field path for a schema error" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dir = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(dir);
 
     const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/c.toml", .{dir});
     defer std.testing.allocator.free(path);
     {
-        const f = try std.fs.cwd().createFile(path, .{});
-        defer f.close();
-        try f.writeAll(
+        const f = try std.Io.Dir.cwd().createFile(std.testing.io, path, .{});
+        defer f.close(std.testing.io);
+        try f.writeStreamingAll(std.testing.io,
             \\[[rule]]
             \\id = "x"
             \\action = "nonsense"
@@ -597,7 +598,7 @@ test "parseFileOnly reports the field path for a schema error" {
     var detail: ?ParseDetail = null;
     defer if (detail) |*d| d.deinit(std.testing.allocator);
 
-    const result = parseFileOnly(std.testing.allocator, path, &detail);
+    const result = parseFileOnly(std.testing.allocator, std.testing.io, path, &detail);
     try std.testing.expectError(error.ParseFailed, result);
 
     const d = detail orelse return error.TestExpectedDetail;
@@ -612,15 +613,15 @@ test "parseFileOnly reports the field path for a schema error" {
 test "parseFileOnly reports a line number for a syntax error" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dir = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(dir);
 
     const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/c.toml", .{dir});
     defer std.testing.allocator.free(path);
     {
-        const f = try std.fs.cwd().createFile(path, .{});
-        defer f.close();
-        try f.writeAll(
+        const f = try std.Io.Dir.cwd().createFile(std.testing.io, path, .{});
+        defer f.close(std.testing.io);
+        try f.writeStreamingAll(std.testing.io,
             \\[[rule]
             \\id = "x"
         );
@@ -629,7 +630,7 @@ test "parseFileOnly reports a line number for a syntax error" {
     var detail: ?ParseDetail = null;
     defer if (detail) |*d| d.deinit(std.testing.allocator);
 
-    const result = parseFileOnly(std.testing.allocator, path, &detail);
+    const result = parseFileOnly(std.testing.allocator, std.testing.io, path, &detail);
     try std.testing.expectError(error.ParseFailed, result);
 
     const d = detail orelse return error.TestExpectedDetail;
@@ -638,7 +639,7 @@ test "parseFileOnly reports a line number for a syntax error" {
 }
 
 test "loadFile returns FileNotFound for missing file" {
-    try std.testing.expectError(error.FileNotFound, loadFile(std.testing.allocator, "/nonexistent/path/config.toml"));
+    try std.testing.expectError(error.FileNotFound, loadFile(std.testing.allocator, std.testing.io, "/nonexistent/path/config.toml"));
 }
 
 test "mergeRules combines non-overlapping rules in tier order" {
@@ -753,7 +754,7 @@ test "mergeRules with a single tier copies rules and tags the source" {
 }
 
 test "loadFile parses basic.toml fixture" {
-    var result = try loadFile(std.testing.allocator, "test/configs/basic.toml");
+    var result = try loadFile(std.testing.allocator, std.testing.io, "test/configs/basic.toml");
     defer result.deinit();
 
     try std.testing.expectEqual(@as(usize, 2), result.value.rule.len);
@@ -764,7 +765,7 @@ test "loadFile parses basic.toml fixture" {
 }
 
 test "loadFile parses empty.toml fixture" {
-    var result = try loadFile(std.testing.allocator, "test/configs/empty.toml");
+    var result = try loadFile(std.testing.allocator, std.testing.io, "test/configs/empty.toml");
     defer result.deinit();
 
     try std.testing.expectEqualStrings("debug", result.value.settings.log_level);
@@ -774,7 +775,7 @@ test "loadFile parses empty.toml fixture" {
 test "loadMerged finds project config when present" {
     // This test works when .veer/config.toml exists in the project root.
     // loadMerged should find it and return the config.
-    if (loadMerged(std.testing.allocator)) |*result| {
+    if (loadMerged(std.testing.allocator, std.testing.io, .empty)) |*result| {
         var r = result.*;
         defer r.deinit(std.testing.allocator);
         try std.testing.expect(r.config.rule.len > 0);
@@ -787,14 +788,14 @@ test "findProjectConfigPath finds config at cwd when present" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath(".veer");
-    var f = try tmp.dir.createFile(".veer/config.toml", .{});
-    f.close();
+    try tmp.dir.createDirPath(std.testing.io, ".veer");
+    var f = try tmp.dir.createFile(std.testing.io, ".veer/config.toml", .{});
+    f.close(std.testing.io);
 
-    const tmp_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const tmp_abs = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(tmp_abs);
 
-    const path = try findProjectConfigPath(std.testing.allocator, tmp_abs, null);
+    const path = try findProjectConfigPath(std.testing.allocator, std.testing.io, tmp_abs, null);
     defer if (path) |p| std.testing.allocator.free(p);
 
     try std.testing.expect(path != null);
@@ -807,17 +808,17 @@ test "findProjectConfigPath walks up from a subdir" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath(".veer");
-    var f = try tmp.dir.createFile(".veer/config.toml", .{});
-    f.close();
-    try tmp.dir.makePath("sub/sub2");
+    try tmp.dir.createDirPath(std.testing.io, ".veer");
+    var f = try tmp.dir.createFile(std.testing.io, ".veer/config.toml", .{});
+    f.close(std.testing.io);
+    try tmp.dir.createDirPath(std.testing.io, "sub/sub2");
 
-    const tmp_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const tmp_abs = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(tmp_abs);
     const subdir_abs = try std.fmt.allocPrint(std.testing.allocator, "{s}/sub/sub2", .{tmp_abs});
     defer std.testing.allocator.free(subdir_abs);
 
-    const path = try findProjectConfigPath(std.testing.allocator, subdir_abs, null);
+    const path = try findProjectConfigPath(std.testing.allocator, std.testing.io, subdir_abs, null);
     defer if (path) |p| std.testing.allocator.free(p);
 
     try std.testing.expect(path != null);
@@ -832,6 +833,7 @@ test "findProjectConfigPath returns null when no config up the tree" {
     // for nonexistent ancestors -- only the candidate file open touches FS.
     const path = try findProjectConfigPath(
         std.testing.allocator,
+        std.testing.io,
         "/nonexistent-veer-test-path-aaa/bbb/ccc",
         null,
     );
@@ -843,16 +845,17 @@ test "findProjectConfigPath honors project_dir_hint over cwd walk-up" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath(".veer");
-    var f = try tmp.dir.createFile(".veer/config.toml", .{});
-    f.close();
+    try tmp.dir.createDirPath(std.testing.io, ".veer");
+    var f = try tmp.dir.createFile(std.testing.io, ".veer/config.toml", .{});
+    f.close(std.testing.io);
 
-    const tmp_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const tmp_abs = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(tmp_abs);
 
     // cwd points at a nonexistent path, so only the hint can produce a hit.
     const path = try findProjectConfigPath(
         std.testing.allocator,
+        std.testing.io,
         "/nonexistent-veer-test-path-aaa/bbb/ccc",
         tmp_abs,
     );
@@ -870,16 +873,16 @@ test "findProjectConfigPath falls back to walk-up when hint dir has no config" {
     var cwd_tmp = std.testing.tmpDir(.{});
     defer cwd_tmp.cleanup();
 
-    try cwd_tmp.dir.makePath(".veer");
-    var f = try cwd_tmp.dir.createFile(".veer/config.toml", .{});
-    f.close();
+    try cwd_tmp.dir.createDirPath(std.testing.io, ".veer");
+    var f = try cwd_tmp.dir.createFile(std.testing.io, ".veer/config.toml", .{});
+    f.close(std.testing.io);
 
-    const hint_abs = try hint_tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const hint_abs = try hint_tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(hint_abs);
-    const cwd_abs = try cwd_tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const cwd_abs = try cwd_tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(cwd_abs);
 
-    const path = try findProjectConfigPath(std.testing.allocator, cwd_abs, hint_abs);
+    const path = try findProjectConfigPath(std.testing.allocator, std.testing.io, cwd_abs, hint_abs);
     defer if (path) |p| std.testing.allocator.free(p);
 
     try std.testing.expect(path != null);
@@ -891,34 +894,48 @@ test "findProjectConfigPath falls back to walk-up when hint dir has no config" {
 test "findConfigUpwards finds a local config beside the project config" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const tmp_abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const tmp_abs = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(tmp_abs);
 
-    try tmp.dir.makePath(".veer");
-    var pf = try tmp.dir.createFile(".veer/config.toml", .{});
-    pf.close();
-    var lf = try tmp.dir.createFile(".veer/config.local.toml", .{});
-    lf.close();
+    try tmp.dir.createDirPath(std.testing.io, ".veer");
+    var pf = try tmp.dir.createFile(std.testing.io, ".veer/config.toml", .{});
+    pf.close(std.testing.io);
+    var lf = try tmp.dir.createFile(std.testing.io, ".veer/config.local.toml", .{});
+    lf.close(std.testing.io);
 
-    const path = try findConfigUpwards(std.testing.allocator, tmp_abs, null, local_config_relpath);
+    const path = try findConfigUpwards(std.testing.allocator, std.testing.io, tmp_abs, null, local_config_relpath);
     defer if (path) |p| std.testing.allocator.free(p);
     try std.testing.expect(path != null);
     try std.testing.expect(std.mem.endsWith(u8, path.?, "/.veer/config.local.toml"));
 }
 
 test "loadFile parses the local-only fixture" {
-    var result = try loadFile(std.testing.allocator, "test/configs/local_only/.veer/config.local.toml");
+    var result = try loadFile(std.testing.allocator, std.testing.io, "test/configs/local_only/.veer/config.local.toml");
     defer result.deinit();
     try std.testing.expectEqual(@as(usize, 1), result.value.rule.len);
     try std.testing.expectEqualStrings("local-only-rule", result.value.rule[0].id);
 }
 
 test "globalConfigPath uses XDG_CONFIG_HOME" {
-    // We can't easily set env vars in Zig tests, but we can verify the
-    // function returns a path ending with the expected suffix.
-    const path = try globalConfigPath(std.testing.allocator);
+    const entries = [_:null]?[*:0]const u8{ "HOME=/home/tester", "XDG_CONFIG_HOME=/xdg" };
+    const environ: std.process.Environ = .{ .block = .{ .slice = &entries } };
+
+    const path = try globalConfigPath(std.testing.allocator, environ);
     defer std.testing.allocator.free(path);
-    try std.testing.expect(std.mem.endsWith(u8, path, "/veer/config.toml"));
+    try std.testing.expectEqualStrings("/xdg/veer/config.toml", path);
+}
+
+test "globalConfigPath falls back to HOME" {
+    const entries = [_:null]?[*:0]const u8{"HOME=/home/tester"};
+    const environ: std.process.Environ = .{ .block = .{ .slice = &entries } };
+
+    const path = try globalConfigPath(std.testing.allocator, environ);
+    defer std.testing.allocator.free(path);
+    try std.testing.expectEqualStrings("/home/tester/.config/veer/config.toml", path);
+}
+
+test "globalConfigPath without HOME reports FileNotFound" {
+    try std.testing.expectError(error.FileNotFound, globalConfigPath(std.testing.allocator, .empty));
 }
 
 test "mergeSettings with no tiers yields default Settings" {

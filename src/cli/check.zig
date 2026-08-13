@@ -16,15 +16,17 @@ const Rule = @import("../config/rule.zig").Rule;
 /// context is not affected either way. The reject path is unchanged.
 pub fn run(
     allocator: std.mem.Allocator,
+    io: std.Io,
     rules: []const Rule,
     root: ?[]const u8,
+    home: ?[]const u8,
     stdin_data: []const u8,
     stdout_writer: anytype,
     stderr_writer: anytype,
     verbose: bool,
 ) !u8 {
     // Parse hook input
-    var input = hook.parseInput(allocator, stdin_data) catch {
+    var input = hook.parseInput(allocator, io, stdin_data) catch {
         try stderr_writer.print("veer: invalid JSON input\n", .{});
         return 1;
     };
@@ -37,6 +39,7 @@ pub fn run(
         .file_path = input.file_path,
         .cwd = input.cwd,
         .root = root,
+        .home = home,
     });
 
     // Output based on action
@@ -150,23 +153,25 @@ test "end-to-end: rewrite rule returns updatedInput on stdout" {
     ;
 
     var stdout_buf: [512]u8 = undefined;
-    var stdout_stream = std.io.fixedBufferStream(&stdout_buf);
+    var stdout_stream = std.Io.Writer.fixed(&stdout_buf);
     var stderr_buf: [512]u8 = undefined;
-    var stderr_stream = std.io.fixedBufferStream(&stderr_buf);
+    var stderr_stream = std.Io.Writer.fixed(&stderr_buf);
 
     const exit_code = try run(
         std.testing.allocator,
+        std.testing.io,
         &rules,
         null,
+        null,
         input,
-        stdout_stream.writer(),
-        stderr_stream.writer(),
+        &stdout_stream,
+        &stderr_stream,
         false,
     );
 
     try std.testing.expectEqual(@as(u8, 0), exit_code);
 
-    const stdout_output = stdout_stream.getWritten();
+    const stdout_output = stdout_stream.buffered();
     // Verify it's valid JSON with hookSpecificOutput.updatedInput (modern envelope).
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, stdout_output, .{});
     defer parsed.deinit();
@@ -189,29 +194,31 @@ test "reject path emits [rule_id] prefix on stderr and stdout marker" {
     ;
 
     var stdout_buf: [512]u8 = undefined;
-    var stdout_stream = std.io.fixedBufferStream(&stdout_buf);
+    var stdout_stream = std.Io.Writer.fixed(&stdout_buf);
     var stderr_buf: [512]u8 = undefined;
-    var stderr_stream = std.io.fixedBufferStream(&stderr_buf);
+    var stderr_stream = std.Io.Writer.fixed(&stderr_buf);
 
     const exit_code = try run(
         std.testing.allocator,
+        std.testing.io,
         &rules,
         null,
+        null,
         input,
-        stdout_stream.writer(),
-        stderr_stream.writer(),
+        &stdout_stream,
+        &stderr_stream,
         false,
     );
 
     try std.testing.expectEqual(@as(u8, 2), exit_code);
 
     // Stderr (which the agent sees) starts with the [rule_id] prefix.
-    const stderr_out = stderr_stream.getWritten();
+    const stderr_out = stderr_stream.buffered();
     try std.testing.expect(std.mem.startsWith(u8, stderr_out, "[no-python3] "));
     try std.testing.expect(std.mem.indexOf(u8, stderr_out, "just run") != null);
 
     // Stdout has a parseable systemMessage so transcripts are self-describing.
-    const stdout_out = stdout_stream.getWritten();
+    const stdout_out = stdout_stream.buffered();
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, stdout_out, .{});
     defer parsed.deinit();
     try std.testing.expectEqualStrings(
@@ -232,24 +239,26 @@ test "end-to-end: reject rule returns exit 2 with message on stderr" {
     ;
 
     var stdout_buf: [512]u8 = undefined;
-    var stdout_stream = std.io.fixedBufferStream(&stdout_buf);
+    var stdout_stream = std.Io.Writer.fixed(&stdout_buf);
     var stderr_buf: [512]u8 = undefined;
-    var stderr_stream = std.io.fixedBufferStream(&stderr_buf);
+    var stderr_stream = std.Io.Writer.fixed(&stderr_buf);
 
     const exit_code = try run(
         std.testing.allocator,
+        std.testing.io,
         &rules,
         null,
+        null,
         input,
-        stdout_stream.writer(),
-        stderr_stream.writer(),
+        &stdout_stream,
+        &stderr_stream,
         false,
     );
 
     try std.testing.expectEqual(@as(u8, 2), exit_code);
     // Stdout now carries a [rule_id] reject marker (transcript-discoverable).
-    try std.testing.expect(std.mem.indexOf(u8, stdout_stream.getWritten(), "[no-python3] reject") != null);
-    const stderr_output = stderr_stream.getWritten();
+    try std.testing.expect(std.mem.indexOf(u8, stdout_stream.buffered(), "[no-python3] reject") != null);
+    const stderr_output = stderr_stream.buffered();
     try std.testing.expect(std.mem.indexOf(u8, stderr_output, "just run") != null);
 }
 
@@ -265,17 +274,19 @@ test "end-to-end: reject rule with command_all returns exit 2" {
     ;
 
     var stdout_buf: [512]u8 = undefined;
-    var stdout_stream = std.io.fixedBufferStream(&stdout_buf);
+    var stdout_stream = std.Io.Writer.fixed(&stdout_buf);
     var stderr_buf: [512]u8 = undefined;
-    var stderr_stream = std.io.fixedBufferStream(&stderr_buf);
+    var stderr_stream = std.Io.Writer.fixed(&stderr_buf);
 
     const exit_code = try run(
         std.testing.allocator,
+        std.testing.io,
         &rules,
         null,
+        null,
         input,
-        stdout_stream.writer(),
-        stderr_stream.writer(),
+        &stdout_stream,
+        &stderr_stream,
         false,
     );
 
@@ -294,23 +305,25 @@ test "end-to-end: no matching rule returns exit 0 with empty output" {
     ;
 
     var stdout_buf: [512]u8 = undefined;
-    var stdout_stream = std.io.fixedBufferStream(&stdout_buf);
+    var stdout_stream = std.Io.Writer.fixed(&stdout_buf);
     var stderr_buf: [512]u8 = undefined;
-    var stderr_stream = std.io.fixedBufferStream(&stderr_buf);
+    var stderr_stream = std.Io.Writer.fixed(&stderr_buf);
 
     const exit_code = try run(
         std.testing.allocator,
+        std.testing.io,
         &rules,
         null,
+        null,
         input,
-        stdout_stream.writer(),
-        stderr_stream.writer(),
+        &stdout_stream,
+        &stderr_stream,
         false,
     );
 
     try std.testing.expectEqual(@as(u8, 0), exit_code);
-    try std.testing.expectEqual(@as(usize, 0), stdout_stream.getWritten().len);
-    try std.testing.expectEqual(@as(usize, 0), stderr_stream.getWritten().len);
+    try std.testing.expectEqual(@as(usize, 0), stdout_stream.buffered().len);
+    try std.testing.expectEqual(@as(usize, 0), stderr_stream.buffered().len);
 }
 
 test "end-to-end: invalid JSON returns exit 1" {
@@ -321,17 +334,19 @@ test "end-to-end: invalid JSON returns exit 1" {
     }};
 
     var stdout_buf: [512]u8 = undefined;
-    var stdout_stream = std.io.fixedBufferStream(&stdout_buf);
+    var stdout_stream = std.Io.Writer.fixed(&stdout_buf);
     var stderr_buf: [512]u8 = undefined;
-    var stderr_stream = std.io.fixedBufferStream(&stderr_buf);
+    var stderr_stream = std.Io.Writer.fixed(&stderr_buf);
 
     const exit_code = try run(
         std.testing.allocator,
+        std.testing.io,
         &rules,
         null,
+        null,
         "not valid json",
-        stdout_stream.writer(),
-        stderr_stream.writer(),
+        &stdout_stream,
+        &stderr_stream,
         false,
     );
 
@@ -351,22 +366,24 @@ test "end-to-end: surgical rewrite in compound command" {
     ;
 
     var stdout_buf: [512]u8 = undefined;
-    var stdout_stream = std.io.fixedBufferStream(&stdout_buf);
+    var stdout_stream = std.Io.Writer.fixed(&stdout_buf);
     var stderr_buf: [512]u8 = undefined;
-    var stderr_stream = std.io.fixedBufferStream(&stderr_buf);
+    var stderr_stream = std.Io.Writer.fixed(&stderr_buf);
 
     const exit_code = try run(
         std.testing.allocator,
+        std.testing.io,
         &rules,
         null,
+        null,
         input,
-        stdout_stream.writer(),
-        stderr_stream.writer(),
+        &stdout_stream,
+        &stderr_stream,
         false,
     );
 
     try std.testing.expectEqual(@as(u8, 0), exit_code);
-    const stdout_output = stdout_stream.getWritten();
+    const stdout_output = stdout_stream.buffered();
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, stdout_output, .{});
     defer parsed.deinit();
     const cmd = parsed.value.object.get("hookSpecificOutput").?.object.get("updatedInput").?.object.get("command").?.string;
@@ -391,22 +408,24 @@ test "verbose allow: emits systemMessage for Bash (just the command, no prefix)"
     ;
 
     var stdout_buf: [512]u8 = undefined;
-    var stdout_stream = std.io.fixedBufferStream(&stdout_buf);
+    var stdout_stream = std.Io.Writer.fixed(&stdout_buf);
     var stderr_buf: [512]u8 = undefined;
-    var stderr_stream = std.io.fixedBufferStream(&stderr_buf);
+    var stderr_stream = std.Io.Writer.fixed(&stderr_buf);
 
     const exit_code = try run(
         std.testing.allocator,
+        std.testing.io,
         &rules,
         null,
+        null,
         input,
-        stdout_stream.writer(),
-        stderr_stream.writer(),
+        &stdout_stream,
+        &stderr_stream,
         true,
     );
 
     try std.testing.expectEqual(@as(u8, 0), exit_code);
-    const stdout_output = stdout_stream.getWritten();
+    const stdout_output = stdout_stream.buffered();
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, stdout_output, .{});
     defer parsed.deinit();
     const msg = parsed.value.object.get("systemMessage").?.string;
@@ -428,24 +447,26 @@ test "verbose allow: non-Bash tool emits no banner (empty stdout)" {
     ;
 
     var stdout_buf: [512]u8 = undefined;
-    var stdout_stream = std.io.fixedBufferStream(&stdout_buf);
+    var stdout_stream = std.Io.Writer.fixed(&stdout_buf);
     var stderr_buf: [512]u8 = undefined;
-    var stderr_stream = std.io.fixedBufferStream(&stderr_buf);
+    var stderr_stream = std.Io.Writer.fixed(&stderr_buf);
 
     const exit_code = try run(
         std.testing.allocator,
+        std.testing.io,
         &rules,
         null,
+        null,
         input,
-        stdout_stream.writer(),
-        stderr_stream.writer(),
+        &stdout_stream,
+        &stderr_stream,
         true,
     );
 
     // Non-Bash tools have no interesting content to show beyond the tool name,
     // which Claude Code's transcript already includes. Skip the banner entirely.
     try std.testing.expectEqual(@as(u8, 0), exit_code);
-    try std.testing.expectEqual(@as(usize, 0), stdout_stream.getWritten().len);
+    try std.testing.expectEqual(@as(usize, 0), stdout_stream.buffered().len);
 }
 
 test "verbose rewrite: emits systemMessage alongside updatedInput" {
@@ -460,22 +481,24 @@ test "verbose rewrite: emits systemMessage alongside updatedInput" {
     ;
 
     var stdout_buf: [512]u8 = undefined;
-    var stdout_stream = std.io.fixedBufferStream(&stdout_buf);
+    var stdout_stream = std.Io.Writer.fixed(&stdout_buf);
     var stderr_buf: [512]u8 = undefined;
-    var stderr_stream = std.io.fixedBufferStream(&stderr_buf);
+    var stderr_stream = std.Io.Writer.fixed(&stderr_buf);
 
     const exit_code = try run(
         std.testing.allocator,
+        std.testing.io,
         &rules,
         null,
+        null,
         input,
-        stdout_stream.writer(),
-        stderr_stream.writer(),
+        &stdout_stream,
+        &stderr_stream,
         true,
     );
 
     try std.testing.expectEqual(@as(u8, 0), exit_code);
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, stdout_stream.getWritten(), .{});
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, stdout_stream.buffered(), .{});
     defer parsed.deinit();
 
     const msg = parsed.value.object.get("systemMessage").?.string;
@@ -493,15 +516,15 @@ test "verbose rewrite: emits systemMessage alongside updatedInput" {
 test "end-to-end: ExitPlanMode rejected when plan contains 'actually'" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const tmp_root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const tmp_root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(tmp_root);
 
     const plan_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/plan.md", .{tmp_root});
     defer std.testing.allocator.free(plan_path);
     {
-        const f = try std.fs.cwd().createFile(plan_path, .{});
-        defer f.close();
-        try f.writeAll("# Plan\n\nFirst we do X. Actually, let's do Y instead.\n");
+        const f = try std.Io.Dir.cwd().createFile(std.testing.io, plan_path, .{});
+        defer f.close(std.testing.io);
+        try f.writeStreamingAll(std.testing.io, "# Plan\n\nFirst we do X. Actually, let's do Y instead.\n");
     }
 
     const transcript_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/session.jsonl", .{tmp_root});
@@ -513,9 +536,9 @@ test "end-to-end: ExitPlanMode rejected when plan contains 'actually'" {
     );
     defer std.testing.allocator.free(transcript_line);
     {
-        const f = try std.fs.cwd().createFile(transcript_path, .{});
-        defer f.close();
-        try f.writeAll(transcript_line);
+        const f = try std.Io.Dir.cwd().createFile(std.testing.io, transcript_path, .{});
+        defer f.close(std.testing.io);
+        try f.writeStreamingAll(std.testing.io, transcript_line);
     }
 
     const rules = [_]Rule{.{
@@ -533,36 +556,38 @@ test "end-to-end: ExitPlanMode rejected when plan contains 'actually'" {
     defer std.testing.allocator.free(input);
 
     var stdout_buf: [512]u8 = undefined;
-    var stdout_stream = std.io.fixedBufferStream(&stdout_buf);
+    var stdout_stream = std.Io.Writer.fixed(&stdout_buf);
     var stderr_buf: [512]u8 = undefined;
-    var stderr_stream = std.io.fixedBufferStream(&stderr_buf);
+    var stderr_stream = std.Io.Writer.fixed(&stderr_buf);
 
     const exit_code = try run(
         std.testing.allocator,
+        std.testing.io,
         &rules,
         null,
+        null,
         input,
-        stdout_stream.writer(),
-        stderr_stream.writer(),
+        &stdout_stream,
+        &stderr_stream,
         false,
     );
 
     try std.testing.expectEqual(@as(u8, 2), exit_code);
-    try std.testing.expect(std.mem.indexOf(u8, stderr_stream.getWritten(), "actually") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stderr_stream.buffered(), "actually") != null);
 }
 
 test "end-to-end: ExitPlanMode allowed when plan is clean" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const tmp_root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const tmp_root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(tmp_root);
 
     const plan_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/plan.md", .{tmp_root});
     defer std.testing.allocator.free(plan_path);
     {
-        const f = try std.fs.cwd().createFile(plan_path, .{});
-        defer f.close();
-        try f.writeAll("# Plan\n\nStep 1: do X. Step 2: do Y.\n");
+        const f = try std.Io.Dir.cwd().createFile(std.testing.io, plan_path, .{});
+        defer f.close(std.testing.io);
+        try f.writeStreamingAll(std.testing.io, "# Plan\n\nStep 1: do X. Step 2: do Y.\n");
     }
 
     const transcript_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/session.jsonl", .{tmp_root});
@@ -574,9 +599,9 @@ test "end-to-end: ExitPlanMode allowed when plan is clean" {
     );
     defer std.testing.allocator.free(transcript_line);
     {
-        const f = try std.fs.cwd().createFile(transcript_path, .{});
-        defer f.close();
-        try f.writeAll(transcript_line);
+        const f = try std.Io.Dir.cwd().createFile(std.testing.io, transcript_path, .{});
+        defer f.close(std.testing.io);
+        try f.writeStreamingAll(std.testing.io, transcript_line);
     }
 
     const rules = [_]Rule{.{
@@ -594,22 +619,24 @@ test "end-to-end: ExitPlanMode allowed when plan is clean" {
     defer std.testing.allocator.free(input);
 
     var stdout_buf: [512]u8 = undefined;
-    var stdout_stream = std.io.fixedBufferStream(&stdout_buf);
+    var stdout_stream = std.Io.Writer.fixed(&stdout_buf);
     var stderr_buf: [512]u8 = undefined;
-    var stderr_stream = std.io.fixedBufferStream(&stderr_buf);
+    var stderr_stream = std.Io.Writer.fixed(&stderr_buf);
 
     const exit_code = try run(
         std.testing.allocator,
+        std.testing.io,
         &rules,
         null,
+        null,
         input,
-        stdout_stream.writer(),
-        stderr_stream.writer(),
+        &stdout_stream,
+        &stderr_stream,
         false,
     );
 
     try std.testing.expectEqual(@as(u8, 0), exit_code);
-    try std.testing.expectEqual(@as(usize, 0), stderr_stream.getWritten().len);
+    try std.testing.expectEqual(@as(usize, 0), stderr_stream.buffered().len);
 }
 
 test "verbose reject: same shape as non-verbose (exit 2, stderr msg, stdout marker)" {
@@ -624,24 +651,26 @@ test "verbose reject: same shape as non-verbose (exit 2, stderr msg, stdout mark
     ;
 
     var stdout_buf: [512]u8 = undefined;
-    var stdout_stream = std.io.fixedBufferStream(&stdout_buf);
+    var stdout_stream = std.Io.Writer.fixed(&stdout_buf);
     var stderr_buf: [512]u8 = undefined;
-    var stderr_stream = std.io.fixedBufferStream(&stderr_buf);
+    var stderr_stream = std.Io.Writer.fixed(&stderr_buf);
 
     const exit_code = try run(
         std.testing.allocator,
+        std.testing.io,
         &rules,
         null,
+        null,
         input,
-        stdout_stream.writer(),
-        stderr_stream.writer(),
+        &stdout_stream,
+        &stderr_stream,
         true,
     );
 
     // Reject emits the [rule_id] marker on stdout regardless of verbose.
     // The marker makes the transcript self-describing for `veer stats`.
     try std.testing.expectEqual(@as(u8, 2), exit_code);
-    try std.testing.expect(std.mem.indexOf(u8, stdout_stream.getWritten(), "[no-python3] reject") != null);
-    try std.testing.expect(std.mem.indexOf(u8, stderr_stream.getWritten(), "just run") != null);
-    try std.testing.expect(std.mem.startsWith(u8, stderr_stream.getWritten(), "[no-python3] "));
+    try std.testing.expect(std.mem.indexOf(u8, stdout_stream.buffered(), "[no-python3] reject") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stderr_stream.buffered(), "just run") != null);
+    try std.testing.expect(std.mem.startsWith(u8, stderr_stream.buffered(), "[no-python3] "));
 }

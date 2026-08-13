@@ -30,6 +30,9 @@ pub const CheckResult = struct {
 ///
 /// `root` is the directory containing the `.veer/` dir the config came from.
 /// When null, path resolution falls back to `cwd`.
+///
+/// `home` is the value of `$HOME`, supplied by the caller so the engine stays
+/// free of environment access. A null `home` makes `~/` patterns unmatchable.
 pub const ToolCall = struct {
     tool_name: []const u8,
     command: ?[]const u8 = null,
@@ -37,6 +40,7 @@ pub const ToolCall = struct {
     file_path: ?[]const u8 = null,
     cwd: ?[]const u8 = null,
     root: ?[]const u8 = null,
+    home: ?[]const u8 = null,
 };
 
 /// Evaluate rules against a tool call. Returns the first matching rule's
@@ -64,7 +68,6 @@ pub fn check(
         path_mod.resolve(fp, call.cwd, call.root, &path_buf)
     else
         null;
-    const home = std.posix.getenv("HOME");
 
     // Evaluate rules in definition order (first match wins)
     for (rules) |rule| {
@@ -102,7 +105,7 @@ pub fn check(
         }
 
         if (matched and fields.path) {
-            matched = matcher.matchPathMatchers(rule, resolved.?, home);
+            matched = matcher.matchPathMatchers(rule, resolved.?, call.home);
         }
 
         if (matched) {

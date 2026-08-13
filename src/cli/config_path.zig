@@ -55,13 +55,13 @@ pub const Resolved = struct {
 /// Resolve a `Target` to a concrete config-file path. `--global` allocates
 /// (call `Resolved.deinit`); the other variants borrow static/argument
 /// strings.
-pub fn resolve(allocator: std.mem.Allocator, target: Target) ResolveError!Resolved {
+pub fn resolve(allocator: std.mem.Allocator, environ: std.process.Environ, target: Target) ResolveError!Resolved {
     return switch (target) {
         .project => .{ .path = ".veer/config.toml" },
         .local => .{ .path = ".veer/config.local.toml" },
         .config => |p| .{ .path = p },
         .global => blk: {
-            const paths = install_cmd.resolvePaths(allocator, .global) catch |err| switch (err) {
+            const paths = install_cmd.resolvePaths(allocator, environ, .global) catch |err| switch (err) {
                 error.NoHome => return error.NoHome,
                 error.OutOfMemory => return error.OutOfMemory,
             };
@@ -97,30 +97,39 @@ test "targetFromFlags: any two set is mutually exclusive" {
     try testing.expectError(error.MutuallyExclusive, targetFromFlags(false, true, "f.toml"));
 }
 
+/// An environment holding only `HOME`, so the `--global` case resolves to a
+/// known path instead of whatever the test runner inherited.
+const home_entries = [_:null]?[*:0]const u8{"HOME=/home/tester"};
+const home_environ: std.process.Environ = .{ .block = .{ .slice = &home_entries } };
+
 test "resolve: project yields .veer/config.toml" {
-    var r = try resolve(testing.allocator, .project);
+    var r = try resolve(testing.allocator, .empty, .project);
     defer r.deinit(testing.allocator);
     try testing.expectEqualStrings(".veer/config.toml", r.path);
     try testing.expect(r.paths_handle == null);
 }
 
 test "resolve: local yields .veer/config.local.toml" {
-    var r = try resolve(testing.allocator, .local);
+    var r = try resolve(testing.allocator, .empty, .local);
     defer r.deinit(testing.allocator);
     try testing.expectEqualStrings(".veer/config.local.toml", r.path);
     try testing.expect(r.paths_handle == null);
 }
 
 test "resolve: config yields the explicit path" {
-    var r = try resolve(testing.allocator, .{ .config = "custom/foo.toml" });
+    var r = try resolve(testing.allocator, .empty, .{ .config = "custom/foo.toml" });
     defer r.deinit(testing.allocator);
     try testing.expectEqualStrings("custom/foo.toml", r.path);
     try testing.expect(r.paths_handle == null);
 }
 
 test "resolve: global yields ~/.config/veer/config.toml" {
-    var r = try resolve(testing.allocator, .global);
+    var r = try resolve(testing.allocator, home_environ, .global);
     defer r.deinit(testing.allocator);
-    try testing.expect(std.mem.endsWith(u8, r.path, "/.config/veer/config.toml"));
+    try testing.expectEqualStrings("/home/tester/.config/veer/config.toml", r.path);
     try testing.expect(r.paths_handle != null);
+}
+
+test "resolve: global without HOME reports NoHome" {
+    try testing.expectError(error.NoHome, resolve(testing.allocator, .empty, .global));
 }

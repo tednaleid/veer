@@ -32,7 +32,7 @@ pub const ExitCode = struct {
 /// Parse hook input from a JSON string (read from stdin).
 /// Extracts tool_name and command (for Bash tools) from the JSON.
 /// For ExitPlanMode, also resolves the plan file content via the transcript.
-pub fn parseInput(allocator: std.mem.Allocator, json_str: []const u8) !HookInput {
+pub fn parseInput(allocator: std.mem.Allocator, io: std.Io, json_str: []const u8) !HookInput {
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_str, .{});
     defer parsed.deinit();
 
@@ -95,7 +95,7 @@ pub fn parseInput(allocator: std.mem.Allocator, json_str: []const u8) !HookInput
     // block the agent from making progress.
     const content: ?[]const u8 = if (std.mem.eql(u8, tool_name, "ExitPlanMode")) blk: {
         const tp = transcript_path orelse break :blk null;
-        break :blk resolveExitPlanModeContent(allocator, tp) catch null;
+        break :blk resolveExitPlanModeContent(allocator, io, tp) catch null;
     } else null;
 
     return .{
@@ -112,21 +112,24 @@ pub fn parseInput(allocator: std.mem.Allocator, json_str: []const u8) !HookInput
 /// Read the transcript at `transcript_path`, locate the most recent
 /// plan_mode attachment, then read and return that plan file's contents.
 /// Returns null on any I/O or parse failure.
-fn resolveExitPlanModeContent(allocator: std.mem.Allocator, transcript_path: []const u8) !?[]u8 {
-    const transcript_content = readFileBounded(allocator, transcript_path, 64 * 1024 * 1024) catch return null;
+fn resolveExitPlanModeContent(allocator: std.mem.Allocator, io: std.Io, transcript_path: []const u8) !?[]u8 {
+    const transcript_content = readFileBounded(allocator, io, transcript_path, 64 * 1024 * 1024) catch return null;
     defer allocator.free(transcript_content);
 
     const plan_path_opt = transcript.findLatestPlanFilePath(allocator, transcript_content) catch null;
     const plan_path = plan_path_opt orelse return null;
     defer allocator.free(plan_path);
 
-    return readFileBounded(allocator, plan_path, 4 * 1024 * 1024) catch null;
+    return readFileBounded(allocator, io, plan_path, 4 * 1024 * 1024) catch null;
 }
 
-fn readFileBounded(allocator: std.mem.Allocator, path: []const u8, max_bytes: usize) ![]u8 {
-    const f = try std.fs.cwd().openFile(path, .{});
-    defer f.close();
-    return try f.readToEndAlloc(allocator, max_bytes);
+fn readFileBounded(allocator: std.mem.Allocator, io: std.Io, path: []const u8, max_bytes: usize) ![]u8 {
+    const f = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer f.close(io);
+
+    var read_buf: [4096]u8 = undefined;
+    var file_reader = f.reader(io, &read_buf);
+    return try file_reader.interface.allocRemaining(allocator, .limited(max_bytes));
 }
 
 /// Free a HookInput's owned strings.
@@ -241,7 +244,7 @@ test "parseInput Bash tool with command" {
     const json =
         \\{"tool_name":"Bash","tool_input":{"command":"pytest tests/"},"session_id":"abc-123"}
     ;
-    var input = try parseInput(std.testing.allocator, json);
+    var input = try parseInput(std.testing.allocator, std.testing.io, json);
     defer freeInput(std.testing.allocator, &input);
 
     try std.testing.expectEqualStrings("Bash", input.tool_name);
@@ -253,7 +256,7 @@ test "parseInput extracts file_path for a Write" {
     const json =
         \\{"tool_name":"Write","tool_input":{"file_path":"/etc/passwd","content":"..."},"cwd":"/home/me/proj"}
     ;
-    var input = try parseInput(std.testing.allocator, json);
+    var input = try parseInput(std.testing.allocator, std.testing.io, json);
     defer freeInput(std.testing.allocator, &input);
 
     try std.testing.expectEqualStrings("Write", input.tool_name);
@@ -267,14 +270,14 @@ test "parseInput falls back to notebook_path then path" {
     const notebook =
         \\{"tool_name":"NotebookEdit","tool_input":{"notebook_path":"/a/nb.ipynb"}}
     ;
-    var nb = try parseInput(std.testing.allocator, notebook);
+    var nb = try parseInput(std.testing.allocator, std.testing.io, notebook);
     defer freeInput(std.testing.allocator, &nb);
     try std.testing.expectEqualStrings("/a/nb.ipynb", nb.file_path.?);
 
     const grep =
         \\{"tool_name":"Grep","tool_input":{"pattern":"foo","path":"/a/src"}}
     ;
-    var g = try parseInput(std.testing.allocator, grep);
+    var g = try parseInput(std.testing.allocator, std.testing.io, grep);
     defer freeInput(std.testing.allocator, &g);
     try std.testing.expectEqualStrings("/a/src", g.file_path.?);
 }
@@ -283,7 +286,7 @@ test "parseInput leaves file_path null when no path key is present" {
     const json =
         \\{"tool_name":"Bash","tool_input":{"command":"ls"}}
     ;
-    var input = try parseInput(std.testing.allocator, json);
+    var input = try parseInput(std.testing.allocator, std.testing.io, json);
     defer freeInput(std.testing.allocator, &input);
     try std.testing.expect(input.file_path == null);
 }
@@ -292,7 +295,7 @@ test "parseInput extracts transcript_path" {
     const json =
         \\{"tool_name":"Bash","tool_input":{"command":"ls"},"transcript_path":"/tmp/session.jsonl"}
     ;
-    var input = try parseInput(std.testing.allocator, json);
+    var input = try parseInput(std.testing.allocator, std.testing.io, json);
     defer freeInput(std.testing.allocator, &input);
 
     try std.testing.expectEqualStrings("/tmp/session.jsonl", input.transcript_path.?);
@@ -303,16 +306,16 @@ test "parseInput extracts transcript_path" {
 test "parseInput resolves ExitPlanMode plan content from transcript" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const tmp_root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const tmp_root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(tmp_root);
 
     // Write a fake plan file
     const plan_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/plan.md", .{tmp_root});
     defer std.testing.allocator.free(plan_path);
     {
-        const f = try std.fs.cwd().createFile(plan_path, .{});
-        defer f.close();
-        try f.writeAll("# Plan\n\nWe will do X but actually let's do Y.\n");
+        const f = try std.Io.Dir.cwd().createFile(std.testing.io, plan_path, .{});
+        defer f.close(std.testing.io);
+        try f.writeStreamingAll(std.testing.io, "# Plan\n\nWe will do X but actually let's do Y.\n");
     }
 
     // Write a transcript that references that plan path
@@ -325,9 +328,9 @@ test "parseInput resolves ExitPlanMode plan content from transcript" {
     );
     defer std.testing.allocator.free(transcript_line);
     {
-        const f = try std.fs.cwd().createFile(transcript_path, .{});
-        defer f.close();
-        try f.writeAll(transcript_line);
+        const f = try std.Io.Dir.cwd().createFile(std.testing.io, transcript_path, .{});
+        defer f.close(std.testing.io);
+        try f.writeStreamingAll(std.testing.io, transcript_line);
     }
 
     // Build the hook input pointing at our fake transcript
@@ -338,7 +341,7 @@ test "parseInput resolves ExitPlanMode plan content from transcript" {
     );
     defer std.testing.allocator.free(json);
 
-    var input = try parseInput(std.testing.allocator, json);
+    var input = try parseInput(std.testing.allocator, std.testing.io, json);
     defer freeInput(std.testing.allocator, &input);
 
     try std.testing.expectEqualStrings("ExitPlanMode", input.tool_name);
@@ -350,7 +353,7 @@ test "parseInput ExitPlanMode with missing transcript_path leaves content null" 
     const json =
         \\{"tool_name":"ExitPlanMode","tool_input":{}}
     ;
-    var input = try parseInput(std.testing.allocator, json);
+    var input = try parseInput(std.testing.allocator, std.testing.io, json);
     defer freeInput(std.testing.allocator, &input);
 
     try std.testing.expectEqualStrings("ExitPlanMode", input.tool_name);
@@ -361,7 +364,7 @@ test "parseInput ExitPlanMode with non-existent transcript path leaves content n
     const json =
         \\{"tool_name":"ExitPlanMode","tool_input":{},"transcript_path":"/nonexistent/transcript.jsonl"}
     ;
-    var input = try parseInput(std.testing.allocator, json);
+    var input = try parseInput(std.testing.allocator, std.testing.io, json);
     defer freeInput(std.testing.allocator, &input);
 
     try std.testing.expect(input.content == null);
@@ -372,18 +375,18 @@ test "parseInput missing tool_name fails" {
     const json =
         \\{"tool_input":{"command":"ls"}}
     ;
-    try std.testing.expectError(error.InvalidInput, parseInput(std.testing.allocator, json));
+    try std.testing.expectError(error.InvalidInput, parseInput(std.testing.allocator, std.testing.io, json));
 }
 
 test "parseInput invalid JSON fails" {
-    try std.testing.expectError(error.SyntaxError, parseInput(std.testing.allocator, "not json{{{"));
+    try std.testing.expectError(error.SyntaxError, parseInput(std.testing.allocator, std.testing.io, "not json{{{"));
 }
 
 test "formatRewrite produces modern hookSpecificOutput envelope" {
     var buf: [256]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    try formatRewrite(stream.writer(), "just test", null, null);
-    const output = stream.getWritten();
+    var stream = std.Io.Writer.fixed(&buf);
+    try formatRewrite(&stream, "just test", null, null);
+    const output = stream.buffered();
     try std.testing.expectEqualStrings(
         "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\"," ++
             "\"permissionDecision\":\"allow\"," ++
@@ -394,9 +397,9 @@ test "formatRewrite produces modern hookSpecificOutput envelope" {
 
 test "formatRewrite with systemMessage prepends top-level field" {
     var buf: [256]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    try formatRewrite(stream.writer(), "just test", "`pytest` -> `just test`", null);
-    const output = stream.getWritten();
+    var stream = std.Io.Writer.fixed(&buf);
+    try formatRewrite(&stream, "just test", "`pytest` -> `just test`", null);
+    const output = stream.buffered();
     try std.testing.expectEqualStrings(
         "{\"systemMessage\":\"`pytest` -> `just test`\"," ++
             "\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\"," ++
@@ -408,11 +411,11 @@ test "formatRewrite with systemMessage prepends top-level field" {
 
 test "formatRewrite escapes quotes and backslashes in both fields" {
     var buf: [256]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
     // Both fields must be escaped; otherwise a command containing `"` or `\`
     // would produce invalid JSON.
-    try formatRewrite(stream.writer(), "echo \"hi\"", "`x\\y`", null);
-    const output = stream.getWritten();
+    try formatRewrite(&stream, "echo \"hi\"", "`x\\y`", null);
+    const output = stream.buffered();
     // Output must be valid JSON, and updatedInput.command must round-trip.
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, output, .{});
     defer parsed.deinit();
@@ -428,17 +431,17 @@ test "formatRewrite escapes quotes and backslashes in both fields" {
 
 test "formatAllow produces systemMessage-only JSON" {
     var buf: [256]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    try formatAllow(stream.writer(), "veer: Read", null);
-    const output = stream.getWritten();
+    var stream = std.Io.Writer.fixed(&buf);
+    try formatAllow(&stream, "veer: Read", null);
+    const output = stream.buffered();
     try std.testing.expectEqualStrings("{\"systemMessage\":\"veer: Read\"}", output);
 }
 
 test "formatAllow escapes control characters" {
     var buf: [256]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    try formatAllow(stream.writer(), "veer: Bash `echo\nhi`", null);
-    const output = stream.getWritten();
+    var stream = std.Io.Writer.fixed(&buf);
+    try formatAllow(&stream, "veer: Bash `echo\nhi`", null);
+    const output = stream.buffered();
     try std.testing.expectEqualStrings("{\"systemMessage\":\"veer: Bash `echo\\nhi`\"}", output);
     // Parse round-trip.
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, output, .{});
@@ -451,9 +454,9 @@ test "formatAllow escapes control characters" {
 
 test "formatRewrite with rule_id prefixes systemMessage" {
     var buf: [256]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    try formatRewrite(stream.writer(), "just test", "`pytest` -> `just test`", "use-just-test");
-    const output = stream.getWritten();
+    var stream = std.Io.Writer.fixed(&buf);
+    try formatRewrite(&stream, "just test", "`pytest` -> `just test`", "use-just-test");
+    const output = stream.buffered();
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, output, .{});
     defer parsed.deinit();
     try std.testing.expectEqualStrings(
@@ -467,9 +470,9 @@ test "formatRewrite with rule_id prefixes systemMessage" {
 
 test "formatRewrite with null rule_id leaves systemMessage unprefixed" {
     var buf: [256]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    try formatRewrite(stream.writer(), "just test", "`pytest` -> `just test`", null);
-    const output = stream.getWritten();
+    var stream = std.Io.Writer.fixed(&buf);
+    try formatRewrite(&stream, "just test", "`pytest` -> `just test`", null);
+    const output = stream.buffered();
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, output, .{});
     defer parsed.deinit();
     try std.testing.expectEqualStrings(
@@ -480,9 +483,9 @@ test "formatRewrite with null rule_id leaves systemMessage unprefixed" {
 
 test "formatAllow with rule_id prefixes message" {
     var buf: [256]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    try formatAllow(stream.writer(), "`ls -la`", "use-just-test");
-    const output = stream.getWritten();
+    var stream = std.Io.Writer.fixed(&buf);
+    try formatAllow(&stream, "`ls -la`", "use-just-test");
+    const output = stream.buffered();
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, output, .{});
     defer parsed.deinit();
     try std.testing.expectEqualStrings(
@@ -493,17 +496,17 @@ test "formatAllow with rule_id prefixes message" {
 
 test "formatAllow with null rule_id leaves message unprefixed" {
     var buf: [256]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    try formatAllow(stream.writer(), "`ls -la`", null);
-    const output = stream.getWritten();
+    var stream = std.Io.Writer.fixed(&buf);
+    try formatAllow(&stream, "`ls -la`", null);
+    const output = stream.buffered();
     try std.testing.expectEqualStrings("{\"systemMessage\":\"`ls -la`\"}", output);
 }
 
 test "formatRejectMarker emits parseable systemMessage with rule_id prefix" {
     var buf: [256]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    try formatRejectMarker(stream.writer(), "no-curl-pipe-shell");
-    const output = stream.getWritten();
+    var stream = std.Io.Writer.fixed(&buf);
+    try formatRejectMarker(&stream, "no-curl-pipe-shell");
+    const output = stream.buffered();
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, output, .{});
     defer parsed.deinit();
     try std.testing.expectEqualStrings(
@@ -514,11 +517,11 @@ test "formatRejectMarker emits parseable systemMessage with rule_id prefix" {
 
 test "formatRejectMarker escapes special characters in rule_id" {
     var buf: [256]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
     // Pathological but legal-ish rule id with a quote (validation should catch
     // this earlier, but the writer must still produce valid JSON).
-    try formatRejectMarker(stream.writer(), "weird\"id");
-    const output = stream.getWritten();
+    try formatRejectMarker(&stream, "weird\"id");
+    const output = stream.buffered();
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, output, .{});
     defer parsed.deinit();
     try std.testing.expectEqualStrings(

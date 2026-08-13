@@ -6,7 +6,6 @@ const config_mod = @import("../config/config.zig");
 const engine = @import("../engine/engine.zig");
 const Rule = @import("../config/rule.zig").Rule;
 const Action = @import("../config/rule.zig").Action;
-const color = @import("../display/color.zig");
 
 pub const TestOptions = struct {
     command: ?[]const u8 = null,
@@ -19,6 +18,9 @@ pub const TestOptions = struct {
     path: ?[]const u8 = null,
     /// File whose body stands in for the tool's content, e.g. a plan body.
     content_file: ?[]const u8 = null,
+    /// Value of `$HOME`, so `~/` path patterns resolve the same way they do
+    /// under the hook. Null leaves those patterns unmatchable.
+    home: ?[]const u8 = null,
 };
 
 /// Run the test command. Tests command(s) against loaded rules.
@@ -27,6 +29,7 @@ pub const TestOptions = struct {
 /// showing `project`/`global` for matches and empty for `ALLOW` lines.
 pub fn run(
     allocator: std.mem.Allocator,
+    io: std.Io,
     rules: []const Rule,
     sources: ?[]const config_mod.RuleSource,
     opts: TestOptions,
@@ -67,7 +70,7 @@ pub fn run(
     }
 
     if (opts.file_path) |path| {
-        return runFile(allocator, rules, sources, path, writer);
+        return runFile(allocator, io, rules, sources, path, opts.home, writer);
     }
 
     if (is_bash and opts.path == null and opts.content_file == null) {
@@ -78,11 +81,11 @@ pub fn run(
             try writer.print("       veer test --tool <Tool> --path <path>\n", .{});
             return 1;
         };
-        return checkOne(allocator, rules, sources, command, writer);
+        return checkOne(allocator, rules, sources, command, opts.home, writer);
     }
 
     const content: ?[]u8 = if (opts.content_file) |cf|
-        std.fs.cwd().readFileAlloc(allocator, cf, 4 * 1024 * 1024) catch {
+        std.Io.Dir.cwd().readFileAlloc(io, cf, allocator, .limited(4 * 1024 * 1024)) catch {
             try writer.print("veer test: cannot read {s}\n", .{cf});
             return 1;
         }
@@ -90,7 +93,7 @@ pub fn run(
         null;
     defer if (content) |c| allocator.free(c);
 
-    const cwd_abs = std.fs.cwd().realpathAlloc(allocator, ".") catch null;
+    const cwd_abs = std.process.currentPathAlloc(io, allocator) catch null;
     defer if (cwd_abs) |c| allocator.free(c);
 
     return checkCall(allocator, rules, sources, .{
@@ -100,18 +103,21 @@ pub fn run(
         .file_path = opts.path,
         .cwd = cwd_abs,
         .root = cwd_abs,
+        .home = opts.home,
     }, opts.path orelse opts.content_file orelse opts.command orelse "", writer);
 }
 
 /// Check every non-empty, non-comment line in a file.
 fn runFile(
     allocator: std.mem.Allocator,
+    io: std.Io,
     rules: []const Rule,
     sources: ?[]const config_mod.RuleSource,
     path: []const u8,
+    home: ?[]const u8,
     writer: anytype,
 ) !u8 {
-    const content = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch {
+    const content = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024)) catch {
         try writer.print("veer test: cannot read {s}\n", .{path});
         return 1;
     };
@@ -122,7 +128,7 @@ fn runFile(
         const trimmed = std.mem.trim(u8, line, " \t\r");
         if (trimmed.len == 0) continue;
         if (trimmed[0] == '#') continue;
-        _ = try checkOne(allocator, rules, sources, trimmed, writer);
+        _ = try checkOne(allocator, rules, sources, trimmed, home, writer);
     }
 
     return 0;
@@ -133,11 +139,13 @@ fn checkOne(
     rules: []const Rule,
     sources: ?[]const config_mod.RuleSource,
     command: []const u8,
+    home: ?[]const u8,
     writer: anytype,
 ) !u8 {
     return checkCall(allocator, rules, sources, .{
         .tool_name = "Bash",
         .command = command,
+        .home = home,
     }, command, writer);
 }
 
@@ -238,11 +246,11 @@ test "test command shows REWRITE TSV" {
     }};
 
     var buf: [512]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = try run(std.testing.allocator, &rules, null, .{ .command = "pytest tests/" }, stream.writer());
+    var stream = std.Io.Writer.fixed(&buf);
+    const exit_code = try run(std.testing.allocator, std.testing.io, &rules, null, .{ .command = "pytest tests/" }, &stream);
 
     try std.testing.expectEqual(@as(u8, 0), exit_code);
-    try std.testing.expectEqualStrings("REWRITE\t0\tpytest tests/\tuse-just-test\tjust test\n", stream.getWritten());
+    try std.testing.expectEqualStrings("REWRITE\t0\tpytest tests/\tuse-just-test\tjust test\n", stream.buffered());
 }
 
 test "test command shows REJECT TSV" {
@@ -253,11 +261,11 @@ test "test command shows REJECT TSV" {
     }};
 
     var buf: [512]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = try run(std.testing.allocator, &rules, null, .{ .command = "chmod 777 server.py" }, stream.writer());
+    var stream = std.Io.Writer.fixed(&buf);
+    const exit_code = try run(std.testing.allocator, std.testing.io, &rules, null, .{ .command = "chmod 777 server.py" }, &stream);
 
     try std.testing.expectEqual(@as(u8, 0), exit_code);
-    try std.testing.expectEqualStrings("REJECT\t2\tchmod 777 server.py\tno-chmod\tAvoid world-writable permissions\n", stream.getWritten());
+    try std.testing.expectEqualStrings("REJECT\t2\tchmod 777 server.py\tno-chmod\tAvoid world-writable permissions\n", stream.buffered());
 }
 
 test "test command shows ALLOW TSV" {
@@ -268,17 +276,17 @@ test "test command shows ALLOW TSV" {
     }};
 
     var buf: [512]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = try run(std.testing.allocator, &rules, null, .{ .command = "ls -la" }, stream.writer());
+    var stream = std.Io.Writer.fixed(&buf);
+    const exit_code = try run(std.testing.allocator, std.testing.io, &rules, null, .{ .command = "ls -la" }, &stream);
 
     try std.testing.expectEqual(@as(u8, 0), exit_code);
-    try std.testing.expectEqualStrings("ALLOW\t0\tls -la\t\t\n", stream.getWritten());
+    try std.testing.expectEqualStrings("ALLOW\t0\tls -la\t\t\n", stream.buffered());
 }
 
 test "test command without argument returns error" {
     var buf: [512]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = try run(std.testing.allocator, &.{}, null, .{}, stream.writer());
+    var stream = std.Io.Writer.fixed(&buf);
+    const exit_code = try run(std.testing.allocator, std.testing.io, &.{}, null, .{}, &stream);
 
     try std.testing.expectEqual(@as(u8, 1), exit_code);
 }
@@ -291,11 +299,11 @@ test "test surgical rewrite in compound command" {
     }};
 
     var buf: [512]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = try run(std.testing.allocator, &rules, null, .{ .command = "echo start && pytest tests/ && echo done" }, stream.writer());
+    var stream = std.Io.Writer.fixed(&buf);
+    const exit_code = try run(std.testing.allocator, std.testing.io, &rules, null, .{ .command = "echo start && pytest tests/ && echo done" }, &stream);
 
     try std.testing.expectEqual(@as(u8, 0), exit_code);
-    const output = stream.getWritten();
+    const output = stream.buffered();
     // TSV output column should show the full spliced command
     try std.testing.expect(std.mem.indexOf(u8, output, "echo start && just test && echo done") != null);
 }
@@ -309,19 +317,19 @@ test "test --file checks each line" {
     // Create a temp file with commands
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const file = try tmp.dir.createFile("commands.txt", .{});
-    try file.writeAll("# comment\npytest tests/\n\nchmod 777 foo\nls -la\n");
-    file.close();
+    const file = try tmp.dir.createFile(std.testing.io, "commands.txt", .{});
+    try file.writeStreamingAll(std.testing.io, "# comment\npytest tests/\n\nchmod 777 foo\nls -la\n");
+    file.close(std.testing.io);
 
-    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "commands.txt");
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "commands.txt", std.testing.allocator);
     defer std.testing.allocator.free(path);
 
     var buf: [2048]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = try run(std.testing.allocator, &rules, null, .{ .file_path = path }, stream.writer());
+    var stream = std.Io.Writer.fixed(&buf);
+    const exit_code = try run(std.testing.allocator, std.testing.io, &rules, null, .{ .file_path = path }, &stream);
 
     try std.testing.expectEqual(@as(u8, 0), exit_code);
-    const output = stream.getWritten();
+    const output = stream.buffered();
     try std.testing.expect(std.mem.indexOf(u8, output, "REWRITE\t0\tpytest tests/\tuse-just-test\tjust test") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "REJECT\t2\tchmod 777 foo\tno-chmod\tnope") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "ALLOW\t0\tls -la\t\t") != null);
@@ -336,56 +344,56 @@ test "run with --tool and --path evaluates a non-Bash rule" {
     }};
 
     var buf: [1024]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
 
     // A Write call must not trip an ExitPlanMode rule.
-    _ = try run(std.testing.allocator, &rules, null, .{
+    _ = try run(std.testing.allocator, std.testing.io, &rules, null, .{
         .tool = "Write",
         .path = "src/App.vue",
-    }, stream.writer());
+    }, &stream);
 
-    const out = stream.getWritten();
+    const out = stream.buffered();
     try std.testing.expect(std.mem.startsWith(u8, out, "ALLOW\t"));
     try std.testing.expect(std.mem.indexOf(u8, out, "src/App.vue") != null);
 }
 
 test "run rejects --file combined with --tool" {
     var buf: [512]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = try run(std.testing.allocator, &.{}, null, .{
+    var stream = std.Io.Writer.fixed(&buf);
+    const exit_code = try run(std.testing.allocator, std.testing.io, &.{}, null, .{
         .file_path = "cmds.txt",
         .tool = "Write",
-    }, stream.writer());
+    }, &stream);
 
     try std.testing.expectEqual(@as(u8, 1), exit_code);
-    const out = stream.getWritten();
+    const out = stream.buffered();
     try std.testing.expect(std.mem.indexOf(u8, out, "--file") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "--tool") != null);
 }
 
 test "run rejects positional command combined with --path" {
     var buf: [512]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = try run(std.testing.allocator, &.{}, null, .{
+    var stream = std.Io.Writer.fixed(&buf);
+    const exit_code = try run(std.testing.allocator, std.testing.io, &.{}, null, .{
         .command = "pytest tests/",
         .path = "foo.py",
-    }, stream.writer());
+    }, &stream);
 
     try std.testing.expectEqual(@as(u8, 1), exit_code);
-    const out = stream.getWritten();
+    const out = stream.buffered();
     try std.testing.expect(std.mem.indexOf(u8, out, "command") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "--path") != null);
 }
 
 test "run rejects non-Bash --tool without --path or --content-file" {
     var buf: [512]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const exit_code = try run(std.testing.allocator, &.{}, null, .{
+    var stream = std.Io.Writer.fixed(&buf);
+    const exit_code = try run(std.testing.allocator, std.testing.io, &.{}, null, .{
         .tool = "Write",
-    }, stream.writer());
+    }, &stream);
 
     try std.testing.expectEqual(@as(u8, 1), exit_code);
-    const out = stream.getWritten();
+    const out = stream.buffered();
     try std.testing.expect(std.mem.indexOf(u8, out, "--tool") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "--path") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "--content-file") != null);
@@ -400,27 +408,27 @@ test "test appends source column when sources are provided" {
 
     {
         var buf: [512]u8 = undefined;
-        var stream = std.io.fixedBufferStream(&buf);
-        const exit_code = try run(std.testing.allocator, &rules, &sources, .{ .command = "pytest tests/" }, stream.writer());
+        var stream = std.Io.Writer.fixed(&buf);
+        const exit_code = try run(std.testing.allocator, std.testing.io, &rules, &sources, .{ .command = "pytest tests/" }, &stream);
         try std.testing.expectEqual(@as(u8, 0), exit_code);
-        try std.testing.expectEqualStrings("REWRITE\t0\tpytest tests/\tp-rewrite\tjust test\tproject\n", stream.getWritten());
+        try std.testing.expectEqualStrings("REWRITE\t0\tpytest tests/\tp-rewrite\tjust test\tproject\n", stream.buffered());
     }
 
     {
         var buf: [512]u8 = undefined;
-        var stream = std.io.fixedBufferStream(&buf);
-        const exit_code = try run(std.testing.allocator, &rules, &sources, .{ .command = "chmod 777 foo" }, stream.writer());
+        var stream = std.Io.Writer.fixed(&buf);
+        const exit_code = try run(std.testing.allocator, std.testing.io, &rules, &sources, .{ .command = "chmod 777 foo" }, &stream);
         try std.testing.expectEqual(@as(u8, 0), exit_code);
-        try std.testing.expectEqualStrings("REJECT\t2\tchmod 777 foo\tg-reject\tnope\tglobal\n", stream.getWritten());
+        try std.testing.expectEqualStrings("REJECT\t2\tchmod 777 foo\tg-reject\tnope\tglobal\n", stream.buffered());
     }
 
     {
         var buf: [512]u8 = undefined;
-        var stream = std.io.fixedBufferStream(&buf);
-        const exit_code = try run(std.testing.allocator, &rules, &sources, .{ .command = "ls -la" }, stream.writer());
+        var stream = std.Io.Writer.fixed(&buf);
+        const exit_code = try run(std.testing.allocator, std.testing.io, &rules, &sources, .{ .command = "ls -la" }, &stream);
         try std.testing.expectEqual(@as(u8, 0), exit_code);
         // ALLOW: 6 columns total when sources are provided; the 6th is empty
         // because no rule matched. That's 5 tabs.
-        try std.testing.expectEqualStrings("ALLOW\t0\tls -la\t\t\t\n", stream.getWritten());
+        try std.testing.expectEqualStrings("ALLOW\t0\tls -la\t\t\t\n", stream.buffered());
     }
 }

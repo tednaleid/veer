@@ -408,15 +408,15 @@ test "matchSegments does not backtrack exponentially on many non-adjacent wildca
     }
     const path = path_buf[0..path_len];
 
-    var timer = try std.time.Timer.start();
+    const start: std.Io.Timestamp = .now(std.testing.io, .awake);
     // The path is all "a" segments and the pattern requires a trailing
     // "zzz" segment, so this can never match.
     try std.testing.expect(!pathMatch(pattern, path));
-    const elapsed_ns = timer.read();
+    const elapsed = start.durationTo(.now(std.testing.io, .awake));
 
     // The unmemoized matcher takes several seconds on this input; a
     // memoized matcher finishes in well under a second.
-    try std.testing.expect(elapsed_ns < 1 * std.time.ns_per_s);
+    try std.testing.expect(elapsed.nanoseconds < 1 * std.time.ns_per_s);
 }
 
 test "classifyPattern" {

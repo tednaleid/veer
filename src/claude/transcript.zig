@@ -444,24 +444,24 @@ pub fn parseIso8601Millis(ts: []const u8) i64 {
 /// Walk a Claude Code projects root (typically ~/.claude/projects/) and
 /// return absolute paths to all `*.jsonl` files one level deep. Caller
 /// frees via `freeTranscriptPaths`. Missing root returns empty (fail open).
-pub fn discoverProjectTranscripts(allocator: std.mem.Allocator, projects_root: []const u8) !std.ArrayListUnmanaged([]u8) {
+pub fn discoverProjectTranscripts(allocator: std.mem.Allocator, io: std.Io, projects_root: []const u8) !std.ArrayListUnmanaged([]u8) {
     var result = std.ArrayListUnmanaged([]u8).empty;
     errdefer freeTranscriptPaths(allocator, &result);
 
-    var root_dir = std.fs.cwd().openDir(projects_root, .{ .iterate = true }) catch |err| switch (err) {
+    var root_dir = std.Io.Dir.cwd().openDir(io, projects_root, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => return result,
         else => return err,
     };
-    defer root_dir.close();
+    defer root_dir.close(io);
 
     var root_iter = root_dir.iterate();
-    while (try root_iter.next()) |entry| {
+    while (try root_iter.next(io)) |entry| {
         if (entry.kind != .directory) continue;
-        var sub = root_dir.openDir(entry.name, .{ .iterate = true }) catch continue;
-        defer sub.close();
+        var sub = root_dir.openDir(io, entry.name, .{ .iterate = true }) catch continue;
+        defer sub.close(io);
 
         var sub_iter = sub.iterate();
-        while (try sub_iter.next()) |sub_entry| {
+        while (try sub_iter.next(io)) |sub_entry| {
             if (sub_entry.kind != .file) continue;
             if (!std.mem.endsWith(u8, sub_entry.name, ".jsonl")) continue;
             const abs = try std.fmt.allocPrint(allocator, "{s}/{s}/{s}", .{ projects_root, entry.name, sub_entry.name });
@@ -686,29 +686,29 @@ test "extractHookEvents stdout without rule_id prefix yields rule_id null" {
 test "discoverProjectTranscripts finds .jsonl files one level deep" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const tmp_root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const tmp_root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(tmp_root);
 
-    try tmp.dir.makePath("proj-a");
-    try tmp.dir.makePath("proj-b");
+    try tmp.dir.createDirPath(std.testing.io, "proj-a");
+    try tmp.dir.createDirPath(std.testing.io, "proj-b");
     {
-        const f = try tmp.dir.createFile("proj-a/sess1.jsonl", .{});
-        f.close();
+        const f = try tmp.dir.createFile(std.testing.io, "proj-a/sess1.jsonl", .{});
+        f.close(std.testing.io);
     }
     {
-        const f = try tmp.dir.createFile("proj-a/sess2.jsonl", .{});
-        f.close();
+        const f = try tmp.dir.createFile(std.testing.io, "proj-a/sess2.jsonl", .{});
+        f.close(std.testing.io);
     }
     {
-        const f = try tmp.dir.createFile("proj-a/foo.txt", .{});
-        f.close();
+        const f = try tmp.dir.createFile(std.testing.io, "proj-a/foo.txt", .{});
+        f.close(std.testing.io);
     }
     {
-        const f = try tmp.dir.createFile("proj-b/sess3.jsonl", .{});
-        f.close();
+        const f = try tmp.dir.createFile(std.testing.io, "proj-b/sess3.jsonl", .{});
+        f.close(std.testing.io);
     }
 
-    var paths = try discoverProjectTranscripts(std.testing.allocator, tmp_root);
+    var paths = try discoverProjectTranscripts(std.testing.allocator, std.testing.io, tmp_root);
     defer freeTranscriptPaths(std.testing.allocator, &paths);
 
     try std.testing.expectEqual(@as(usize, 3), paths.items.len);
@@ -726,7 +726,7 @@ test "discoverProjectTranscripts finds .jsonl files one level deep" {
 }
 
 test "discoverProjectTranscripts on missing root returns empty (fail open)" {
-    var paths = try discoverProjectTranscripts(std.testing.allocator, "/tmp/veer-does-not-exist-xyz123");
+    var paths = try discoverProjectTranscripts(std.testing.allocator, std.testing.io, "/tmp/veer-does-not-exist-xyz123");
     defer freeTranscriptPaths(std.testing.allocator, &paths);
     try std.testing.expectEqual(@as(usize, 0), paths.items.len);
 }

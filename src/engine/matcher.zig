@@ -849,7 +849,9 @@ test "matchPathMatchers: all configured matchers must match (AND)" {
 
 test "fuzz globMatch never panics" {
     try std.testing.fuzz({}, struct {
-        fn run(_: void, input: []const u8) anyerror!void {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [256]u8 = undefined;
+            const input = buf[0..smith.slice(&buf)];
             // Split input into pattern and text at midpoint
             if (input.len < 2) return;
             const mid = input.len / 2;
@@ -860,7 +862,9 @@ test "fuzz globMatch never panics" {
 
 test "fuzz regexMatch never panics" {
     try std.testing.fuzz({}, struct {
-        fn run(_: void, input: []const u8) anyerror!void {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [256]u8 = undefined;
+            const input = buf[0..smith.slice(&buf)];
             if (input.len < 2) return;
             const mid = input.len / 2;
             // Ensure no null bytes in the inputs (C strings)

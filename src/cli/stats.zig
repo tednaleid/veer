@@ -288,17 +288,18 @@ pub fn formatStats(
 /// means all-time.
 pub fn run(
     allocator: std.mem.Allocator,
+    io: std.Io,
     projects_root: []const u8,
     since_ms_duration: ?u64,
     writer: anytype,
 ) !u8 {
-    const now_ms = std.time.milliTimestamp();
+    const now_ms = std.Io.Timestamp.now(io, .real).toMilliseconds();
     const cutoff: ?i64 = if (since_ms_duration) |d|
         now_ms - @as(i64, @intCast(d))
     else
         null;
 
-    var transcripts = transcript.discoverProjectTranscripts(allocator, projects_root) catch
+    var transcripts = transcript.discoverProjectTranscripts(allocator, io, projects_root) catch
         std.ArrayListUnmanaged([]u8).empty;
     defer transcript.freeTranscriptPaths(allocator, &transcripts);
 
@@ -311,9 +312,7 @@ pub fn run(
     defer transcript.freeHookEvents(allocator, &all_events);
 
     for (transcripts.items) |path| {
-        const f = std.fs.cwd().openFile(path, .{}) catch continue;
-        defer f.close();
-        const content = f.readToEndAlloc(allocator, 64 * 1024 * 1024) catch continue;
+        const content = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(64 * 1024 * 1024)) catch continue;
         defer allocator.free(content);
 
         var events = transcript.extractHookEvents(allocator, content) catch continue;
@@ -443,10 +442,10 @@ test "formatStats renders headline + sections for a populated aggregate" {
     defer freeAggregate(std.testing.allocator, &agg);
 
     var buf: [4096]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    try formatStats(std.testing.allocator, stream.writer(), agg, "all time", 1);
+    var stream = std.Io.Writer.fixed(&buf);
+    try formatStats(std.testing.allocator, &stream, agg, "all time", 1);
 
-    const out = stream.getWritten();
+    const out = stream.buffered();
     try std.testing.expect(std.mem.indexOf(u8, out, "Stats (all time") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "use-just-test") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "Top commands") != null);
@@ -471,15 +470,15 @@ test "formatStats prints no-data message on empty aggregate" {
         .latency_sample_count = 0,
     };
     var buf: [256]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    try formatStats(std.testing.allocator, stream.writer(), empty, "all time", 0);
-    try std.testing.expect(std.mem.indexOf(u8, stream.getWritten(), "No hook fires") != null);
+    var stream = std.Io.Writer.fixed(&buf);
+    try formatStats(std.testing.allocator, &stream, empty, "all time", 0);
+    try std.testing.expect(std.mem.indexOf(u8, stream.buffered(), "No hook fires") != null);
 }
 
 test "run on missing projects root prints friendly message and exits 0" {
     var buf: [256]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const code = try run(std.testing.allocator, "/tmp/veer-stats-missing-xyz", null, stream.writer());
+    var stream = std.Io.Writer.fixed(&buf);
+    const code = try run(std.testing.allocator, std.testing.io, "/tmp/veer-stats-missing-xyz", null, &stream);
     try std.testing.expectEqual(@as(u8, 0), code);
-    try std.testing.expect(std.mem.indexOf(u8, stream.getWritten(), "No transcripts") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stream.buffered(), "No transcripts") != null);
 }

@@ -16,8 +16,8 @@ pub const SettingsReader = struct {
     allocator: std.mem.Allocator,
 
     /// Load settings from a JSON file.
-    pub fn loadFile(allocator: std.mem.Allocator, path: []const u8) !SettingsReader {
-        const content = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch {
+    pub fn loadFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !SettingsReader {
+        const content = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024)) catch {
             return error.FileNotFound;
         };
         defer allocator.free(content);
