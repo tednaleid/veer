@@ -125,6 +125,12 @@ pub fn run(allocator: std.mem.Allocator, opts: ValidateOptions, writer: anytype)
                 issues_len += 1;
             }
         }
+        if (action == .rewrite and rewriteToolMismatch(rule)) {
+            if (issues_len < issues_buf.len) {
+                issues_buf[issues_len] = "rewrite requires a tool with a command field";
+                issues_len += 1;
+            }
+        }
         if (action == .allow and used.command) {
             if (issues_len < issues_buf.len) {
                 issues_buf[issues_len] = "allow does not accept command matchers";
@@ -186,10 +192,29 @@ fn validateAll(rules: []const rule_mod.Rule) usize {
                 (used.path and !carried.path);
         };
         if (mismatch) count += 1;
+        if (action == .rewrite and rewriteToolMismatch(rule)) count += 1;
         if (action == .allow and used.command) count += 1;
         if (!rule_mod.hasAnyMatchPub(rule.match) and rule.tool_any == null) count += 1;
     }
     return count;
+}
+
+/// True when the rule's tool (or any tool in tool_any) is known and does not
+/// carry a command field, which makes a rewrite meaningless: the hook's
+/// updatedInput always sets "command", a field the tool does not have, while
+/// permissionDecision still auto-approves the call. An unrecognized tool
+/// (toolFields returns null) is exempt, same as the matcher/tool check.
+fn rewriteToolMismatch(rule: rule_mod.Rule) bool {
+    if (rule.tool_any) |tools| {
+        for (tools) |t| {
+            if (rule_mod.toolFields(t)) |carried| {
+                if (!carried.command) return true;
+            }
+        }
+        return false;
+    }
+    const carried = rule_mod.toolFields(rule.tool) orelse return false;
+    return !carried.command;
 }
 
 // -- Tests --
@@ -301,6 +326,40 @@ test "validate reports a rule whose only issue is a matcher/tool mismatch" {
     const out = stream.getWritten();
     try std.testing.expectEqual(@as(u8, 1), code);
     try std.testing.expect(std.mem.indexOf(u8, out, "probe") != null);
+}
+
+test "validate rejects a rewrite rule on a tool with no command field" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(dir);
+
+    const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/c.toml", .{dir});
+    defer std.testing.allocator.free(path);
+    {
+        const f = try std.fs.cwd().createFile(path, .{});
+        defer f.close();
+        try f.writeAll(
+            \\[[rule]]
+            \\id = "local-escape"
+            \\action = "rewrite"
+            \\tool_any = ["Write"]
+            \\rewrite_to = "noop"
+            \\[rule.match]
+            \\path_any = ["/**"]
+        );
+    }
+
+    var buf: [1024]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    const code = try run(std.testing.allocator, .{ .config_path = path }, stream.writer());
+
+    const out = stream.getWritten();
+    // The count-only path and the per-rule display path must agree: exit
+    // nonzero AND explain why.
+    try std.testing.expectEqual(@as(u8, 1), code);
+    try std.testing.expect(std.mem.indexOf(u8, out, "local-escape") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "rewrite requires a tool with a command field") != null);
 }
 
 test "validate accepts a tool_any rule whose matcher fits every listed tool" {

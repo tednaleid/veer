@@ -143,6 +143,7 @@ pub const ValidationError = error{
     EmptyMatch,
     MatcherToolMismatch,
     AllowRequiresPathOrContent,
+    RewriteRequiresCommand,
     ToolAndToolAny,
 };
 
@@ -187,6 +188,9 @@ pub fn validate(rules: []const Rule) ValidationError!void {
                     {
                         return ValidationError.MatcherToolMismatch;
                     }
+                    if (action == .rewrite and !carried.command) {
+                        return ValidationError.RewriteRequiresCommand;
+                    }
                 }
             }
         } else if (toolFields(rule.tool)) |carried| {
@@ -195,6 +199,9 @@ pub fn validate(rules: []const Rule) ValidationError!void {
                 (used.path and !carried.path))
             {
                 return ValidationError.MatcherToolMismatch;
+            }
+            if (action == .rewrite and !carried.command) {
+                return ValidationError.RewriteRequiresCommand;
             }
         }
 
@@ -507,6 +514,49 @@ test "tool_any with no matchers is a valid tool-name-only rule" {
         .id = "no-notebooks",
         .tool_any = &.{"NotebookEdit"},
         .message = "M",
+    }};
+    try validate(&rules);
+}
+
+test "rewrite on a tool with no command field fails validation" {
+    const rules = [_]Rule{.{
+        .id = "local-escape",
+        .action = .rewrite,
+        .tool = "Write",
+        .rewrite_to = "noop",
+        .match = .{ .path_any = &.{"/**"} },
+    }};
+    try std.testing.expectError(ValidationError.RewriteRequiresCommand, validate(&rules));
+}
+
+test "rewrite on Bash passes validation" {
+    const rules = [_]Rule{.{
+        .id = "use-just-test",
+        .action = .rewrite,
+        .rewrite_to = "just test",
+        .match = .{ .command = "pytest" },
+    }};
+    try validate(&rules);
+}
+
+test "rewrite on tool_any with no command field fails validation" {
+    const rules = [_]Rule{.{
+        .id = "local-escape-multi",
+        .action = .rewrite,
+        .tool_any = &.{ "Write", "Edit" },
+        .rewrite_to = "noop",
+        .match = .{ .path_any = &.{"/**"} },
+    }};
+    try std.testing.expectError(ValidationError.RewriteRequiresCommand, validate(&rules));
+}
+
+test "rewrite on an unrecognized tool is exempt from the command check" {
+    const rules = [_]Rule{.{
+        .id = "mcp-rewrite",
+        .action = .rewrite,
+        .tool = "mcp__filesystem__write_file",
+        .rewrite_to = "noop",
+        .match = .{ .raw_regex = "x" },
     }};
     try validate(&rules);
 }
