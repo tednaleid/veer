@@ -1,7 +1,7 @@
 .{
     .name = .veer,
     .fingerprint = 0x878da6654b69a295,
-    .version = "0.2.0",
+    .version = "0.2.1",
     .dependencies = .{
         .@"zig-tree-sitter" = .{
             .url = "git+https://github.com/tree-sitter/zig-tree-sitter#0cf58172e61f6fdd16f681cde42b4acb531a23db",
