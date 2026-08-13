@@ -466,7 +466,9 @@ fn runAdd(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
     const params = comptime clap.parseParamsComptime(
         \\-h, --help              Display this help and exit.
         \\    --action <str>      Rule action (allow, reject, rewrite).
-        \\    --command <str>     Command pattern to match.
+        \\    --command <str>     Command pattern to match. Mutually exclusive with --path.
+        \\    --path <str>        Path glob to match. Mutually exclusive with --command.
+        \\    --tool <str>        Tool to match (default: Bash for --command, Write and Edit for --path).
         \\    --id <str>          Rule identifier.
         \\    --name <str>        Rule name.
         \\    --message <str>     Message to display.
@@ -491,6 +493,8 @@ fn runAdd(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
     const opts = add_cmd.AddOptions{
         .action = res.args.action,
         .command = res.args.command,
+        .path = res.args.path,
+        .tool = res.args.tool,
         .id = res.args.id,
         .name = res.args.name,
         .message = res.args.message,
