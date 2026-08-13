@@ -122,6 +122,20 @@ pub fn formatMatch(arena: std.mem.Allocator, m: config_mod.MatchConfig) ![]const
         try aw.print("\"{s}\"", .{s});
     }
 
+    // -- path (non-Bash) --
+    if (m.path) |p| {
+        try ensureSep(&aw, &buf);
+        try aw.writeAll(p);
+    }
+    if (m.path_any) |paths| {
+        try ensureSep(&aw, &buf);
+        try writeBraceList(&aw, paths);
+    }
+    if (m.path_regex) |r| {
+        try ensureSep(&aw, &buf);
+        try aw.print("/{s}/", .{r});
+    }
+
     // -- ast shape --
     if (m.ast) |a| {
         try ensureSep(&aw, &buf);
@@ -227,6 +241,28 @@ test "list renders tool_any as a comma-joined list" {
     try std.testing.expectEqual(@as(u8, 0), exit_code);
     const output = stream.getWritten();
     try std.testing.expect(std.mem.indexOf(u8, output, "Write,Edit,NotebookEdit") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "**/*.gen.ts") != null);
+}
+
+test "list renders a path gate's match instead of (any)" {
+    const rules = [_]config_mod.Rule{
+        .{
+            .id = "src-only-writes",
+            .action = .allow,
+            .tool_any = &.{ "Write", "Edit" },
+            .message = "Writes must stay under src/.",
+            .match = .{ .path_any = &.{"src/**"} },
+        },
+    };
+
+    var buf: [2048]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    const exit_code = try run(std.testing.allocator, &rules, null, stream.writer());
+
+    try std.testing.expectEqual(@as(u8, 0), exit_code);
+    const output = stream.getWritten();
+    try std.testing.expect(std.mem.indexOf(u8, output, "{src/**}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(any)") == null);
 }
 
 test "list with no rules" {
@@ -337,6 +373,18 @@ test "formatMatch: flag_any in brace list with mixed lengths" {
 
 test "formatMatch: content_regex (non-Bash tool)" {
     try expectFormat("/[Aa]ctually/", .{ .content_regex = "[Aa]ctually" });
+}
+
+test "formatMatch: path (non-Bash tool)" {
+    try expectFormat("src/**", .{ .path = "src/**" });
+}
+
+test "formatMatch: path_any uses brace list" {
+    try expectFormat("{src/**,dist/**}", .{ .path_any = &.{ "src/**", "dist/**" } });
+}
+
+test "formatMatch: path_regex wrapped in slashes" {
+    try expectFormat("/\\.gen\\.[jt]s$/", .{ .path_regex = "\\.gen\\.[jt]s$" });
 }
 
 test "formatMatch: content_contains" {
