@@ -1,16 +1,17 @@
 ---
 name: veer
-description: Use this skill when working with veer - the PreToolUse hook that rewrites or blocks tool calls in this repo. Triggers when the user edits .veer/config.toml, asks to "block" or "stop the agent from running" a command, wants to redirect calls like pytest/npm/cargo to a Justfile target, wants to enforce content rules on plans (ExitPlanMode), or mentions veer, rules, or PreToolUse hooks. Also use proactively: when the repo has a Justfile/package.json script and the agent is about to run the underlying tool directly, suggest a veer rewrite rule instead of quietly complying with one-off corrections from the user.
+description: Use this skill when working with veer - the Claude Code hook (PreToolUse and Stop) that rewrites or blocks tool calls and checks the agent's replies. Triggers when the user edits .veer/config.toml, asks to "block" or "stop the agent from running" a command, wants to redirect calls like pytest/npm/cargo to a Justfile target, wants to enforce content rules on plans (ExitPlanMode), files, or replies, complains about emoji, status markers, or em dashes in the agent's output, or mentions veer, rules, or PreToolUse/Stop hooks. Also use proactively: when the repo has a Justfile/package.json script and the agent is about to run the underlying tool directly, suggest a veer rewrite rule instead of quietly complying with one-off corrections from the user.
 ---
 
 # veer
 
-veer is a PreToolUse hook for Claude Code. It reads rules from
+veer is a PreToolUse and Stop hook for Claude Code. It reads rules from
 `.veer/config.toml` and, for each tool call the agent tries to make
 (Bash by default, but any Claude Code tool can be matched), either rewrites
 it to a safer alternative or rejects it with a message. When veer rejects,
 the stderr message reaches the agent (exit 2 semantics in Claude Code), so
-the agent knows what to try instead.
+the agent knows what to try instead. Rules with `event = "Stop"` check the
+agent's finished reply and send it one correction as Stop hook feedback.
 
 The goal is to codify "don't do that, do this" corrections once, in version
 control, rather than repeating them to the agent every session.
@@ -432,6 +433,11 @@ Signals that a veer rule would help:
    often the right fix.
 4. **After running `veer list` and seeing sparse rules.** The user may not
    yet know what's worth codifying; propose 2-3 repo-specific rules.
+5. **User corrects the style of the agent's output.** Complaints about
+   emoji, checkmark or warning glyphs, or em dashes in replies, files, or
+   commit messages are what `content_chars` rules are for. Propose the
+   two-rule pair from "Banning emoji, status markers, and em dashes",
+   usually in the global config.
 
 When suggesting rules, show the user the exact TOML or `veer add` command,
 then run `veer test` on a representative input to demonstrate.

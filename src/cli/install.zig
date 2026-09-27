@@ -507,6 +507,13 @@ test "skill_content documents the allow gate action" {
     try testing.expect(std.mem.indexOf(u8, skill_content, "The three actions") != null);
 }
 
+test "skill_content description triggers on reply and emoji rules" {
+    const end = std.mem.indexOfPos(u8, skill_content, 4, "---").?;
+    const frontmatter = skill_content[0..end];
+    try testing.expect(std.mem.indexOf(u8, frontmatter, "Stop") != null);
+    try testing.expect(std.mem.indexOf(u8, frontmatter, "emoji") != null);
+}
+
 test "skill_content documents character classes" {
     try testing.expect(std.mem.indexOf(u8, skill_content, "content_chars") != null);
 }
