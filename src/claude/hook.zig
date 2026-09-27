@@ -221,6 +221,19 @@ fn appendStrings(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8),
     }
 }
 
+/// True when a config load failure should block the call: PreToolUse input,
+/// including input with no `hook_event_name` or input that does not parse.
+/// A blocking exit on any other event would not stop a tool call; on Stop it
+/// would force Claude to keep continuing.
+pub fn blocksOnConfigError(allocator: std.mem.Allocator, json_str: []const u8) bool {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_str, .{}) catch return true;
+    defer parsed.deinit();
+    if (parsed.value != .object) return true;
+    const val = parsed.value.object.get("hook_event_name") orelse return true;
+    if (val != .string) return true;
+    return std.mem.eql(u8, val.string, "PreToolUse");
+}
+
 /// Read the transcript at `transcript_path`, locate the most recent
 /// plan_mode attachment, then read and return that plan file's contents.
 /// Returns null on any I/O or parse failure.
@@ -779,4 +792,17 @@ test "formatStopFeedback emits additionalContext and a reject marker" {
     const hso = parsed.value.object.get("hookSpecificOutput").?.object;
     try std.testing.expectEqualStrings("Stop", hso.get("hookEventName").?.string);
     try std.testing.expectEqualStrings("line one\nline two", hso.get("additionalContext").?.string);
+}
+
+test "blocksOnConfigError is true only for PreToolUse input" {
+    const cases = .{
+        .{ "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"ls\"}}", true },
+        .{ "{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\"}", true },
+        .{ "{\"hook_event_name\":\"Stop\",\"stop_hook_active\":true}", false },
+        .{ "{\"hook_event_name\":\"MessageDisplay\",\"delta\":\"x\"}", false },
+        .{ "not json", true },
+    };
+    inline for (cases) |c| {
+        try std.testing.expectEqual(c[1], blocksOnConfigError(std.testing.allocator, c[0]));
+    }
 }

@@ -1,7 +1,7 @@
 default: check
 
 # Run tests + lint + help/no-config/verbose/from-subdir smoke tests
-check: test lint check-help check-no-config check-verbose check-from-subdir check-local-override check-local-install-exclude check-gate check-chars
+check: test lint check-help check-no-config check-verbose check-from-subdir check-local-override check-local-install-exclude check-gate check-chars check-stop-no-config
 
 # Run all tests
 test:
@@ -112,6 +112,32 @@ check-chars:
     out=$(echo '{"hook_event_name":"Stop","stop_hook_active":false,"last_assistant_message":"run `grep ✓`"}' | "$bin" check --config "$cfg")
     if [ -n "$out" ]; then echo "check-chars code span: FAIL ($out)"; exit 1; fi
     echo "check-chars code span: PASS"
+
+# Smoke test: a Stop hook with a missing or broken config exits 0, so a config
+# problem cannot force Claude to keep continuing.
+check-stop-no-config:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    zig build
+    bin="$(pwd)/zig-out/bin/veer"
+    tmp=$(mktemp -d) ; trap 'rm -rf "$tmp"' EXIT
+    cd "$tmp"
+    stop='{"hook_event_name":"Stop","stop_hook_active":false,"last_assistant_message":"done"}'
+
+    set +e
+    echo "$stop" | env -u CLAUDE_PROJECT_DIR -u XDG_CONFIG_HOME HOME="$tmp" "$bin" check > /dev/null 2>&1
+    code=$?
+    set -e
+    [ "$code" = "0" ] || { echo "check-stop-no-config missing: FAIL (exit $code)"; exit 1; }
+    echo "check-stop-no-config missing: PASS"
+
+    mkdir -p .veer && echo 'this is not toml [[[' > .veer/config.toml
+    set +e
+    echo "$stop" | env -u CLAUDE_PROJECT_DIR -u XDG_CONFIG_HOME HOME="$tmp" "$bin" check > /dev/null 2>&1
+    code=$?
+    set -e
+    [ "$code" = "0" ] || { echo "check-stop-no-config broken: FAIL (exit $code)"; exit 1; }
+    echo "check-stop-no-config broken: PASS"
 
 # Smoke test: --verbose emits systemMessage on allow and rewrite paths.
 check-verbose:

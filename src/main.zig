@@ -19,6 +19,7 @@ const test_cmd = @import("cli/test_cmd.zig");
 const validate_cmd = @import("cli/validate_cmd.zig");
 const config_path_mod = @import("cli/config_path.zig");
 const settings_mod = @import("claude/settings.zig");
+const hook = @import("claude/hook.zig");
 
 const Command = enum { check, install, uninstall, list, add, remove, stats, scan, @"test", validate };
 
@@ -146,11 +147,13 @@ fn printNoConfigSearchPath(allocator: std.mem.Allocator, io: std.Io, environ: st
     }
 }
 
-/// Like loadConfig, but for the check hot-path: any failure exits 2 (reject)
-/// with a hook-oriented message that reaches the LLM via Claude Code's
-/// exit-2 semantics. Silently allowing on misconfiguration would defeat the
-/// purpose of the hook.
-fn loadConfigForCheck(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ, config_path: ?[]const u8) LoadedConfig {
+/// Like loadConfig, but for the check hot-path: any failure exits with
+/// `fail_code` after a hook-oriented message. For PreToolUse that is 2
+/// (reject), so the message reaches the LLM via Claude Code's exit-2
+/// semantics; silently allowing on misconfiguration would defeat the purpose
+/// of the hook. Other events pass 0, because exit 2 on Stop forces Claude to
+/// keep continuing.
+fn loadConfigForCheck(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ, config_path: ?[]const u8, fail_code: u8) LoadedConfig {
     if (config_path) |path| {
         var detail: ?config_mod.ParseDetail = null;
         defer if (detail) |*d| d.deinit(allocator);
@@ -177,7 +180,7 @@ fn loadConfigForCheck(allocator: std.mem.Allocator, io: std.Io, environ: std.pro
                 },
             };
             std.debug.print("Fix the file or run 'veer uninstall' to remove the hook.\n", .{});
-            std.process.exit(2);
+            std.process.exit(fail_code);
         }
     }
 
@@ -202,7 +205,7 @@ fn loadConfigForCheck(allocator: std.mem.Allocator, io: std.Io, environ: std.pro
         } else {
             std.debug.print("veer: failed to load config: {}\n", .{err});
         }
-        std.process.exit(2);
+        std.process.exit(fail_code);
     }
 }
 
@@ -256,10 +259,6 @@ fn runCheck(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Envir
     const config_path: ?[]const u8 = res.args.config;
     const verbose: bool = res.args.verbose != 0;
 
-    var loaded = loadConfigForCheck(allocator, io, environ, config_path);
-    defer if (loaded.parsed_file) |*pf| pf.deinit();
-    defer if (loaded.merged) |*m| m.deinit(allocator);
-
     var stdin_buf: [4096]u8 = undefined;
     var stdin_reader = std.Io.File.stdin().readerStreaming(io, &stdin_buf);
     const stdin_data = stdin_reader.interface.allocRemaining(allocator, .limited(1024 * 1024)) catch {
@@ -267,6 +266,11 @@ fn runCheck(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Envir
         std.process.exit(1);
     };
     defer allocator.free(stdin_data);
+
+    const fail_code: u8 = if (hook.blocksOnConfigError(allocator, stdin_data)) 2 else 0;
+    var loaded = loadConfigForCheck(allocator, io, environ, config_path, fail_code);
+    defer if (loaded.parsed_file) |*pf| pf.deinit();
+    defer if (loaded.merged) |*m| m.deinit(allocator);
 
     var stdout_buf: [16384]u8 = undefined;
     var stdout_stream = std.Io.Writer.fixed(&stdout_buf);
