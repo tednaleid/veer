@@ -187,10 +187,10 @@ check-no-config:
     tmp=$(mktemp -d) ; trap 'rm -rf "$tmp"' EXIT
     cd "$tmp"  # no .veer/ here, isolate HOME too
     set +e
-    # env -u CLAUDE_PROJECT_DIR strips any leaked value from an outer Claude
-    # Code session that would otherwise point at a real project with a config.
+    # env -u strips CLAUDE_PROJECT_DIR and XDG_CONFIG_HOME values leaked from an
+    # outer session that would otherwise point at a real project or global config.
     echo '{"tool_name":"Bash","tool_input":{"command":"ls -la"}}' \
-        | env -u CLAUDE_PROJECT_DIR HOME="$tmp" "$bin" check > stdout.txt 2> stderr.txt
+        | env -u CLAUDE_PROJECT_DIR -u XDG_CONFIG_HOME HOME="$tmp" "$bin" check > stdout.txt 2> stderr.txt
     code=$?
     set -e
     [ "$code" = "2" ] || { echo "FAIL: expected exit 2, got $code"; cat stderr.txt; exit 1; }
