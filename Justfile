@@ -15,6 +15,11 @@ lint:
 fmt:
     zig fmt src/
 
+# Regenerate the Unicode emoji table from emoji-data.txt
+gen-emoji-table:
+    ./scripts/gen_emoji_table.py
+    zig fmt src/engine/emoji_table.zig
+
 # Build debug binary
 build:
     zig build

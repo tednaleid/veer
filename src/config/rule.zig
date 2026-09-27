@@ -19,6 +19,13 @@ pub const AstMatch = struct {
     min_count: ?i64 = null,
 };
 
+/// Named character sets a `content_chars` matcher can forbid.
+pub const CharClass = enum { emoji, status_markers, emdash };
+
+/// How a tool's content is written. Code spans in markdown content are not
+/// checked by `content_chars`.
+pub const ContentFormat = enum { raw, markdown };
+
 pub const MatchConfig = struct {
     // Command name matching (per-command, glob-aware)
     command: ?[]const u8 = null,

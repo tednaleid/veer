@@ -7,6 +7,7 @@ comptime {
     _ = @import("engine/matcher.zig");
     _ = @import("engine/engine.zig");
     _ = @import("engine/path.zig");
+    _ = @import("engine/chars.zig");
     _ = @import("config/rule.zig");
     _ = @import("config/config.zig");
     _ = @import("claude/hook.zig");
