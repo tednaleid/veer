@@ -34,6 +34,14 @@ fn hookCommandFor(verbose: bool) []const u8 {
     return if (verbose) hook_command_verbose else hook_command_plain;
 }
 
+/// Hook events veer registers for. PreToolUse entries use matcher "*"; Stop
+/// takes no matcher.
+const HookEvent = struct { name: []const u8, matcher: ?[]const u8 };
+const hook_events = [_]HookEvent{
+    .{ .name = "PreToolUse", .matcher = "*" },
+    .{ .name = "Stop", .matcher = null },
+};
+
 fn isVeerCommandString(cmd: []const u8) bool {
     return std.mem.eql(u8, cmd, hook_command_plain) or
         std.mem.eql(u8, cmd, hook_command_verbose);
@@ -151,42 +159,47 @@ fn installHook(allocator: std.mem.Allocator, io: std.Io, path: []const u8, verbo
 
     const arena = parsed.arena.allocator();
 
-    // Navigate / create hooks.PreToolUse array.
     const hooks_val = try getOrCreateObject(arena, &parsed.value.object, "hooks");
-    const pretool_val = try getOrCreateArray(arena, &hooks_val.object, "PreToolUse");
-
-    // Find the matcher="*" entry, or create one.
-    var star_entry: *std.json.Value = blk: {
-        for (pretool_val.array.items) |*entry| {
-            if (entry.* == .object) {
-                if (entry.object.get("matcher")) |m| {
-                    if (m == .string and std.mem.eql(u8, m.string, "*")) {
-                        break :blk entry;
-                    }
-                }
-            }
-        }
-        // Append a new entry
-        var new_obj: std.json.ObjectMap = .empty;
-        try new_obj.put(arena, "matcher", .{ .string = "*" });
-        try new_obj.put(arena, "hooks", .{ .array = .init(arena) });
-        try pretool_val.array.append(.{ .object = new_obj });
-        break :blk &pretool_val.array.items[pretool_val.array.items.len - 1];
-    };
-
-    // Get or create the nested "hooks" array on that matcher entry.
-    const matcher_hooks = try getOrCreateArray(arena, &star_entry.object, "hooks");
-
-    // Append {"type":"command","command":"veer check"} or the --verbose variant.
-    var hook_obj: std.json.ObjectMap = .empty;
-    try hook_obj.put(arena, "type", .{ .string = "command" });
-    try hook_obj.put(arena, "command", .{ .string = hookCommandFor(verbose) });
-    try matcher_hooks.array.append(.{ .object = hook_obj });
+    for (hook_events) |event| {
+        try addVeerHook(arena, &hooks_val.object, event, verbose);
+    }
 
     try writeJsonAtomic(allocator, io, path, parsed.value);
     const verb: []const u8 = if (was_present) "updated" else "installed";
     try writer.print("veer hook {s} in {s}\n", .{ verb, path });
     return 0;
+}
+
+/// Append the veer command to the event's entry whose matcher equals
+/// `event.matcher` (or that has no matcher, when it is null), creating the
+/// entry if none exists.
+fn addVeerHook(arena: std.mem.Allocator, hooks_obj: *std.json.ObjectMap, event: HookEvent, verbose: bool) !void {
+    const event_arr = try getOrCreateArray(arena, hooks_obj, event.name);
+
+    const entry: *std.json.Value = blk: {
+        for (event_arr.array.items) |*e| {
+            if (e.* != .object) continue;
+            const m = e.object.get("matcher");
+            if (event.matcher) |want| {
+                if (m) |v| {
+                    if (v == .string and std.mem.eql(u8, v.string, want)) break :blk e;
+                }
+            } else if (m == null) {
+                break :blk e;
+            }
+        }
+        var new_obj: std.json.ObjectMap = .empty;
+        if (event.matcher) |want| try new_obj.put(arena, "matcher", .{ .string = want });
+        try new_obj.put(arena, "hooks", .{ .array = .init(arena) });
+        try event_arr.array.append(.{ .object = new_obj });
+        break :blk &event_arr.array.items[event_arr.array.items.len - 1];
+    };
+
+    const entry_hooks = try getOrCreateArray(arena, &entry.object, "hooks");
+    var hook_obj: std.json.ObjectMap = .empty;
+    try hook_obj.put(arena, "type", .{ .string = "command" });
+    try hook_obj.put(arena, "command", .{ .string = hookCommandFor(verbose) });
+    try entry_hooks.array.append(.{ .object = hook_obj });
 }
 
 fn uninstallHook(allocator: std.mem.Allocator, io: std.Io, path: []const u8, writer: anytype) !u8 {
@@ -228,53 +241,60 @@ fn uninstallHook(allocator: std.mem.Allocator, io: std.Io, path: []const u8, wri
     return 0;
 }
 
-/// Walk obj -> hooks -> PreToolUse[] -> each entry -> hooks[], remove veer
-/// entries, and prune empty containers. Returns true if anything was removed.
+/// Remove veer entries from every event veer registers for, pruning empty
+/// containers. Returns true if anything was removed.
 fn removeVeerEntries(root: *std.json.ObjectMap) bool {
-    var removed_any = false;
     const hooks_val = root.getPtr("hooks") orelse return false;
     if (hooks_val.* != .object) return false;
 
-    const pretool_val = hooks_val.object.getPtr("PreToolUse") orelse return false;
-    if (pretool_val.* != .array) return false;
+    var removed_any = false;
+    for (hook_events) |event| {
+        if (removeFromEvent(&hooks_val.object, event.name)) removed_any = true;
+    }
+    if (!removed_any) return false;
 
-    // Walk matcher entries; rebuild the outer array filtering out ones that
-    // become empty after removal.
+    if (hooks_val.object.count() == 0) _ = root.swapRemove("hooks");
+    return true;
+}
+
+/// Walk hooks[event_name][] -> each entry -> hooks[], remove veer entries,
+/// drop entries left empty, and drop the event key when it empties.
+fn removeFromEvent(hooks_obj: *std.json.ObjectMap, event_name: []const u8) bool {
+    const event_val = hooks_obj.getPtr(event_name) orelse return false;
+    if (event_val.* != .array) return false;
+
+    var removed_any = false;
     var i: usize = 0;
-    while (i < pretool_val.array.items.len) {
-        const entry = &pretool_val.array.items[i];
+    while (i < event_val.array.items.len) {
+        const entry = &event_val.array.items[i];
         if (entry.* != .object) {
             i += 1;
             continue;
         }
-        const matcher_hooks = entry.object.getPtr("hooks");
-        if (matcher_hooks == null or matcher_hooks.?.* != .array) {
+        const entry_hooks = entry.object.getPtr("hooks");
+        if (entry_hooks == null or entry_hooks.?.* != .array) {
             i += 1;
             continue;
         }
-        // Filter out veer entries from this matcher's hooks[].
         var j: usize = 0;
-        while (j < matcher_hooks.?.array.items.len) {
-            if (isVeerHookEntry(&matcher_hooks.?.array.items[j])) {
-                _ = matcher_hooks.?.array.orderedRemove(j);
+        while (j < entry_hooks.?.array.items.len) {
+            if (isVeerHookEntry(&entry_hooks.?.array.items[j])) {
+                _ = entry_hooks.?.array.orderedRemove(j);
                 removed_any = true;
             } else {
                 j += 1;
             }
         }
-        // Drop the matcher entry entirely if its hooks[] is now empty.
-        if (matcher_hooks.?.array.items.len == 0) {
-            _ = pretool_val.array.orderedRemove(i);
+        // Drop the entry entirely if its hooks[] is now empty.
+        if (entry_hooks.?.array.items.len == 0) {
+            _ = event_val.array.orderedRemove(i);
         } else {
             i += 1;
         }
     }
 
     if (!removed_any) return false;
-
-    // Prune empty containers upward.
-    if (pretool_val.array.items.len == 0) _ = hooks_val.object.swapRemove("PreToolUse");
-    if (hooks_val.object.count() == 0) _ = root.swapRemove("hooks");
+    if (event_val.array.items.len == 0) _ = hooks_obj.swapRemove(event_name);
     return true;
 }
 
@@ -563,14 +583,14 @@ test "install is idempotent (no duplicate veer entries)" {
 
     const content = try readFileAlloc(testing.allocator, std.testing.io, paths.settings);
     defer testing.allocator.free(content);
-    // Count occurrences of "veer check" -- should be exactly 1
+    // Count occurrences of "veer check" -- one entry per hook event
     var count: usize = 0;
     var i: usize = 0;
     while (std.mem.indexOfPos(u8, content, i, "veer check")) |pos| {
         count += 1;
         i = pos + 1;
     }
-    try testing.expectEqual(@as(usize, 1), count);
+    try testing.expectEqual(@as(usize, 2), count);
 }
 
 test "install rejects invalid JSON in settings.json" {
@@ -837,7 +857,7 @@ test "install then install --verbose replaces the entry (one entry total)" {
     const content = try readFileAlloc(testing.allocator, std.testing.io, paths.settings);
     defer testing.allocator.free(content);
 
-    // Exactly one veer entry, in verbose form. Use the JSON-quoted form to
+    // One veer entry per hook event, in verbose form. Use the JSON-quoted form to
     // avoid accidentally counting the verbose entry twice (it contains both
     // "veer check" and "veer check --verbose" as substrings).
     var verbose_count: usize = 0;
@@ -848,7 +868,7 @@ test "install then install --verbose replaces the entry (one entry total)" {
             i = pos + 1;
         }
     }
-    try testing.expectEqual(@as(usize, 1), verbose_count);
+    try testing.expectEqual(@as(usize, 2), verbose_count);
 
     var plain_count: usize = 0;
     {
@@ -1005,4 +1025,58 @@ test "gitInfoExcludePath returns a path inside a git repo" {
     defer if (path) |p| testing.allocator.free(p);
     try testing.expect(path != null);
     try testing.expect(std.mem.endsWith(u8, std.mem.trim(u8, path.?, " \t\r\n"), "info/exclude"));
+}
+
+test "install registers veer under PreToolUse and Stop" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
+    defer testing.allocator.free(tmp_root);
+    const paths = try testPaths(testing.allocator, tmp_root);
+    defer freeTestPaths(testing.allocator, paths);
+
+    var buf: [4096]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&buf);
+    _ = try install(testing.allocator, std.testing.io, paths, false, &stream);
+
+    const content = try readFileAlloc(testing.allocator, std.testing.io, paths.settings);
+    defer testing.allocator.free(content);
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, content, .{});
+    defer parsed.deinit();
+    const hooks = parsed.value.object.get("hooks").?.object;
+    const stop = hooks.get("Stop").?.array.items;
+    try testing.expectEqual(@as(usize, 1), stop.len);
+    try testing.expect(stop[0].object.get("matcher") == null);
+    const cmd = stop[0].object.get("hooks").?.array.items[0].object.get("command").?.string;
+    try testing.expectEqualStrings("veer check", cmd);
+}
+
+test "install preserves an existing non-veer Stop hook and uninstall keeps it" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
+    defer testing.allocator.free(tmp_root);
+    const paths = try testPaths(testing.allocator, tmp_root);
+    defer freeTestPaths(testing.allocator, paths);
+
+    try testWriteFile(std.testing.io, paths.settings,
+        \\{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"notify-done"}]}]}}
+    );
+
+    var buf: [4096]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&buf);
+    _ = try install(testing.allocator, std.testing.io, paths, false, &stream);
+    {
+        const content = try readFileAlloc(testing.allocator, std.testing.io, paths.settings);
+        defer testing.allocator.free(content);
+        try testing.expect(std.mem.indexOf(u8, content, "notify-done") != null);
+        try testing.expect(std.mem.indexOf(u8, content, "veer check") != null);
+    }
+
+    stream.end = 0;
+    _ = try uninstall(testing.allocator, std.testing.io, paths, &stream);
+    const content = try readFileAlloc(testing.allocator, std.testing.io, paths.settings);
+    defer testing.allocator.free(content);
+    try testing.expect(std.mem.indexOf(u8, content, "notify-done") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "veer check") == null);
 }
