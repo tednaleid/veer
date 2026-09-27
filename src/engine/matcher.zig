@@ -8,6 +8,8 @@ const AstMatch = @import("../config/rule.zig").AstMatch;
 const CommandInfo = @import("command_info.zig").CommandInfo;
 const SingleCommand = @import("command_info.zig").SingleCommand;
 const path_mod = @import("path.zig");
+const chars = @import("chars.zig");
+const ContentFormat = @import("../config/rule.zig").ContentFormat;
 
 /// Returns the index of the matched command, or null if no match.
 /// For cross-command-only matches (no per-command fields), returns
@@ -208,9 +210,10 @@ fn isOnlyCrossField(m: MatchConfig) bool {
     return !hasPerCommandFields(m);
 }
 
-/// Match a rule's content matchers (content_regex, content_contains) against
-/// a string. Returns true when all configured content matchers match, and
-/// true when the rule has no content matchers at all.
+/// Match a rule's content matchers (content_regex, content_contains,
+/// content_chars) against a string. Returns true when all configured content
+/// matchers match, and true when the rule has no content matchers at all.
+/// `format` decides whether content_chars skips markdown code spans.
 ///
 /// The engine skips any rule whose content matchers have no content to read,
 /// so `content` is non-null whenever this has matchers to apply. The null
@@ -218,9 +221,9 @@ fn isOnlyCrossField(m: MatchConfig) bool {
 ///
 /// Takes an allocator because content (e.g., a plan file) can be larger than
 /// the fixed stack buffer used by the command-line `regexMatch`.
-pub fn matchContent(allocator: std.mem.Allocator, rule: Rule, content: ?[]const u8) bool {
+pub fn matchContent(allocator: std.mem.Allocator, rule: Rule, content: ?[]const u8, format: ContentFormat) bool {
     const m = rule.match;
-    const has_matchers = m.content_regex != null or m.content_contains != null;
+    const has_matchers = m.content_regex != null or m.content_contains != null or m.content_chars != null;
     if (!has_matchers) return true;
 
     const text = content orelse return false;
@@ -230,6 +233,10 @@ pub fn matchContent(allocator: std.mem.Allocator, rule: Rule, content: ?[]const 
     }
     if (m.content_contains) |needle| {
         if (std.mem.indexOf(u8, text, needle) == null) return false;
+    }
+    if (m.content_chars) |names| {
+        const classes = chars.ClassSet.fromNames(names) orelse return false;
+        if (!chars.containsAny(allocator, text, format, classes)) return false;
     }
     return true;
 }
@@ -683,8 +690,8 @@ test "flag long glob matching" {
 
 test "matchContent: no content matchers returns true (tool-name match suffices)" {
     const rule = Rule{ .id = "t", .tool = "ExitPlanMode", .message = "m", .match = .{} };
-    try std.testing.expect(matchContent(std.testing.allocator, rule, "any content"));
-    try std.testing.expect(matchContent(std.testing.allocator, rule, null));
+    try std.testing.expect(matchContent(std.testing.allocator, rule, "any content", .raw));
+    try std.testing.expect(matchContent(std.testing.allocator, rule, null, .raw));
 }
 
 test "matchContent: content_contains matches substring" {
@@ -694,8 +701,8 @@ test "matchContent: content_contains matches substring" {
         .message = "m",
         .match = .{ .content_contains = "actually" },
     };
-    try std.testing.expect(matchContent(std.testing.allocator, rule, "the plan actually changed mid-document"));
-    try std.testing.expect(!matchContent(std.testing.allocator, rule, "a clean plan"));
+    try std.testing.expect(matchContent(std.testing.allocator, rule, "the plan actually changed mid-document", .raw));
+    try std.testing.expect(!matchContent(std.testing.allocator, rule, "a clean plan", .raw));
 }
 
 test "matchContent: content_contains is case-sensitive" {
@@ -705,7 +712,7 @@ test "matchContent: content_contains is case-sensitive" {
         .message = "m",
         .match = .{ .content_contains = "actually" },
     };
-    try std.testing.expect(!matchContent(std.testing.allocator, rule, "Actually capitalized"));
+    try std.testing.expect(!matchContent(std.testing.allocator, rule, "Actually capitalized", .raw));
 }
 
 test "matchContent: content_regex matches pattern" {
@@ -715,9 +722,9 @@ test "matchContent: content_regex matches pattern" {
         .message = "m",
         .match = .{ .content_regex = "TODO|FIXME" },
     };
-    try std.testing.expect(matchContent(std.testing.allocator, rule, "step 1 TODO finish later"));
-    try std.testing.expect(matchContent(std.testing.allocator, rule, "FIXME the auth"));
-    try std.testing.expect(!matchContent(std.testing.allocator, rule, "all done"));
+    try std.testing.expect(matchContent(std.testing.allocator, rule, "step 1 TODO finish later", .raw));
+    try std.testing.expect(matchContent(std.testing.allocator, rule, "FIXME the auth", .raw));
+    try std.testing.expect(!matchContent(std.testing.allocator, rule, "all done", .raw));
 }
 
 test "matchContent: content_regex case-insensitive via character classes" {
@@ -727,8 +734,8 @@ test "matchContent: content_regex case-insensitive via character classes" {
         .message = "m",
         .match = .{ .content_regex = "[Aa]ctually" },
     };
-    try std.testing.expect(matchContent(std.testing.allocator, rule, "Actually capitalized"));
-    try std.testing.expect(matchContent(std.testing.allocator, rule, "lowercase actually"));
+    try std.testing.expect(matchContent(std.testing.allocator, rule, "Actually capitalized", .raw));
+    try std.testing.expect(matchContent(std.testing.allocator, rule, "lowercase actually", .raw));
 }
 
 test "matchContent: both matchers must match (AND)" {
@@ -738,9 +745,9 @@ test "matchContent: both matchers must match (AND)" {
         .message = "m",
         .match = .{ .content_contains = "actually", .content_regex = "TODO" },
     };
-    try std.testing.expect(matchContent(std.testing.allocator, rule, "actually TODO finish"));
-    try std.testing.expect(!matchContent(std.testing.allocator, rule, "actually nothing left"));
-    try std.testing.expect(!matchContent(std.testing.allocator, rule, "TODO without the other word"));
+    try std.testing.expect(matchContent(std.testing.allocator, rule, "actually TODO finish", .raw));
+    try std.testing.expect(!matchContent(std.testing.allocator, rule, "actually nothing left", .raw));
+    try std.testing.expect(!matchContent(std.testing.allocator, rule, "TODO without the other word", .raw));
 }
 
 test "matchContent: rule with content matchers but null content does not match" {
@@ -750,7 +757,7 @@ test "matchContent: rule with content matchers but null content does not match" 
         .message = "m",
         .match = .{ .content_contains = "actually" },
     };
-    try std.testing.expect(!matchContent(std.testing.allocator, rule, null));
+    try std.testing.expect(!matchContent(std.testing.allocator, rule, null, .raw));
 }
 
 test "matchContent: content larger than 1KB still matches (heap allocation)" {
@@ -770,7 +777,7 @@ test "matchContent: content larger than 1KB still matches (heap allocation)" {
         .message = "m",
         .match = .{ .content_regex = "actually" },
     };
-    try std.testing.expect(matchContent(std.testing.allocator, rule, buf.items));
+    try std.testing.expect(matchContent(std.testing.allocator, rule, buf.items, .raw));
 }
 
 // -- matchPathMatchers tests --

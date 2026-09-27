@@ -5,6 +5,8 @@ const std = @import("std");
 const Rule = @import("../config/rule.zig").Rule;
 const Action = @import("../config/rule.zig").Action;
 const MatchConfig = @import("../config/rule.zig").MatchConfig;
+const Event = @import("../config/rule.zig").Event;
+const ContentFormat = @import("../config/rule.zig").ContentFormat;
 const rule_mod = @import("../config/rule.zig");
 const matcher = @import("matcher.zig");
 const shell = @import("shell.zig");
@@ -18,6 +20,8 @@ pub const CheckResult = struct {
     rewrite_to: ?[]const u8 = null,
     match_start: ?u32 = null, // byte offset for surgical rewrite
     match_end: ?u32 = null,
+    /// The matched rule's `content_chars`, so callers can list the hits.
+    content_chars: ?[]const []const u8 = null,
 
     pub const approve: CheckResult = .{ .action = null };
 };
@@ -25,8 +29,9 @@ pub const CheckResult = struct {
 /// A single tool call to evaluate. Each matcher family reads exactly one
 /// field; a matcher whose field is null makes its rule inapplicable.
 ///
-/// `content` is tool-specific text. For ExitPlanMode it is the resolved plan
-/// file body; for other tools it is null.
+/// `content` is the text the call writes: tool-specific text for a tool call
+/// (the resolved plan body for ExitPlanMode), or the finished reply for a
+/// Stop event. `tool_name` is empty for a Stop event.
 ///
 /// `root` is the directory containing the `.veer/` dir the config came from.
 /// When null, path resolution falls back to `cwd`.
@@ -41,6 +46,8 @@ pub const ToolCall = struct {
     cwd: ?[]const u8 = null,
     root: ?[]const u8 = null,
     home: ?[]const u8 = null,
+    event: Event = .PreToolUse,
+    content_format: ContentFormat = .raw,
 };
 
 /// Evaluate rules against a tool call. Returns the first matching rule's
@@ -73,8 +80,8 @@ pub fn check(
     for (rules) |rule| {
         if (!rule.enabled) continue;
 
-        // Skip rules for different tools
-        if (!rule.matchesTool(call.tool_name)) continue;
+        if (rule.event != call.event) continue;
+        if (call.event == .PreToolUse and !rule.matchesTool(call.tool_name)) continue;
 
         // A matcher that reads a field this call does not carry cannot be
         // evaluated. Skip the whole rule rather than failing the individual
@@ -109,7 +116,7 @@ pub fn check(
         }
 
         if (matched) {
-            matched = matcher.matchContent(allocator, rule, call.content);
+            matched = matcher.matchContent(allocator, rule, call.content, call.content_format);
         }
 
         const action = rule.effectiveAction();
@@ -120,6 +127,7 @@ pub fn check(
                 .action = .reject,
                 .rule_id = rule.id,
                 .message = rule.message,
+                .content_chars = rule.match.content_chars,
             };
         }
 
@@ -132,6 +140,7 @@ pub fn check(
             .rewrite_to = rule.rewrite_to,
             .match_start = match_start,
             .match_end = match_end,
+            .content_chars = rule.match.content_chars,
         };
     }
 
@@ -531,4 +540,54 @@ test "stay-in-repo gate rejects a write outside the root" {
         .root = "/p",
     });
     try std.testing.expect(inside.action == null);
+}
+
+test "event filtering: Stop rules and PreToolUse rules do not cross" {
+    const chars: []const []const u8 = &.{"emoji"};
+    const rules = [_]Rule{
+        .{ .id = "stop", .event = .Stop, .message = "m", .match = .{ .content_chars = chars } },
+        .{ .id = "tool", .tool = "*", .message = "m", .match = .{ .content_contains = "nope" } },
+    };
+    const on_tool = check(std.testing.allocator, &rules, .{ .tool_name = "Write", .content = "\u{2705}" });
+    try std.testing.expect(on_tool.action == null);
+
+    const tool_rules = [_]Rule{
+        .{ .id = "tool", .tool = "*", .message = "m", .match = .{ .content_chars = chars } },
+    };
+    const on_stop = check(std.testing.allocator, &tool_rules, .{ .tool_name = "", .event = .Stop, .content = "\u{2705}", .content_format = .markdown });
+    try std.testing.expect(on_stop.action == null);
+}
+
+test "Stop rule rejects a reply with emoji outside code spans" {
+    const chars: []const []const u8 = &.{ "emoji", "status_markers" };
+    const rules = [_]Rule{
+        .{ .id = "no-emoji-in-replies", .event = .Stop, .message = "m", .match = .{ .content_chars = chars } },
+    };
+    const cases = .{
+        .{ "Done \u{2705}", true },
+        .{ "Run `grep \u{2713}`", false },
+    };
+    inline for (cases) |c| {
+        const result = check(std.testing.allocator, &rules, .{ .tool_name = "", .event = .Stop, .content = c[0], .content_format = .markdown });
+        try std.testing.expectEqual(c[1], result.action != null);
+        if (c[1]) try std.testing.expectEqual(@as(usize, 2), result.content_chars.?.len);
+    }
+}
+
+test "tool wildcard content_chars rule checks raw content in full" {
+    const rules = [_]Rule{
+        .{ .id = "no-emoji", .tool = "*", .message = "m", .match = .{ .content_chars = &.{"emoji"} } },
+    };
+    const hit = check(std.testing.allocator, &rules, .{ .tool_name = "Write", .content = "echo `\u{2705}`" });
+    try std.testing.expectEqual(Action.reject, hit.action.?);
+    const clean = check(std.testing.allocator, &rules, .{ .tool_name = "Write", .content = "plain" });
+    try std.testing.expect(clean.action == null);
+    const no_content = check(std.testing.allocator, &rules, .{ .tool_name = "Grep" });
+    try std.testing.expect(no_content.action == null);
+}
+
+test "Bash rules without an event still apply to PreToolUse calls" {
+    const rules = [_]Rule{.{ .id = "no-python3", .message = "m", .match = .{ .command = "python3" } }};
+    const result = check(std.testing.allocator, &rules, .{ .tool_name = "Bash", .command = "python3 x.py", .content = "python3 x.py" });
+    try std.testing.expectEqual(Action.reject, result.action.?);
 }
