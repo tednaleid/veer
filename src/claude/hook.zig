@@ -1,18 +1,19 @@
-// ABOUTME: Claude Code PreToolUse hook protocol implementation.
+// ABOUTME: Claude Code hook protocol implementation (PreToolUse and Stop).
 // ABOUTME: Parses stdin JSON and formats output per the hook contract.
 
 const std = @import("std");
 const transcript = @import("transcript.zig");
+const rule_mod = @import("../config/rule.zig");
 
 pub const HookInput = struct {
     tool_name: []const u8,
     command: ?[]const u8, // Extracted from tool_input.command for Bash tools
     session_id: ?[]const u8,
     transcript_path: ?[]const u8,
-    /// Tool-specific text content for content_regex / content_contains
-    /// matching. For ExitPlanMode, this is the resolved plan file body. Null
-    /// for tools where no content extractor is wired up (or where extraction
-    /// failed -- callers must treat null as "no match" rather than "match").
+    /// Text the content matchers read: the tool's written text (see
+    /// `extractToolContent`), the resolved plan body for ExitPlanMode, or the
+    /// finished reply for a Stop event. Null when the tool carries none or
+    /// extraction failed; callers treat null as no match.
     content: ?[]const u8,
     /// Target path, from tool_input.file_path, notebook_path, or path,
     /// whichever appears first. Tool-name agnostic, so an MCP tool carrying
@@ -21,6 +22,10 @@ pub const HookInput = struct {
     /// Session working directory, from the envelope root. Used to resolve a
     /// relative file_path.
     cwd: ?[]const u8,
+    event: rule_mod.Event,
+    /// Stop only: true when Claude is already continuing because of a Stop hook.
+    stop_hook_active: bool,
+    content_format: rule_mod.ContentFormat,
 };
 
 pub const ExitCode = struct {
@@ -38,6 +43,14 @@ pub fn parseInput(allocator: std.mem.Allocator, io: std.Io, json_str: []const u8
 
     const root = parsed.value;
     if (root != .object) return error.InvalidInput;
+
+    const event: rule_mod.Event = blk: {
+        const val = root.object.get("hook_event_name") orelse break :blk .PreToolUse;
+        if (val != .string) return error.InvalidInput;
+        break :blk std.meta.stringToEnum(rule_mod.Event, val.string) orelse return error.UnsupportedEvent;
+    };
+
+    if (event == .Stop) return parseStopInput(allocator, root);
 
     const tool_name = blk: {
         const val = root.object.get("tool_name") orelse return error.InvalidInput;
@@ -91,12 +104,15 @@ pub fn parseInput(allocator: std.mem.Allocator, io: std.Io, json_str: []const u8
 
     // Tool-specific content extraction. Fail-open: any error producing
     // content yields null, which the engine treats as "rule does not match"
-    // for content rules. We don't want a transient FS or parse glitch to
-    // block the agent from making progress.
+    // for content rules. A transient FS or parse glitch must not block the
+    // agent from making progress.
     const content: ?[]const u8 = if (std.mem.eql(u8, tool_name, "ExitPlanMode")) blk: {
         const tp = transcript_path orelse break :blk null;
         break :blk resolveExitPlanModeContent(allocator, io, tp) catch null;
-    } else null;
+    } else blk: {
+        const tool_input = root.object.get("tool_input") orelse break :blk null;
+        break :blk extractToolContent(allocator, tool_name, tool_input) catch null;
+    };
 
     return .{
         .tool_name = tool_name,
@@ -106,7 +122,103 @@ pub fn parseInput(allocator: std.mem.Allocator, io: std.Io, json_str: []const u8
         .content = content,
         .file_path = file_path,
         .cwd = cwd,
+        .event = .PreToolUse,
+        .stop_hook_active = false,
+        .content_format = rule_mod.contentFormatFor(tool_name),
     };
+}
+
+fn parseStopInput(allocator: std.mem.Allocator, root: std.json.Value) !HookInput {
+    const tool_name = try allocator.dupe(u8, "");
+    errdefer allocator.free(tool_name);
+
+    const content: ?[]const u8 = blk: {
+        const val = root.object.get("last_assistant_message") orelse break :blk null;
+        if (val != .string) break :blk null;
+        break :blk try allocator.dupe(u8, val.string);
+    };
+    errdefer if (content) |c| allocator.free(c);
+
+    const session_id: ?[]const u8 = blk: {
+        const val = root.object.get("session_id") orelse break :blk null;
+        if (val != .string) break :blk null;
+        break :blk try allocator.dupe(u8, val.string);
+    };
+
+    const active = if (root.object.get("stop_hook_active")) |v| v == .bool and v.bool else false;
+
+    return .{
+        .tool_name = tool_name,
+        .command = null,
+        .session_id = session_id,
+        .transcript_path = null,
+        .content = content,
+        .file_path = null,
+        .cwd = null,
+        .event = .Stop,
+        .stop_hook_active = active,
+        .content_format = .markdown,
+    };
+}
+
+/// The text a tool call writes, for content matchers. Known tools use one
+/// field; read-only tools carry none, so searching for a character is never
+/// rejected; any other tool (AskUserQuestion, MCP tools) contributes every
+/// string in its input except paths, joined by newlines.
+fn extractToolContent(allocator: std.mem.Allocator, tool_name: []const u8, tool_input: std.json.Value) !?[]u8 {
+    if (tool_input != .object) return null;
+
+    const Single = struct { tool: []const u8, field: []const u8 };
+    const single_field = [_]Single{
+        .{ .tool = "Bash", .field = "command" },
+        .{ .tool = "Write", .field = "content" },
+        .{ .tool = "Edit", .field = "new_string" },
+        .{ .tool = "NotebookEdit", .field = "new_source" },
+        .{ .tool = "Agent", .field = "prompt" },
+        .{ .tool = "SubagentHandback", .field = "message" },
+    };
+    for (single_field) |sf| {
+        if (!std.mem.eql(u8, tool_name, sf.tool)) continue;
+        const val = tool_input.object.get(sf.field) orelse return null;
+        if (val != .string) return null;
+        return try allocator.dupe(u8, val.string);
+    }
+
+    const read_only = [_][]const u8{ "Read", "Grep", "Glob", "WebFetch", "WebSearch" };
+    for (read_only) |t| {
+        if (std.mem.eql(u8, tool_name, t)) return null;
+    }
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try appendStrings(allocator, &buf, tool_input);
+    if (buf.items.len == 0) {
+        buf.deinit(allocator);
+        return null;
+    }
+    return try buf.toOwnedSlice(allocator);
+}
+
+fn appendStrings(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), value: std.json.Value) !void {
+    switch (value) {
+        .string => |str| {
+            if (buf.items.len > 0) try buf.append(allocator, '\n');
+            try buf.appendSlice(allocator, str);
+        },
+        .array => |a| for (a.items) |item| try appendStrings(allocator, buf, item),
+        .object => |o| {
+            var it = o.iterator();
+            while (it.next()) |entry| {
+                const key = entry.key_ptr.*;
+                const is_path = std.mem.eql(u8, key, "file_path") or
+                    std.mem.eql(u8, key, "notebook_path") or
+                    std.mem.eql(u8, key, "path");
+                if (is_path) continue;
+                try appendStrings(allocator, buf, entry.value_ptr.*);
+            }
+        },
+        else => {},
+    }
 }
 
 /// Read the transcript at `transcript_path`, locate the most recent
@@ -197,6 +309,18 @@ pub fn formatRejectMarker(writer: anytype, rule_id: []const u8) !void {
     try writer.writeAll("] reject\"}");
 }
 
+/// Format a Stop rejection for stdout. Claude continues the turn with
+/// `feedback` labeled as Stop hook feedback, not as an error. The
+/// systemMessage keeps rejects discoverable with the same `[<rule_id>] `
+/// prefix grammar as PreToolUse rejects.
+pub fn formatStopFeedback(writer: anytype, rule_id: []const u8, feedback: []const u8) !void {
+    try writer.writeAll("{\"systemMessage\":\"[");
+    try writeJsonEscaped(writer, rule_id);
+    try writer.writeAll("] reject\",\"hookSpecificOutput\":{\"hookEventName\":\"Stop\",\"additionalContext\":");
+    try writeJsonString(writer, feedback);
+    try writer.writeAll("}}");
+}
+
 /// Write a JSON string (with surrounding quotes), optionally prefixed by
 /// `[<rule_id>] `. Used so the prefix lands inside the JSON-quoted form.
 fn writePrefixedJsonString(writer: anytype, str: []const u8, rule_id: ?[]const u8) !void {
@@ -261,7 +385,7 @@ test "parseInput extracts file_path for a Write" {
 
     try std.testing.expectEqualStrings("Write", input.tool_name);
     try std.testing.expect(input.command == null);
-    try std.testing.expect(input.content == null);
+    try std.testing.expectEqualStrings("...", input.content.?);
     try std.testing.expectEqualStrings("/etc/passwd", input.file_path.?);
     try std.testing.expectEqualStrings("/home/me/proj", input.cwd.?);
 }
@@ -299,8 +423,8 @@ test "parseInput extracts transcript_path" {
     defer freeInput(std.testing.allocator, &input);
 
     try std.testing.expectEqualStrings("/tmp/session.jsonl", input.transcript_path.?);
-    // Bash tool: content is not extracted regardless of transcript_path
-    try std.testing.expect(input.content == null);
+    // Bash tool content is its command, independent of transcript_path.
+    try std.testing.expectEqualStrings("ls", input.content.?);
 }
 
 test "parseInput resolves ExitPlanMode plan content from transcript" {
@@ -528,4 +652,131 @@ test "formatRejectMarker escapes special characters in rule_id" {
         "[weird\"id] reject",
         parsed.value.object.get("systemMessage").?.string,
     );
+}
+
+test "parseInput reads a Stop event" {
+    const json =
+        \\{"hook_event_name":"Stop","session_id":"s","stop_hook_active":false,"last_assistant_message":"Done \u2705"}
+    ;
+    var input = try parseInput(std.testing.allocator, std.testing.io, json);
+    defer freeInput(std.testing.allocator, &input);
+    try std.testing.expectEqual(rule_mod.Event.Stop, input.event);
+    try std.testing.expectEqual(rule_mod.ContentFormat.markdown, input.content_format);
+    try std.testing.expectEqualStrings("Done \u{2705}", input.content.?);
+    try std.testing.expect(!input.stop_hook_active);
+}
+
+test "parseInput reads stop_hook_active" {
+    const json =
+        \\{"hook_event_name":"Stop","stop_hook_active":true,"last_assistant_message":"x"}
+    ;
+    var input = try parseInput(std.testing.allocator, std.testing.io, json);
+    defer freeInput(std.testing.allocator, &input);
+    try std.testing.expect(input.stop_hook_active);
+}
+
+test "parseInput rejects unsupported events" {
+    const cases = .{
+        \\{"hook_event_name":"MessageDisplay","delta":"x"}
+        ,
+        \\{"hook_event_name":"SubagentStop","last_assistant_message":"x"}
+        ,
+    };
+    inline for (cases) |json| {
+        try std.testing.expectError(error.UnsupportedEvent, parseInput(std.testing.allocator, std.testing.io, json));
+    }
+}
+
+test "parseInput extracts content per tool" {
+    const cases = .{
+        .{
+            \\{"tool_name":"Write","tool_input":{"file_path":"/a/b.md","content":"body"}}
+            ,
+            @as(?[]const u8, "body"),
+            rule_mod.ContentFormat.raw,
+        },
+        .{
+            \\{"tool_name":"Edit","tool_input":{"file_path":"/a","old_string":"old","new_string":"new"}}
+            ,
+            @as(?[]const u8, "new"),
+            rule_mod.ContentFormat.raw,
+        },
+        .{
+            \\{"tool_name":"NotebookEdit","tool_input":{"notebook_path":"/a.ipynb","new_source":"src"}}
+            ,
+            @as(?[]const u8, "src"),
+            rule_mod.ContentFormat.raw,
+        },
+        .{
+            \\{"tool_name":"Bash","tool_input":{"command":"ls -la"}}
+            ,
+            @as(?[]const u8, "ls -la"),
+            rule_mod.ContentFormat.raw,
+        },
+        .{
+            \\{"tool_name":"Agent","tool_input":{"description":"d","prompt":"do it"}}
+            ,
+            @as(?[]const u8, "do it"),
+            rule_mod.ContentFormat.markdown,
+        },
+        .{
+            \\{"tool_name":"SubagentHandback","tool_input":{"message":"report"}}
+            ,
+            @as(?[]const u8, "report"),
+            rule_mod.ContentFormat.markdown,
+        },
+        .{
+            \\{"tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Q?","options":[{"label":"A","description":"a"}]}]}}
+            ,
+            @as(?[]const u8, "Q?\nA\na"),
+            rule_mod.ContentFormat.markdown,
+        },
+        .{
+            \\{"tool_name":"mcp__gh__create_pr","tool_input":{"title":"T","body":"B","path":"/x","draft":true}}
+            ,
+            @as(?[]const u8, "T\nB"),
+            rule_mod.ContentFormat.raw,
+        },
+        .{
+            \\{"tool_name":"Grep","tool_input":{"pattern":"\u2705","path":"src"}}
+            ,
+            @as(?[]const u8, null),
+            rule_mod.ContentFormat.raw,
+        },
+        .{
+            \\{"tool_name":"Read","tool_input":{"file_path":"/a"}}
+            ,
+            @as(?[]const u8, null),
+            rule_mod.ContentFormat.raw,
+        },
+        .{
+            \\{"tool_name":"WebSearch","tool_input":{"query":"q"}}
+            ,
+            @as(?[]const u8, null),
+            rule_mod.ContentFormat.raw,
+        },
+    };
+    inline for (cases) |c| {
+        var input = try parseInput(std.testing.allocator, std.testing.io, c[0]);
+        defer freeInput(std.testing.allocator, &input);
+        try std.testing.expectEqual(rule_mod.Event.PreToolUse, input.event);
+        try std.testing.expectEqual(c[2], input.content_format);
+        if (c[1]) |expected| {
+            try std.testing.expectEqualStrings(expected, input.content.?);
+        } else {
+            try std.testing.expect(input.content == null);
+        }
+    }
+}
+
+test "formatStopFeedback emits additionalContext and a reject marker" {
+    var buf: [512]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try formatStopFeedback(&w, "no-emoji", "line one\nline two");
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, w.buffered(), .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("[no-emoji] reject", parsed.value.object.get("systemMessage").?.string);
+    const hso = parsed.value.object.get("hookSpecificOutput").?.object;
+    try std.testing.expectEqualStrings("Stop", hso.get("hookEventName").?.string);
+    try std.testing.expectEqualStrings("line one\nline two", hso.get("additionalContext").?.string);
 }
