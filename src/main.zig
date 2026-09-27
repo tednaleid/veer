@@ -4,6 +4,7 @@
 const std = @import("std");
 const clap = @import("clap");
 const config_mod = @import("config/config.zig");
+const rule_mod = @import("config/rule.zig");
 
 // Keep in sync with build.zig.zon
 const version = "0.2.1";
@@ -683,6 +684,7 @@ fn runTest(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Enviro
         \\    --tool <str>          Tool name to evaluate against (default: Bash).
         \\    --path <str>          Target path, for tools that carry one.
         \\    --content-file <str>  File whose body stands in for tool content.
+        \\    --event <str>         Hook event to evaluate: PreToolUse (default) or Stop.
         \\<str>
         \\
     );
@@ -695,7 +697,16 @@ fn runTest(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Enviro
 
     if (res.args.help != 0) printSubHelp(io, &params);
 
+    const event: rule_mod.Event = if (res.args.event) |name|
+        std.meta.stringToEnum(rule_mod.Event, name) orelse {
+            std.debug.print("veer test: unknown --event {s} (expected PreToolUse or Stop)\n", .{name});
+            std.process.exit(1);
+        }
+    else
+        .PreToolUse;
+
     const opts = test_cmd.TestOptions{
+        .event = event,
         .command = res.positionals[0],
         .file_path = res.args.file,
         .tool = res.args.tool orelse "Bash",

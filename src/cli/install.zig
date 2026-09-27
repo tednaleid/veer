@@ -507,6 +507,10 @@ test "skill_content documents the allow gate action" {
     try testing.expect(std.mem.indexOf(u8, skill_content, "The three actions") != null);
 }
 
+test "skill_content documents character classes" {
+    try testing.expect(std.mem.indexOf(u8, skill_content, "content_chars") != null);
+}
+
 test "skill_content documents path pattern matching" {
     try testing.expect(std.mem.indexOf(u8, skill_content, "path_any") != null);
 }

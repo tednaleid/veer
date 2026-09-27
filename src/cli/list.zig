@@ -39,7 +39,7 @@ pub fn run(
         const match_str = try formatMatch(arena_alloc, rule.match);
         const message = if (rule.message) |m| truncate(m, 40) else "";
         const action_str = @tagName(rule.effectiveAction());
-        const tool_str = if (rule.tool_any) |tools| blk: {
+        const tool_str = if (rule.event == .Stop) "Stop" else if (rule.tool_any) |tools| blk: {
             var parts: std.ArrayListUnmanaged(u8) = .empty;
             for (tools, 0..) |t, ti| {
                 if (ti > 0) try parts.appendSlice(arena_alloc, ",");
@@ -120,6 +120,14 @@ pub fn formatMatch(arena: std.mem.Allocator, m: config_mod.MatchConfig) ![]const
     if (m.content_contains) |s| {
         try ensureSep(&out);
         try aw.print("\"{s}\"", .{s});
+    }
+    if (m.content_chars) |names| {
+        try ensureSep(&out);
+        try aw.writeAll("chars:");
+        for (names, 0..) |name, i| {
+            if (i > 0) try aw.writeAll(",");
+            try aw.writeAll(name);
+        }
     }
 
     // -- path (non-Bash) --
@@ -399,4 +407,28 @@ test "formatMatch: ast block" {
 
 test "formatMatch: empty match falls back to (any)" {
     try expectFormat("(any)", .{});
+}
+
+test "formatMatch: content_chars" {
+    try expectFormat("chars:emoji,emdash", .{ .content_chars = &.{ "emoji", "emdash" } });
+}
+
+test "list renders a Stop rule's event in the tool column" {
+    const rules = [_]config_mod.Rule{
+        .{
+            .id = "no-emoji-in-replies",
+            .event = .Stop,
+            .message = "No emoji.",
+            .match = .{ .content_chars = &.{"emoji"} },
+        },
+    };
+
+    var buf: [2048]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&buf);
+    const exit_code = try run(std.testing.allocator, &rules, null, &stream);
+
+    try std.testing.expectEqual(@as(u8, 0), exit_code);
+    const output = stream.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, output, "Stop") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "Bash") == null);
 }

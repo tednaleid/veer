@@ -148,7 +148,8 @@ id = "use-just-test"                     # required, unique identifier
 name = "Redirect pytest to just test"    # optional human name
 action = "reject"                        # explicit; inferred if omitted
 message = "Use 'just test' instead."     # required for reject; shown to agent
-tool = "Bash"                            # which Claude Code tool (default: Bash)
+tool = "Bash"                            # which Claude Code tool (default: Bash); "*" = every tool
+# event = "Stop"                         # hook event (default: PreToolUse); Stop checks Claude's finished reply
 enabled = true                           # default: true
 [rule.match]
 command = "pytest"                       # see match patterns below
@@ -172,6 +173,7 @@ tree-sitter-bash, so `pytest` matches `pytest tests/ -v` but not `not-pytest`.
 | `arg` / `arg_any` / `arg_all` / `arg_regex` | positional args | block `git push --force origin main` via arg match |
 | `raw_regex` | whole input before parsing | catch weird quoting the parser mangles |
 | `content_regex` / `content_contains` | regex/substring on tool content (e.g. plan body) | block ExitPlanMode plans containing "actually" |
+| `content_chars` | any character from the named classes: `emoji`, `status_markers`, `emdash` | ban emoji in files, commands, and replies |
 | `path` / `path_any` / `path_regex` | target path (tools that carry one) | reject writes to `.env` via `path_any = ["**/*.env"]` |
 | `ast.has_node` / `min_depth` / `min_count` | AST shape | block command chains deeper than N |
 
@@ -179,9 +181,13 @@ tree-sitter-bash, so `pytest` matches `pytest tests/ -v` but not `not-pytest`.
 That's how `curl | bash` is detected -- both `curl` and `bash` appear in the
 parsed AST.
 
-`content_regex` / `content_contains` only apply to non-Bash tools. For
-ExitPlanMode the content is the plan file body (resolved from the
-transcript). Both matchers AND together when set on the same rule. Regex
+Content matchers read the text a tool call writes: the command for Bash,
+`content` for Write, `new_string` for Edit, `new_source` for NotebookEdit,
+`prompt` for Agent, `message` for SubagentHandback, and every string for
+AskUserQuestion and MCP tools. For ExitPlanMode the content is the plan file
+body (resolved from the transcript). Read, Grep, Glob, WebFetch, and
+WebSearch carry no content. Content matchers AND together when set on the
+same rule. Regex
 is POSIX extended (no `\b`, no `(?i)`); use character classes like
 `[Aa]` for case-insensitive matching.
 
@@ -239,9 +245,46 @@ correcting the agent about.
 veer can match any Claude Code tool, not just Bash. Set `tool` on the rule
 (default is `"Bash"`), or `tool_any` to cover several tools with one rule.
 Non-Bash rules read one of two fields depending on what the tool carries:
-`content_regex` / `content_contains` against **ExitPlanMode**'s plan body, or
+content matchers against the text the tool writes (see "Match patterns"), or
 `path` / `path_any` / `path_regex` against the target path of `Write`,
-`Edit`, `NotebookEdit`, `Read`, `Grep`, and `Glob`.
+`Edit`, `NotebookEdit`, `Read`, `Grep`, and `Glob`. `tool = "*"` applies a
+rule to every tool.
+
+### Banning emoji, status markers, and em dashes
+
+Two rules cover everything Claude writes: one on tool input, one on the
+finished reply (`event = "Stop"`). These usually belong in the global config.
+
+```toml
+[[rule]]
+id = "no-emoji-in-tool-input"
+tool = "*"
+action = "reject"
+message = "Do not use emoji, status markers, or em dashes. Use plain words. If code must contain one, write it as an escape such as \\u2713."
+[rule.match]
+content_chars = ["emoji", "status_markers", "emdash"]
+
+[[rule]]
+id = "no-emoji-in-replies"
+event = "Stop"
+action = "reject"
+message = "Your last reply used emoji, status markers, or em dashes. Restate the affected parts in plain words."
+[rule.match]
+content_chars = ["emoji", "status_markers", "emdash"]
+```
+
+- `emoji`: characters that render as color emoji, from Unicode data. Plain
+  symbols such as arrows, box drawing, and keyboard glyphs are not emoji.
+- `status_markers`: checkmark, cross, ballot box, warning sign, and star
+  glyphs used as status indicators.
+- `emdash`: U+2014 only; en dashes are allowed.
+
+Markdown text (replies, plans, Agent prompts, subagent reports, questions)
+ignores characters inside code spans, so referring to a character in
+backticks is fine. File content and commands are checked in full. A Stop
+rule gives Claude one non-error correction turn per reply. The reject
+message lists up to five hits with their line and code points. Preview with
+`veer test --event Stop --content-file reply.md`.
 
 ### Gating writes to a path
 

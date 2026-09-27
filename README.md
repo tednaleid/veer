@@ -226,7 +226,8 @@ id = "unique-identifier"       # Required. Unique across all configs.
 name = "Human-readable name"   # Optional. Defaults to id. Shown in `veer list`.
 action = "reject"              # Optional. Inferred from rewrite_to if omitted.
 enabled = true                 # Default: true.
-tool = "Bash"                  # Which tool to match. Default: "Bash".
+event = "PreToolUse"           # Hook event: "PreToolUse" (default) or "Stop".
+tool = "Bash"                  # Which tool to match. Default: "Bash". "*" matches every tool.
 tool_any = ["Write", "Edit"]   # Tools to match. Exclusive with `tool`.
 message = "Redirect message"   # Required for reject. Sent to agent.
 rewrite_to = "just test"       # Required for rewrite. Implies action = "rewrite".
@@ -259,9 +260,10 @@ arg_regex = "\\.py$"                  # Regex on positional args
 # Whole-input matching
 raw_regex = "curl.*\\|.*bash"         # Regex against entire command string
 
-# Content matching (non-Bash tools that carry text content; e.g. ExitPlanMode)
+# Content matching (tools that carry text content; see Content per tool)
 content_regex = "[Aa]ctually"         # POSIX regex against tool content
 content_contains = "TODO"             # Case-sensitive substring
+content_chars = ["emoji", "status_markers", "emdash"]  # Forbid named character classes
 
 # Path matching (tools that carry a target path)
 path = "src/**"                       # gitignore-shaped glob
@@ -288,8 +290,9 @@ ast = { has_node = "pipeline", min_count = 4 }
 | `arg_all` | Positional args | AND: all present. |
 | `arg_regex` | Positional args | Regex against positional args. |
 | `raw_regex` | Full command string | POSIX regex against the entire raw input, before parsing. |
-| `content_regex` | Tool text content | POSIX regex against tool content (e.g., the plan body for `ExitPlanMode`). Non-Bash tools only. |
-| `content_contains` | Tool text content | Case-sensitive substring match against tool content. Non-Bash tools only. |
+| `content_regex` | Tool text content | POSIX regex against tool content (e.g., the plan body for `ExitPlanMode`). Any tool that carries content; see Content per tool. |
+| `content_contains` | Tool text content | Case-sensitive substring match against tool content. Any tool that carries content; see Content per tool. |
+| `content_chars` | Tool text content | Rejects when the content holds a character from any listed class: `emoji` (Unicode emoji presentation), `status_markers` (checkmark, cross, ballot box, warning, and star glyphs), `emdash` (U+2014). Code spans are ignored in markdown content. |
 | `path` | Target path | gitignore-shaped glob. See Path Patterns below. |
 | `path_any` | Target path | OR: any pattern in the list matches. |
 | `path_regex` | Target path | POSIX extended regex against the normalized path. |
@@ -524,11 +527,60 @@ The same pattern works for other plan-quality rules: ban `TODO` placeholders
 with `content_contains = "TODO"`, ban hedging language with
 `content_regex = "(maybe|might|could)"`, etc.
 
+### Ban emoji, status markers, and em dashes
+
+Two rules cover everything Claude writes: one on tool input and one on the
+finished reply. They usually belong in `~/.config/veer/config.toml`.
+
+```toml
+[[rule]]
+id = "no-emoji-in-tool-input"
+tool = "*"
+action = "reject"
+message = "Do not use emoji, status markers, or em dashes. Use plain words. If code must contain one, write it as an escape such as \\u2713."
+[rule.match]
+content_chars = ["emoji", "status_markers", "emdash"]
+
+[[rule]]
+id = "no-emoji-in-replies"
+event = "Stop"
+action = "reject"
+message = "Your last reply used emoji, status markers, or em dashes. Restate the affected parts in plain words."
+[rule.match]
+content_chars = ["emoji", "status_markers", "emdash"]
+```
+
+A `Stop` rule checks Claude's finished reply and gives Claude one non-error
+correction turn ("Stop hook feedback"); a second reply in a row is not
+checked, so a misfiring rule cannot loop. `Stop` rules must be `reject` and
+take no `tool`. The reject message lists up to five hits as
+`line N: U+XXXX (glyph)`.
+
+#### Content per tool
+
+| Tool | Content | Format |
+|---|---|---|
+| Bash | `command` | raw |
+| Write | `content` | raw |
+| Edit | `new_string` | raw |
+| NotebookEdit | `new_source` | raw |
+| ExitPlanMode | plan file body | markdown |
+| Agent | `prompt` | markdown |
+| SubagentHandback | `message` | markdown |
+| AskUserQuestion | every string in the input | markdown |
+| Read, Grep, Glob, WebFetch, WebSearch | none | |
+| any other tool, including MCP | every string in the input except paths | raw |
+| `Stop` event | the finished reply | markdown |
+
+In markdown content, `content_chars` ignores fenced code blocks and inline
+code spans; raw content is checked in full. Read-only tools carry no content,
+so searching for a character is never rejected.
+
 ## Commands
 
 ### veer check
 
-The hot-path command called by the PreToolUse hook. Reads JSON from stdin, evaluates against rules, outputs result. Auto-discovers `.veer/config.toml` and `~/.config/veer/config.toml` when `--config` is not specified.
+The hot-path command called by the PreToolUse and Stop hooks. Reads JSON from stdin, evaluates against rules, outputs result. Auto-discovers `.veer/config.toml` and `~/.config/veer/config.toml` when `--config` is not specified.
 
 ```
 Usage: veer check [--config <path>] [--verbose]
@@ -541,7 +593,7 @@ Usage: veer check [--config <path>] [--verbose]
 
 ### veer install
 
-Register veer as a Claude Code PreToolUse hook, plus a starter `.veer/config.toml` and a SKILL.md to teach the agent about veer. Re-running updates the hook entry to match current flags.
+Register veer as a Claude Code hook for the `PreToolUse` and `Stop` events, plus a starter `.veer/config.toml` and a SKILL.md to teach the agent about veer. Re-running updates the hook entry to match current flags.
 
 ```
 Usage: veer install [--local | --global] [--verbose]
@@ -615,6 +667,8 @@ Test commands against rules without the hook protocol.
 ```
 Usage: veer test "<command>" [--config <path>]
        veer test --file <path> [--config <path>]
+       veer test --tool <Tool> --content-file <path> [--config <path>]
+       veer test --event Stop --content-file <reply.md> [--config <path>]
 
 Output (TSV): result, return_code, input, rule_id, output [, source]
 
@@ -626,7 +680,10 @@ and is empty for `ALLOW` lines (no rule matched). With an explicit
 Examples:
   veer test "pytest tests/"
   veer test --file examples/commands.txt --config examples/config.toml
+  veer test --event Stop --content-file reply.md
 ```
+
+A reject from a `content_chars` rule is followed by one indented line per hit.
 
 ### veer validate
 

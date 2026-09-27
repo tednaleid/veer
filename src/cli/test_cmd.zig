@@ -6,6 +6,8 @@ const config_mod = @import("../config/config.zig");
 const engine = @import("../engine/engine.zig");
 const Rule = @import("../config/rule.zig").Rule;
 const Action = @import("../config/rule.zig").Action;
+const rule_mod = @import("../config/rule.zig");
+const chars = @import("../engine/chars.zig");
 
 pub const TestOptions = struct {
     command: ?[]const u8 = null,
@@ -21,6 +23,8 @@ pub const TestOptions = struct {
     /// Value of `$HOME`, so `~/` path patterns resolve the same way they do
     /// under the hook. Null leaves those patterns unmatchable.
     home: ?[]const u8 = null,
+    /// Hook event to evaluate. A Stop event reads the reply from --content-file.
+    event: rule_mod.Event = .PreToolUse,
 };
 
 /// Run the test command. Tests command(s) against loaded rules.
@@ -36,6 +40,28 @@ pub fn run(
     writer: anytype,
 ) !u8 {
     if (sources) |s| std.debug.assert(s.len == rules.len);
+
+    if (opts.event == .Stop) {
+        const cf = opts.content_file orelse {
+            try writer.print("veer test: --event Stop requires --content-file\n", .{});
+            return 1;
+        };
+        if (opts.command != null or opts.file_path != null or opts.path != null) {
+            try writer.print("veer test: --event Stop only takes --content-file\n", .{});
+            return 1;
+        }
+        const reply = std.Io.Dir.cwd().readFileAlloc(io, cf, allocator, .limited(4 * 1024 * 1024)) catch {
+            try writer.print("veer test: cannot read {s}\n", .{cf});
+            return 1;
+        };
+        defer allocator.free(reply);
+        return checkCall(allocator, rules, sources, .{
+            .tool_name = "",
+            .event = .Stop,
+            .content = reply,
+            .content_format = .markdown,
+        }, cf, writer);
+    }
 
     const is_bash = std.mem.eql(u8, opts.tool, "Bash");
 
@@ -104,6 +130,7 @@ pub fn run(
         .cwd = cwd_abs,
         .root = cwd_abs,
         .home = opts.home,
+        .content_format = rule_mod.contentFormatFor(opts.tool),
     }, opts.path orelse opts.content_file orelse opts.command orelse "", writer);
 }
 
@@ -145,6 +172,7 @@ fn checkOne(
     return checkCall(allocator, rules, sources, .{
         .tool_name = "Bash",
         .command = command,
+        .content = command,
         .home = home,
     }, command, writer);
 }
@@ -190,6 +218,11 @@ fn checkCall(
                     result.message orelse "",
                     src_suffix,
                 });
+                if (result.content_chars) |names| {
+                    if (call.content) |content| {
+                        try chars.writeHits(allocator, writer, content, call.content_format, names, 5);
+                    }
+                }
             },
         }
     } else {
@@ -431,4 +464,41 @@ test "test appends source column when sources are provided" {
         // because no rule matched. That's 5 tabs.
         try std.testing.expectEqualStrings("ALLOW\t0\tls -la\t\t\t\n", stream.buffered());
     }
+}
+
+test "run with --event Stop evaluates a reply file and lists hits" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(dir);
+    const file = try std.fmt.allocPrint(std.testing.allocator, "{s}/reply.md", .{dir});
+    defer std.testing.allocator.free(file);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = file, .data = "ok `\u{2713}`\n\u{2705} done" });
+
+    const rules = [_]Rule{.{ .id = "no-emoji-in-replies", .event = .Stop, .message = "m", .match = .{ .content_chars = &.{ "emoji", "status_markers" } } }};
+    var buf: [1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    const code = try run(std.testing.allocator, std.testing.io, &rules, null, .{ .event = .Stop, .content_file = file }, &w);
+    try std.testing.expectEqual(@as(u8, 0), code);
+    const out = w.buffered();
+    try std.testing.expect(std.mem.startsWith(u8, out, "REJECT\t2\t"));
+    try std.testing.expect(std.mem.indexOf(u8, out, "line 2: U+2705") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "U+2713") == null);
+}
+
+test "run with --event Stop requires --content-file" {
+    const rules = [_]Rule{};
+    var buf: [512]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    const code = try run(std.testing.allocator, std.testing.io, &rules, null, .{ .event = .Stop }, &w);
+    try std.testing.expectEqual(@as(u8, 1), code);
+    try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "--content-file") != null);
+}
+
+test "run evaluates content rules against a Bash command, as the hook does" {
+    const rules = [_]Rule{.{ .id = "no-markers", .tool = "*", .message = "m", .match = .{ .content_chars = &.{"status_markers"} } }};
+    var buf: [1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    _ = try run(std.testing.allocator, std.testing.io, &rules, null, .{ .command = "grep \"\u{2713}\" out.txt" }, &w);
+    try std.testing.expect(std.mem.startsWith(u8, w.buffered(), "REJECT\t2\t"));
 }
