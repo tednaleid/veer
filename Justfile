@@ -1,7 +1,7 @@
 default: check
 
 # Run tests + lint + help/no-config/verbose/from-subdir smoke tests
-check: test lint check-help check-no-config check-verbose check-from-subdir check-local-override check-local-install-exclude check-gate
+check: test lint check-help check-no-config check-verbose check-from-subdir check-local-override check-local-install-exclude check-gate check-chars
 
 # Run all tests
 test:
@@ -72,6 +72,46 @@ check-gate:
       *"Work in a worktree."*) echo "check-gate outside: PASS" ;;
       *) echo "check-gate outside: FAIL (message missing: $out)"; exit 1 ;;
     esac
+
+# Smoke test: content_chars rejects emoji in a Write and in a Stop reply,
+# and a Stop reply with emoji only inside a code span passes.
+check-chars:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    zig build
+    bin="$(pwd)/zig-out/bin/veer"
+    cfg=$(mktemp)
+    trap 'rm -f "$cfg"' EXIT
+    cat > "$cfg" <<'TOML'
+    [[rule]]
+    id = "no-emoji-in-tool-input"
+    tool = "*"
+    message = "No emoji."
+    [rule.match]
+    content_chars = ["emoji", "status_markers", "emdash"]
+
+    [[rule]]
+    id = "no-emoji-in-replies"
+    event = "Stop"
+    message = "No emoji."
+    [rule.match]
+    content_chars = ["emoji", "status_markers", "emdash"]
+    TOML
+
+    set +e
+    out=$(echo '{"tool_name":"Write","tool_input":{"file_path":"/tmp/x","content":"done ✅"}}' | "$bin" check --config "$cfg" 2>&1)
+    rc=$?
+    set -e
+    if [ "$rc" -ne 2 ] || ! grep -q 'U+2705' <<<"$out"; then echo "check-chars write: FAIL (exit $rc: $out)"; exit 1; fi
+    echo "check-chars write: PASS"
+
+    out=$(echo '{"hook_event_name":"Stop","stop_hook_active":false,"last_assistant_message":"done ✅"}' | "$bin" check --config "$cfg")
+    if ! grep -q 'additionalContext' <<<"$out"; then echo "check-chars stop: FAIL ($out)"; exit 1; fi
+    echo "check-chars stop: PASS"
+
+    out=$(echo '{"hook_event_name":"Stop","stop_hook_active":false,"last_assistant_message":"run `grep ✓`"}' | "$bin" check --config "$cfg")
+    if [ -n "$out" ]; then echo "check-chars code span: FAIL ($out)"; exit 1; fi
+    echo "check-chars code span: PASS"
 
 # Smoke test: --verbose emits systemMessage on allow and rewrite paths.
 check-verbose:

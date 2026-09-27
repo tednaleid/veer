@@ -267,9 +267,9 @@ fn runCheck(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Envir
     };
     defer allocator.free(stdin_data);
 
-    var stdout_buf: [4096]u8 = undefined;
+    var stdout_buf: [16384]u8 = undefined;
     var stdout_stream = std.Io.Writer.fixed(&stdout_buf);
-    var stderr_buf: [4096]u8 = undefined;
+    var stderr_buf: [16384]u8 = undefined;
     var stderr_stream = std.Io.Writer.fixed(&stderr_buf);
 
     const root: ?[]const u8 = if (loaded.merged) |m| m.projectRoot() else null;

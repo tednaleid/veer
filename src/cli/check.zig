@@ -1,10 +1,11 @@
 // ABOUTME: The veer check command -- the hot-path hook called by Claude Code.
-// ABOUTME: Reads JSON from stdin, evaluates against rules, outputs result.
+// ABOUTME: Reads hook JSON from stdin (PreToolUse or Stop), evaluates rules, outputs the result.
 
 const std = @import("std");
 const config_mod = @import("../config/config.zig");
 const engine = @import("../engine/engine.zig");
 const hook = @import("../claude/hook.zig");
+const chars = @import("../engine/chars.zig");
 const Action = @import("../config/rule.zig").Action;
 const Rule = @import("../config/rule.zig").Rule;
 
@@ -26,11 +27,19 @@ pub fn run(
     verbose: bool,
 ) !u8 {
     // Parse hook input
-    var input = hook.parseInput(allocator, io, stdin_data) catch {
-        try stderr_writer.print("veer: invalid JSON input\n", .{});
-        return 1;
+    var input = hook.parseInput(allocator, io, stdin_data) catch |err| switch (err) {
+        error.UnsupportedEvent => return hook.ExitCode.allow,
+        else => {
+            try stderr_writer.print("veer: invalid JSON input\n", .{});
+            return 1;
+        },
     };
     defer hook.freeInput(allocator, &input);
+
+    // A Stop hook fires again after Claude answers its feedback. Correct a
+    // reply once; a second miss in a row allows, so a misfiring rule cannot
+    // loop.
+    if (input.event == .Stop and input.stop_hook_active) return hook.ExitCode.allow;
 
     const result = engine.check(allocator, rules, .{
         .tool_name = input.tool_name,
@@ -40,6 +49,8 @@ pub fn run(
         .cwd = input.cwd,
         .root = root,
         .home = home,
+        .event = input.event,
+        .content_format = input.content_format,
     });
 
     // Output based on action
@@ -62,18 +73,29 @@ pub fn run(
             // falls through to the next rule, and a gate that fails is
             // reported as .reject. This arm exists only for exhaustiveness.
             .reject, .allow => {
-                if (result.message) |msg| {
-                    if (result.rule_id) |rid| {
+                const rid = result.rule_id orelse "";
+                const msg = result.message orelse "";
+                if (input.event == .Stop) {
+                    var feedback: std.Io.Writer.Allocating = .init(allocator);
+                    defer feedback.deinit();
+                    try feedback.writer.print("[{s}] {s}\n", .{ rid, msg });
+                    try writeHitsFor(allocator, &feedback.writer, result, input);
+                    try hook.formatStopFeedback(stdout_writer, rid, feedback.written());
+                    return hook.ExitCode.allow;
+                }
+                if (result.message != null) {
+                    if (result.rule_id != null) {
                         try stderr_writer.print("[{s}] {s}\n", .{ rid, msg });
                     } else {
                         try stderr_writer.print("{s}\n", .{msg});
                     }
                 }
+                try writeHitsFor(allocator, stderr_writer, result, input);
                 // Emit a stdout marker so the transcript's hook_success
                 // record carries rule_id attribution. Claude Code captures
                 // stdout on exit 2 even though it doesn't act on it.
-                if (result.rule_id) |rid| {
-                    try hook.formatRejectMarker(stdout_writer, rid);
+                if (result.rule_id) |r| {
+                    try hook.formatRejectMarker(stdout_writer, r);
                 }
                 return hook.ExitCode.reject;
             },
@@ -92,6 +114,16 @@ pub fn run(
         }
     }
     return hook.ExitCode.allow;
+}
+
+const max_listed_hits = 5;
+
+/// List the character-class hits behind a reject, when the matched rule
+/// has content_chars.
+fn writeHitsFor(allocator: std.mem.Allocator, writer: anytype, result: engine.CheckResult, input: hook.HookInput) !void {
+    const names = result.content_chars orelse return;
+    const content = input.content orelse return;
+    try chars.writeHits(allocator, writer, content, input.content_format, names, max_listed_hits);
 }
 
 /// Build the user-visible banner text for a Bash tool call.
@@ -673,4 +705,85 @@ test "verbose reject: same shape as non-verbose (exit 2, stderr msg, stdout mark
     try std.testing.expect(std.mem.indexOf(u8, stdout_stream.buffered(), "[no-python3] reject") != null);
     try std.testing.expect(std.mem.indexOf(u8, stderr_stream.buffered(), "just run") != null);
     try std.testing.expect(std.mem.startsWith(u8, stderr_stream.buffered(), "[no-python3] "));
+}
+
+const RunOutput = struct {
+    code: u8,
+    stdout_buf: [2048]u8 = undefined,
+    stderr_buf: [2048]u8 = undefined,
+    stdout_len: usize = 0,
+    stderr_len: usize = 0,
+
+    fn stdout(self: *const RunOutput) []const u8 {
+        return self.stdout_buf[0..self.stdout_len];
+    }
+    fn stderr(self: *const RunOutput) []const u8 {
+        return self.stderr_buf[0..self.stderr_len];
+    }
+};
+
+fn runForTest(rules: []const Rule, input: []const u8) !RunOutput {
+    var out = RunOutput{ .code = 0 };
+    var stdout_stream = std.Io.Writer.fixed(&out.stdout_buf);
+    var stderr_stream = std.Io.Writer.fixed(&out.stderr_buf);
+    out.code = try run(std.testing.allocator, std.testing.io, rules, null, null, input, &stdout_stream, &stderr_stream, false);
+    out.stdout_len = stdout_stream.buffered().len;
+    out.stderr_len = stderr_stream.buffered().len;
+    return out;
+}
+
+const emoji_classes: []const []const u8 = &.{ "emoji", "status_markers" };
+
+test "Stop reject returns additionalContext with hits and exit 0" {
+    const rules = [_]Rule{.{
+        .id = "no-emoji-in-replies",
+        .event = .Stop,
+        .message = "Restate without emoji.",
+        .match = .{ .content_chars = emoji_classes },
+    }};
+    const out = try runForTest(&rules,
+        \\{"hook_event_name":"Stop","stop_hook_active":false,"last_assistant_message":"ok\n\u2705 done"}
+    );
+    try std.testing.expectEqual(@as(u8, 0), out.code);
+    try std.testing.expectEqual(@as(usize, 0), out.stderr().len);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, out.stdout(), .{});
+    defer parsed.deinit();
+    const ctx = parsed.value.object.get("hookSpecificOutput").?.object.get("additionalContext").?.string;
+    try std.testing.expect(std.mem.startsWith(u8, ctx, "[no-emoji-in-replies] Restate without emoji.\n"));
+    try std.testing.expect(std.mem.indexOf(u8, ctx, "line 2: U+2705") != null);
+}
+
+test "Stop with stop_hook_active allows without evaluating" {
+    const rules = [_]Rule{.{ .id = "r", .event = .Stop, .message = "m", .match = .{ .content_chars = emoji_classes } }};
+    const out = try runForTest(&rules,
+        \\{"hook_event_name":"Stop","stop_hook_active":true,"last_assistant_message":"\u2705"}
+    );
+    try std.testing.expectEqual(@as(u8, 0), out.code);
+    try std.testing.expectEqual(@as(usize, 0), out.stdout().len);
+}
+
+test "Stop with no Stop rules and unsupported events allow silently" {
+    const rules = [_]Rule{.{ .id = "r", .tool = "*", .message = "m", .match = .{ .content_chars = emoji_classes } }};
+    const inputs = .{
+        \\{"hook_event_name":"Stop","stop_hook_active":false,"last_assistant_message":"\u2705"}
+        ,
+        \\{"hook_event_name":"MessageDisplay","delta":"\u2705","index":0,"final":true}
+        ,
+    };
+    inline for (inputs) |input| {
+        const out = try runForTest(&rules, input);
+        try std.testing.expectEqual(@as(u8, 0), out.code);
+        try std.testing.expectEqual(@as(usize, 0), out.stdout().len);
+        try std.testing.expectEqual(@as(usize, 0), out.stderr().len);
+    }
+}
+
+test "PreToolUse content_chars reject lists hits on stderr" {
+    const rules = [_]Rule{.{ .id = "no-emoji", .tool = "*", .message = "No emoji.", .match = .{ .content_chars = emoji_classes } }};
+    const out = try runForTest(&rules,
+        \\{"tool_name":"Write","tool_input":{"file_path":"/tmp/x.md","content":"a\n\u2713 b"}}
+    );
+    try std.testing.expectEqual(@as(u8, 2), out.code);
+    try std.testing.expect(std.mem.startsWith(u8, out.stderr(), "[no-emoji] No emoji.\n"));
+    try std.testing.expect(std.mem.indexOf(u8, out.stderr(), "line 2: U+2713") != null);
 }
