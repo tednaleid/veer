@@ -7,7 +7,7 @@ const config_mod = @import("config/config.zig");
 const rule_mod = @import("config/rule.zig");
 
 // Keep in sync with build.zig.zon
-const version = "0.2.1";
+const version = "0.3.0";
 const check_cmd = @import("cli/check.zig");
 const install_cmd = @import("cli/install.zig");
 const list_cmd = @import("cli/list.zig");
