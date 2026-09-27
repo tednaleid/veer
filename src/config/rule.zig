@@ -26,6 +26,9 @@ pub const CharClass = enum { emoji, status_markers, emdash };
 /// checked by `content_chars`.
 pub const ContentFormat = enum { raw, markdown };
 
+/// The Claude Code hook event a rule applies to.
+pub const Event = enum { PreToolUse, Stop };
+
 pub const MatchConfig = struct {
     // Command name matching (per-command, glob-aware)
     command: ?[]const u8 = null,
@@ -54,6 +57,10 @@ pub const MatchConfig = struct {
     content_regex: ?[]const u8 = null,
     content_contains: ?[]const u8 = null,
 
+    // Character-class matching: the rule matches when the content holds any
+    // character from a listed class. Names are `CharClass` fields.
+    content_chars: ?[]const []const u8 = null,
+
     // Path matching (for tools that carry a target path). Patterns are
     // gitignore-shaped globs; see README for the anchoring rules.
     path: ?[]const u8 = null,
@@ -80,7 +87,7 @@ pub fn fieldsUsed(m: MatchConfig) FieldSet {
             m.flag != null or m.flag_any != null or m.flag_all != null or
             m.arg != null or m.arg_any != null or m.arg_all != null or
             m.arg_regex != null or m.raw_regex != null or m.ast != null,
-        .content = m.content_regex != null or m.content_contains != null,
+        .content = m.content_regex != null or m.content_contains != null or m.content_chars != null,
         .path = m.path != null or m.path_any != null or m.path_regex != null,
     };
 }
@@ -90,16 +97,35 @@ pub fn fieldsUsed(m: MatchConfig) FieldSet {
 /// validation rather than rejecting them. veer does not bake Claude Code's
 /// tool roster into its schema.
 pub fn toolFields(tool: []const u8) ?FieldSet {
-    if (std.mem.eql(u8, tool, "Bash")) return .{ .command = true };
-    if (std.mem.eql(u8, tool, "ExitPlanMode")) return .{ .content = true };
+    if (std.mem.eql(u8, tool, "Bash")) return .{ .command = true, .content = true };
 
-    const path_tools = [_][]const u8{
-        "Write", "Edit", "NotebookEdit", "Read", "Grep", "Glob",
-    };
-    for (path_tools) |t| {
+    const content_tools = [_][]const u8{ "ExitPlanMode", "Agent", "SubagentHandback", "AskUserQuestion" };
+    for (content_tools) |t| {
+        if (std.mem.eql(u8, tool, t)) return .{ .content = true };
+    }
+    const writing_tools = [_][]const u8{ "Write", "Edit", "NotebookEdit" };
+    for (writing_tools) |t| {
+        if (std.mem.eql(u8, tool, t)) return .{ .path = true, .content = true };
+    }
+    const reading_tools = [_][]const u8{ "Read", "Grep", "Glob" };
+    for (reading_tools) |t| {
         if (std.mem.eql(u8, tool, t)) return .{ .path = true };
     }
+    const web_tools = [_][]const u8{ "WebFetch", "WebSearch" };
+    for (web_tools) |t| {
+        if (std.mem.eql(u8, tool, t)) return .{};
+    }
     return null;
+}
+
+/// How a tool's content is written. Tools whose text is addressed to a
+/// reader are markdown; file content, commands, and unknown tools are raw.
+pub fn contentFormatFor(tool: []const u8) ContentFormat {
+    const markdown_tools = [_][]const u8{ "ExitPlanMode", "Agent", "SubagentHandback", "AskUserQuestion" };
+    for (markdown_tools) |t| {
+        if (std.mem.eql(u8, tool, t)) return .markdown;
+    }
+    return .raw;
 }
 
 pub const Rule = struct {
@@ -107,6 +133,7 @@ pub const Rule = struct {
     name: ?[]const u8 = null,
     action: ?Action = null,
     enabled: bool = true,
+    event: Event = .PreToolUse,
     tool: []const u8 = "Bash",
 
     /// Tools this rule applies to. Exact names, no globbing. Mutually
@@ -130,7 +157,7 @@ pub const Rule = struct {
     }
 
     /// True when this rule applies to `tool_name`. Uses `tool_any` when set,
-    /// otherwise the single `tool` field.
+    /// otherwise the single `tool` field, where `*` matches every tool.
     pub fn matchesTool(self: Rule, tool_name: []const u8) bool {
         if (self.tool_any) |tools| {
             for (tools) |t| {
@@ -138,6 +165,7 @@ pub const Rule = struct {
             }
             return false;
         }
+        if (std.mem.eql(u8, self.tool, "*")) return true;
         return std.mem.eql(u8, self.tool, tool_name);
     }
 };
@@ -152,7 +180,42 @@ pub const ValidationError = error{
     AllowRequiresPathOrContent,
     RewriteRequiresCommand,
     ToolAndToolAny,
+    StopRequiresReject,
+    ToolOnNonToolEvent,
+    UnknownCharClass,
 };
+
+/// Checks for the `event` field and `content_chars`, shared by `validate`
+/// and `veer validate`. Returns the first issue found.
+pub fn schemaIssue(rule: Rule) ?ValidationError {
+    if (rule.match.content_chars) |names| {
+        if (names.len == 0) return ValidationError.UnknownCharClass;
+        for (names) |name| {
+            if (std.meta.stringToEnum(CharClass, name) == null) return ValidationError.UnknownCharClass;
+        }
+    }
+    const action = rule.effectiveAction();
+    if (std.mem.eql(u8, rule.tool, "*") and action == .rewrite) return ValidationError.RewriteRequiresCommand;
+    if (rule.event == .Stop) {
+        if (action != .reject) return ValidationError.StopRequiresReject;
+        if (rule.tool_any != null or !std.mem.eql(u8, rule.tool, "Bash")) return ValidationError.ToolOnNonToolEvent;
+        const used = fieldsUsed(rule.match);
+        if (used.command or used.path) return ValidationError.MatcherToolMismatch;
+    }
+    return null;
+}
+
+/// User-facing text for the issues `schemaIssue` reports.
+pub fn issueText(err: ValidationError) []const u8 {
+    return switch (err) {
+        ValidationError.StopRequiresReject => "Stop rules must use action = \"reject\"",
+        ValidationError.ToolOnNonToolEvent => "Stop rules do not take tool or tool_any",
+        ValidationError.UnknownCharClass => "content_chars must list one or more of: emoji, status_markers, emdash",
+        ValidationError.RewriteRequiresCommand => "rewrite requires a tool with a command field",
+        ValidationError.MatcherToolMismatch => "Stop rules only accept content matchers",
+        else => @errorName(err),
+    };
+}
 
 /// Validate a slice of rules. Returns the first validation error found.
 pub fn validate(rules: []const Rule) ValidationError!void {
@@ -174,6 +237,8 @@ pub fn validate(rules: []const Rule) ValidationError!void {
         if (rule.tool_any != null and !std.mem.eql(u8, rule.tool, "Bash")) {
             return ValidationError.ToolAndToolAny;
         }
+
+        if (schemaIssue(rule)) |err| return err;
 
         // Validate action (explicit or inferred)
         const action = rule.effectiveAction();
@@ -242,6 +307,7 @@ fn hasAnyMatch(m: MatchConfig) bool {
         m.raw_regex != null or
         m.content_regex != null or
         m.content_contains != null or
+        m.content_chars != null or
         m.path != null or
         m.path_any != null or
         m.path_regex != null or
@@ -444,14 +510,14 @@ test "raw_regex on a Write rule fails validation" {
     try std.testing.expectError(ValidationError.MatcherToolMismatch, validate(&rules));
 }
 
-test "content matcher on a Bash rule fails validation" {
+test "content matcher on a Bash rule passes validation" {
     const rules = [_]Rule{.{
         .id = "probe",
         .tool = "Bash",
         .message = "M",
         .match = .{ .content_contains = "actually" },
     }};
-    try std.testing.expectError(ValidationError.MatcherToolMismatch, validate(&rules));
+    try validate(&rules);
 }
 
 test "unknown tool names are exempt from compatibility validation" {
@@ -577,4 +643,76 @@ test "allow accepts a content matcher" {
         .match = .{ .content_regex = "## Testing" },
     }};
     try validate(&rules);
+}
+
+test "tool wildcard matches every tool" {
+    const rule = Rule{ .id = "r", .tool = "*", .message = "m", .match = .{ .content_chars = &.{"emoji"} } };
+    try std.testing.expect(rule.matchesTool("Write"));
+    try std.testing.expect(rule.matchesTool("mcp__github__create_pull_request"));
+}
+
+test "content_chars counts as a content matcher" {
+    try std.testing.expect(fieldsUsed(.{ .content_chars = &.{"emoji"} }).content);
+}
+
+test "tools that write text carry content" {
+    const cases = .{
+        .{ "Bash", true },
+        .{ "Write", true },
+        .{ "Edit", true },
+        .{ "NotebookEdit", true },
+        .{ "Agent", true },
+        .{ "SubagentHandback", true },
+        .{ "AskUserQuestion", true },
+        .{ "ExitPlanMode", true },
+        .{ "Read", false },
+        .{ "Grep", false },
+        .{ "Glob", false },
+        .{ "WebFetch", false },
+        .{ "WebSearch", false },
+    };
+    inline for (cases) |c| {
+        try std.testing.expectEqual(c[1], toolFields(c[0]).?.content);
+    }
+}
+
+test "contentFormatFor" {
+    const cases = .{
+        .{ "ExitPlanMode", ContentFormat.markdown },
+        .{ "Agent", ContentFormat.markdown },
+        .{ "SubagentHandback", ContentFormat.markdown },
+        .{ "AskUserQuestion", ContentFormat.markdown },
+        .{ "Write", ContentFormat.raw },
+        .{ "Bash", ContentFormat.raw },
+        .{ "mcp__x__y", ContentFormat.raw },
+    };
+    inline for (cases) |c| {
+        try std.testing.expectEqual(c[1], contentFormatFor(c[0]));
+    }
+}
+
+test "validation of event and content_chars" {
+    const chars: []const []const u8 = &.{ "emoji", "status_markers", "emdash" };
+    const cases = .{
+        .{ Rule{ .id = "ok-stop", .event = .Stop, .message = "m", .match = .{ .content_chars = chars } }, @as(?ValidationError, null) },
+        .{ Rule{ .id = "ok-star", .tool = "*", .message = "m", .match = .{ .content_chars = chars } }, @as(?ValidationError, null) },
+        .{ Rule{ .id = "stop-rewrite", .event = .Stop, .rewrite_to = "x", .match = .{ .content_chars = chars } }, @as(?ValidationError, ValidationError.StopRequiresReject) },
+        .{ Rule{ .id = "stop-allow", .event = .Stop, .action = .allow, .message = "m", .match = .{ .content_chars = chars } }, @as(?ValidationError, ValidationError.StopRequiresReject) },
+        .{ Rule{ .id = "stop-tool", .event = .Stop, .tool = "Write", .message = "m", .match = .{ .content_chars = chars } }, @as(?ValidationError, ValidationError.ToolOnNonToolEvent) },
+        .{ Rule{ .id = "stop-tool-any", .event = .Stop, .tool_any = &.{"Write"}, .message = "m", .match = .{ .content_chars = chars } }, @as(?ValidationError, ValidationError.ToolOnNonToolEvent) },
+        .{ Rule{ .id = "stop-command", .event = .Stop, .message = "m", .match = .{ .command = "ls" } }, @as(?ValidationError, ValidationError.MatcherToolMismatch) },
+        .{ Rule{ .id = "stop-path", .event = .Stop, .message = "m", .match = .{ .path = "src/**" } }, @as(?ValidationError, ValidationError.MatcherToolMismatch) },
+        .{ Rule{ .id = "bad-class", .tool = "*", .message = "m", .match = .{ .content_chars = &.{"emojis"} } }, @as(?ValidationError, ValidationError.UnknownCharClass) },
+        .{ Rule{ .id = "empty-class", .tool = "*", .message = "m", .match = .{ .content_chars = &.{} } }, @as(?ValidationError, ValidationError.UnknownCharClass) },
+        .{ Rule{ .id = "star-rewrite", .tool = "*", .rewrite_to = "x", .match = .{ .content_chars = chars } }, @as(?ValidationError, ValidationError.RewriteRequiresCommand) },
+        .{ Rule{ .id = "grep-content", .tool = "Grep", .message = "m", .match = .{ .content_chars = chars } }, @as(?ValidationError, ValidationError.MatcherToolMismatch) },
+    };
+    inline for (cases) |c| {
+        const rules = [_]Rule{c[0]};
+        if (c[1]) |expected| {
+            try std.testing.expectError(expected, validate(&rules));
+        } else {
+            try validate(&rules);
+        }
+    }
 }

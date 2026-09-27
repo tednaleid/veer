@@ -452,6 +452,30 @@ test "loadString parses basic config" {
     try std.testing.expectEqualStrings("just test", config.rule[0].rewrite_to.?);
 }
 
+test "loadString parses event, tool wildcard, and content_chars" {
+    var result = try loadString(std.testing.allocator,
+        \\[[rule]]
+        \\id = "no-emoji-in-replies"
+        \\event = "Stop"
+        \\message = "m"
+        \\[rule.match]
+        \\content_chars = ["emoji", "emdash"]
+        \\
+        \\[[rule]]
+        \\id = "no-emoji-in-tool-input"
+        \\tool = "*"
+        \\message = "m"
+        \\[rule.match]
+        \\content_chars = ["status_markers"]
+    );
+    defer result.deinit();
+    const rules = result.value.rule;
+    try std.testing.expectEqual(rule_mod.Event.Stop, rules[0].event);
+    try std.testing.expectEqual(@as(usize, 2), rules[0].match.content_chars.?.len);
+    try std.testing.expectEqual(rule_mod.Event.PreToolUse, rules[1].event);
+    try std.testing.expectEqualStrings("*", rules[1].tool);
+}
+
 test "loadString parses multiple rules" {
     const input =
         \\[[rule]]

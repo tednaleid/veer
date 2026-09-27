@@ -87,6 +87,12 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, opts: ValidateOptions, writ
                 issues_len += 1;
             }
         }
+        if (rule_mod.schemaIssue(rule)) |err| {
+            if (issues_len < issues_buf.len) {
+                issues_buf[issues_len] = rule_mod.issueText(err);
+                issues_len += 1;
+            }
+        }
 
         const action = rule.effectiveAction();
         if (action == .rewrite and rule.rewrite_to == null) {
@@ -167,6 +173,7 @@ fn validateAll(rules: []const rule_mod.Rule) usize {
         }
 
         if (rule.tool_any != null and !std.mem.eql(u8, rule.tool, "Bash")) count += 1;
+        if (rule_mod.schemaIssue(rule) != null) count += 1;
 
         const action = rule.effectiveAction();
         if (action == .rewrite and rule.rewrite_to == null) count += 1;
@@ -390,4 +397,33 @@ test "validate accepts a tool_any rule whose matcher fits every listed tool" {
     const out = stream.buffered();
     try std.testing.expectEqual(@as(u8, 0), code);
     try std.testing.expect(std.mem.indexOf(u8, out, "OK") != null);
+}
+
+test "validate reports an unknown character class" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(path);
+    const config_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/config.toml", .{path});
+    defer std.testing.allocator.free(config_path);
+
+    const file = try std.Io.Dir.cwd().createFile(std.testing.io, config_path, .{});
+    try file.writeStreamingAll(std.testing.io,
+        \\[[rule]]
+        \\id = "bad"
+        \\tool = "*"
+        \\message = "m"
+        \\[rule.match]
+        \\content_chars = ["emojis"]
+        \\
+    );
+    file.close(std.testing.io);
+
+    var buf: [1024]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&buf);
+    const exit_code = try run(std.testing.allocator, std.testing.io, .{ .config_path = config_path }, &stream);
+
+    try std.testing.expectEqual(@as(u8, 1), exit_code);
+    try std.testing.expect(std.mem.indexOf(u8, stream.buffered(), "content_chars must list") != null);
 }
