@@ -19,7 +19,7 @@ pub const Table = struct {
         if (num_cols == 0) return;
 
         // Calculate column widths
-        var widths: [MAX_COLS]usize = .{0} ** MAX_COLS;
+        var widths: [MAX_COLS]usize = @splat(0);
         for (self.headers, 0..) |h, i| {
             if (i < MAX_COLS) widths[i] = h.len;
         }

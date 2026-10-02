@@ -234,10 +234,10 @@ fn appendSegments(s: []const u8, out: *[max_segments][]const u8, start: usize) ?
 /// Bounds a (pattern_index, path_index) memo: both indices can reach their
 /// slice's length (the "consumed everything" state), so each dimension
 /// needs max_segments + 1 slots.
-const MemoSet = std.StaticBitSet((max_segments + 1) * (max_segments + 1));
+const MemoSet = std.bit_set.Static((max_segments + 1) * (max_segments + 1));
 
 fn matchSegments(pat: []const []const u8, path: []const []const u8) bool {
-    var memo = MemoSet.initEmpty();
+    var memo: MemoSet = .empty;
     return matchFrom(pat, 0, path, 0, &memo);
 }
 

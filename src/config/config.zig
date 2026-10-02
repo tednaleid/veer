@@ -92,9 +92,36 @@ pub const ParseDetail = union(enum) {
     position: struct { line: usize, column: usize },
     field_path: []const []const u8,
 
+    /// Copy the parser's error info, which the parser frees on its deinit.
+    /// Returns null when there is nothing to report or the copy fails.
+    fn fromErrorInfo(allocator: std.mem.Allocator, info: toml.ErrorInfo) ?ParseDetail {
+        return switch (info) {
+            .parse => |pos| .{ .position = .{ .line = pos.line, .column = pos.pos } },
+            .struct_mapping => |fp| .{ .field_path = dupeSegments(allocator, fp) catch return null },
+            .unknown_fields => null,
+        };
+    }
+
+    fn dupeSegments(allocator: std.mem.Allocator, segments: []const []const u8) ![]const []const u8 {
+        const copy = try allocator.alloc([]const u8, segments.len);
+        var copied: usize = 0;
+        errdefer {
+            for (copy[0..copied]) |seg| allocator.free(seg);
+            allocator.free(copy);
+        }
+        for (segments) |seg| {
+            copy[copied] = try allocator.dupe(u8, seg);
+            copied += 1;
+        }
+        return copy;
+    }
+
     pub fn deinit(self: *ParseDetail, allocator: std.mem.Allocator) void {
         switch (self.*) {
-            .field_path => |fp| allocator.free(fp),
+            .field_path => |fp| {
+                for (fp) |seg| allocator.free(seg);
+                allocator.free(fp);
+            },
             .position => {},
         }
     }
@@ -109,8 +136,7 @@ pub fn loadString(allocator: std.mem.Allocator, input: []const u8) !toml.Parsed(
 
 /// Like loadString, but writes the reason for a parse failure to `detail_out`
 /// when one is available. The caller owns `detail_out` and must call its
-/// deinit. The parser frees its own copy on deinit, so the field path is
-/// duped here; its segments are comptime struct field names and outlive us.
+/// deinit.
 pub fn loadStringDetailed(
     allocator: std.mem.Allocator,
     input: []const u8,
@@ -120,18 +146,7 @@ pub fn loadStringDetailed(
     defer parser.deinit();
 
     var result = parser.parseString(input) catch {
-        if (parser.error_info) |info| {
-            switch (info) {
-                .parse => |pos| detail_out.* = .{
-                    .position = .{ .line = pos.line, .column = pos.pos },
-                },
-                .struct_mapping => |fp| {
-                    if (allocator.dupe([]const u8, fp)) |duped| {
-                        detail_out.* = .{ .field_path = duped };
-                    } else |_| {}
-                },
-            }
-        }
+        if (parser.error_info) |info| detail_out.* = ParseDetail.fromErrorInfo(allocator, info);
         return error.ParseFailed;
     };
 
@@ -199,18 +214,7 @@ pub fn parseFileOnly(
     defer parser.deinit();
 
     return parser.parseString(content) catch {
-        if (parser.error_info) |info| {
-            switch (info) {
-                .parse => |pos| detail_out.* = .{
-                    .position = .{ .line = pos.line, .column = pos.pos },
-                },
-                .struct_mapping => |fp| {
-                    if (allocator.dupe([]const u8, fp)) |duped| {
-                        detail_out.* = .{ .field_path = duped };
-                    } else |_| {}
-                },
-            }
-        }
+        if (parser.error_info) |info| detail_out.* = ParseDetail.fromErrorInfo(allocator, info);
         return error.ParseFailed;
     };
 }
