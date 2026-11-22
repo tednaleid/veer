@@ -782,7 +782,7 @@ In a repo with a project install, a contributor without veer sees one notice at 
 
 > veer is not installed, so the Claude Code rules in .veer/config.toml are not enforced. veer steers Claude Code toward project-specific tooling. Install: brew install tednaleid/veer/veer (https://github.com/tednaleid/veer). To silence this notice: touch .veer/no-notice
 
-The notice does not repeat on resume, `/clear` or compaction. To silence it for one clone without installing veer, run `touch .veer/no-notice`. The committed `.veer/.gitignore` keeps that file out of git.
+The notice does not repeat on resume, `/clear` or compaction. To silence it for one clone without installing veer, run `touch .veer/no-notice`. The committed `.veer/.gitignore` keeps that file out of git, and `veer uninstall` removes it.
 
 Hooks written by veer 0.3.0 or earlier are a bare `veer check`. Without veer they show a `PreToolUse:Bash hook error` on every tool call, until the repo owner re-runs `veer install`.
 

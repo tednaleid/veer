@@ -1,5 +1,5 @@
-// ABOUTME: Merges into settings.json, creates config stub, writes skill file,
-// ABOUTME: and (for --local) registers the config in .git/info/exclude.
+// ABOUTME: Installs and uninstalls veer's hooks in settings.json, including the notice shown
+// ABOUTME: to people without veer, plus the config stub, skill file and git ignore entries.
 
 const std = @import("std");
 
@@ -58,10 +58,12 @@ const notice_text = "veer is not installed, so the Claude Code rules in .veer/co
 const notice_marker_entry = "no-notice";
 
 /// SessionStart command. Prints the notice as hook JSON unless veer is on the
-/// PATH or the person has created the .veer/no-notice marker. systemMessage
-/// shows it to the person; additionalContext adds it to the agent's context.
+/// PATH or the person has created the .veer/no-notice marker. The marker is
+/// looked up in the project directory, or in the current directory when
+/// Claude Code does not provide one. systemMessage shows the notice to the
+/// person; additionalContext adds it to the agent's context.
 const notice_command = missing_guard ++
-    "[ -e \"$CLAUDE_PROJECT_DIR/.veer/no-notice\" ] || echo '" ++
+    "[ -e \"${CLAUDE_PROJECT_DIR:-.}/.veer/no-notice\" ] || echo '" ++
     "{\"systemMessage\":\"" ++ notice_text ++ "\"," ++
     "\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\"," ++
     "\"additionalContext\":\"" ++ notice_text ++ "\"}}" ++
@@ -157,7 +159,9 @@ pub fn install(allocator: std.mem.Allocator, io: std.Io, paths: Paths, verbose: 
     try ensureConfigStub(io, paths.config, writer);
     if (paths.notice_ignore) |ignore| {
         try ensureParentDir(io, ignore);
-        try appendExcludeEntry(allocator, io, ignore, notice_marker_entry, writer);
+        if (try appendLineIfMissing(allocator, io, ignore, notice_marker_entry)) {
+            try writer.print("added {s} to {s} (commit this file)\n", .{ notice_marker_entry, ignore });
+        }
     }
     if (paths.skill) |skill| try writeSkillFile(io, skill, writer);
     return 0;
@@ -167,9 +171,10 @@ pub fn install(allocator: std.mem.Allocator, io: std.Io, paths: Paths, verbose: 
 ///   1. Remove veer entries from settings.json, including the SessionStart
 ///      notice (preserve unrelated hooks).
 ///   2. Delete config.toml from config dir.
-///   3. Best-effort delete .gitignore and a leftover veer.db from the config
-///      dir (no-op if already absent) -- skipped for .local scope, whose
-///      config dir belongs to the project install.
+///   3. Best-effort delete .gitignore, a person's no-notice marker and a
+///      leftover veer.db from the config dir (no-op if already absent) --
+///      skipped for .local scope, whose config dir belongs to the project
+///      install.
 ///   4. Try to remove the config dir if empty.
 ///   5. Delete SKILL.md and parent veer/ skill dir if empty.
 ///      (For a local/private install paths.skill is null, so this step is
@@ -180,10 +185,12 @@ pub fn uninstall(allocator: std.mem.Allocator, io: std.Io, paths: Paths, writer:
     try deleteIfExists(io, paths.config, "config", writer);
     if (configDir(paths.config)) |dir| {
         // .gitignore holds the no-notice entry of a project install, and
-        // the veer.db exclusion of older versions. veer.db itself is a
-        // leftover of those versions. Delete both if present.
+        // the veer.db exclusion of older versions. The no-notice marker only
+        // means something while the notice hook is installed. veer.db is a
+        // leftover of older versions. Delete each if present.
         if (paths.owns_config_dir) {
             try deleteInDir(io, dir, ".gitignore", writer);
+            try deleteInDir(io, dir, notice_marker_entry, writer);
             try deleteInDir(io, dir, "veer.db", writer);
         }
         std.Io.Dir.cwd().deleteDir(io, dir) catch {};
@@ -425,28 +432,37 @@ pub fn gitInfoExcludePath(allocator: std.mem.Allocator, io: std.Io) !?[]u8 {
 
 /// Append `entry` to the git exclude file at `exclude_path` if no line already
 /// equals it (after trimming). Creates the file if missing (its parent
-/// `info/` dir exists in a valid git repo). Idempotent. Read-then-rewrite,
-/// matching `writeSkillFile`/`writeJsonAtomic`.
+/// `info/` dir exists in a valid git repo). Idempotent.
 pub fn appendExcludeEntry(allocator: std.mem.Allocator, io: std.Io, exclude_path: []const u8, entry: []const u8, writer: anytype) !void {
-    const content = readFileAlloc(allocator, io, exclude_path) catch |err| switch (err) {
+    if (try appendLineIfMissing(allocator, io, exclude_path, entry)) {
+        try writer.print("excluded {s} via {s}\n", .{ entry, exclude_path });
+    }
+}
+
+/// Append `line` to the file at `path` unless a line already equals it (after
+/// trimming). Creates the file if missing; its parent directory must exist.
+/// Returns whether the file changed. Read-then-rewrite, matching
+/// `writeSkillFile`/`writeJsonAtomic`.
+fn appendLineIfMissing(allocator: std.mem.Allocator, io: std.Io, path: []const u8, line: []const u8) !bool {
+    const content = readFileAlloc(allocator, io, path) catch |err| switch (err) {
         error.FileNotFound => try allocator.dupe(u8, ""),
         else => return err,
     };
     defer allocator.free(content);
 
     var lines = std.mem.splitScalar(u8, content, '\n');
-    while (lines.next()) |line| {
-        if (std.mem.eql(u8, std.mem.trim(u8, line, " \t\r"), entry)) return;
+    while (lines.next()) |existing| {
+        if (std.mem.eql(u8, std.mem.trim(u8, existing, " \t\r"), line)) return false;
     }
 
     const needs_nl = content.len > 0 and content[content.len - 1] != '\n';
-    const f = try std.Io.Dir.cwd().createFile(io, exclude_path, .{ .truncate = true });
+    const f = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
     defer f.close(io);
     try f.writeStreamingAll(io, content);
     if (needs_nl) try f.writeStreamingAll(io, "\n");
-    try f.writeStreamingAll(io, entry);
+    try f.writeStreamingAll(io, line);
     try f.writeStreamingAll(io, "\n");
-    try writer.print("excluded {s} via {s}\n", .{ entry, exclude_path });
+    return true;
 }
 
 /// Add `config_relpath` (the repo-root-relative ".veer/config.local.toml") to
@@ -1484,4 +1500,69 @@ test "local uninstall leaves the project install's .veer/.gitignore in place" {
     const content = try readFileAlloc(testing.allocator, std.testing.io, project.notice_ignore.?);
     defer testing.allocator.free(content);
     try testing.expectEqualStrings("no-notice\n", content);
+}
+
+test "project uninstall removes a person's no-notice marker" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
+    defer testing.allocator.free(tmp_root);
+    const paths = try testPaths(testing.allocator, tmp_root);
+    defer freeTestPaths(testing.allocator, paths);
+    var marker_buf: [1024]u8 = undefined;
+    const marker = try std.fmt.bufPrint(&marker_buf, "{s}/.veer/no-notice", .{tmp_root});
+    var dir_buf: [1024]u8 = undefined;
+    const veer_dir = try std.fmt.bufPrint(&dir_buf, "{s}/.veer", .{tmp_root});
+
+    var buf: [4096]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&buf);
+    _ = try install(testing.allocator, std.testing.io, paths, false, &stream);
+    try testWriteFile(std.testing.io, marker, "");
+    stream.end = 0;
+    _ = try uninstall(testing.allocator, std.testing.io, paths, &stream);
+
+    try testing.expect(!fileExistsAbs(std.testing.io, marker));
+    try testing.expect(!fileExistsAbs(std.testing.io, veer_dir));
+}
+
+test "local uninstall leaves a no-notice marker in place" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
+    defer testing.allocator.free(tmp_root);
+    const local = try testLocalPaths(testing.allocator, tmp_root);
+    defer freeTestPaths(testing.allocator, local);
+    var marker_buf: [1024]u8 = undefined;
+    const marker = try std.fmt.bufPrint(&marker_buf, "{s}/.veer/no-notice", .{tmp_root});
+
+    var buf: [4096]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&buf);
+    _ = try install(testing.allocator, std.testing.io, local, false, &stream);
+    try testWriteFile(std.testing.io, marker, "");
+    stream.end = 0;
+    _ = try uninstall(testing.allocator, std.testing.io, local, &stream);
+
+    try testing.expect(fileExistsAbs(std.testing.io, marker));
+}
+
+test "install says to commit .veer/.gitignore only when it adds the entry" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
+    defer testing.allocator.free(tmp_root);
+    const paths = try testPaths(testing.allocator, tmp_root);
+    defer freeTestPaths(testing.allocator, paths);
+
+    var buf: [4096]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&buf);
+    _ = try install(testing.allocator, std.testing.io, paths, false, &stream);
+    try testing.expect(std.mem.indexOf(u8, stream.buffered(), "/.veer/.gitignore (commit this file)") != null);
+
+    stream.end = 0;
+    _ = try install(testing.allocator, std.testing.io, paths, false, &stream);
+    try testing.expect(std.mem.indexOf(u8, stream.buffered(), "commit this file") == null);
+}
+
+test "notice_command looks for the marker in the current directory when CLAUDE_PROJECT_DIR is unset" {
+    try testing.expect(std.mem.indexOf(u8, notice_command, "[ -e \"${CLAUDE_PROJECT_DIR:-.}/.veer/no-notice\" ]") != null);
 }

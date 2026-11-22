@@ -58,7 +58,7 @@ no-op for both events.
 `SessionStart` with matcher `startup`, project scope only:
 
 ```
-command -v veer >/dev/null 2>&1 || [ -e "$CLAUDE_PROJECT_DIR/.veer/no-notice" ] || echo '<notice JSON>'
+command -v veer >/dev/null 2>&1 || [ -e "${CLAUDE_PROJECT_DIR:-.}/.veer/no-notice" ] || echo '<notice JSON>'
 ```
 
 The `startup` matcher is what makes it once per session. Without it the hook
@@ -85,7 +85,9 @@ escaping stay trivial.
 For project installs, `veer install` adds the line `no-notice` to
 `.veer/.gitignore`, to be committed. It creates the file when missing and
 keeps any lines already there, such as the `veer.db*` that older versions
-wrote. `veer uninstall` keeps deleting `.veer/.gitignore`, as it does today.
+wrote. A project `veer uninstall` deletes `.veer/.gitignore` and a
+`.veer/no-notice` marker. A `--local` uninstall deletes neither: it shares
+`.veer/` with the project install.
 
 `--local` and `--global` installs get the guarded `veer check` command but no
 `SessionStart` hook and no `.gitignore`: the person installing is the person

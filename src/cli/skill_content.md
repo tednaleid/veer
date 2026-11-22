@@ -41,11 +41,30 @@ project skill (it relies on a global skill from `veer install --global`). Use
 it when you want veer in a repo your teammates do not use.
 
 `veer install` writes the per-repo pieces (`.claude/settings.json`,
-`.veer/config.toml`, `.claude/skills/veer/SKILL.md`).
+`.veer/config.toml`, `.veer/.gitignore`, `.claude/skills/veer/SKILL.md`),
+all of which are meant to be committed.
 `veer install --global` writes the home-directory pieces
 (`~/.claude/settings.json`, `~/.config/veer/config.toml`,
 `~/.claude/skills/veer/SKILL.md`) and applies to every project. Run both
 to get a global hook with project-level overrides.
+
+### What veer writes into settings.json
+
+Every hook command veer installs ends with the shell comment `# veer-hook`.
+`veer install` and `veer uninstall` identify veer's entries by that comment,
+so leave it in place and do not hand-edit those commands: the next
+`veer install` rewrites them. Each command starts with a guard that exits
+silently when the `veer` binary is not on the PATH, so people without veer
+get no hook errors.
+
+A project install also registers a `SessionStart` hook. For someone without
+veer it prints one notice per new session saying the rules are not enforced
+and how to install veer. If you see that notice in your context, veer is not
+installed on this machine and the rules in `.veer/config.toml` are not being
+applied: tell the user, and follow the rules' intent yourself where you can.
+A person can silence the notice for one clone with `touch .veer/no-notice`;
+`.veer/.gitignore` keeps that marker out of git, and `veer uninstall`
+removes it.
 
 ### When to put a rule local, project, or global
 

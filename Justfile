@@ -407,6 +407,9 @@ check-missing-veer:
     out="$(env -i PATH="$bare" CLAUDE_PROJECT_DIR="$tmp" sh -c "$start" 2>&1)" \
         || fail "notice hook exited nonzero with the marker present"
     [ -z "$out" ] || fail "notice printed despite .veer/no-notice: $out"
+    out="$(env -i PATH="$bare" sh -c "$start" 2>&1)" \
+        || fail "notice hook exited nonzero with the marker present and CLAUDE_PROJECT_DIR unset"
+    [ -z "$out" ] || fail "notice printed despite .veer/no-notice with CLAUDE_PROJECT_DIR unset: $out"
     git check-ignore -q .veer/no-notice || fail ".veer/no-notice is not ignored"
     if git status --porcelain --untracked-files=all | grep -q 'no-notice'; then
         fail ".veer/no-notice shows in git status"
