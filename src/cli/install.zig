@@ -23,12 +23,23 @@ const config_stub =
     \\
 ;
 
-/// Hook command strings. `veer install` writes the plain form; `veer install
-/// --verbose` writes the verbose form (which adds user-visible systemMessage
-/// banners to each tool call). Both are recognized on uninstall and on
-/// re-install so users can toggle between modes without orphan entries.
-const hook_command_plain = "veer check";
-const hook_command_verbose = "veer check --verbose";
+/// Trailing shell comment on every command veer writes. Install and uninstall
+/// identify veer's entries by it, whatever the rest of the command says.
+const hook_marker = "# veer-hook";
+
+/// Shell prefix that runs what follows it only when veer is not on the PATH.
+const missing_guard = "command -v veer >/dev/null 2>&1 || ";
+
+/// Hook command strings. A missing veer binary exits 0 with no output, which
+/// Claude Code treats as a hook with nothing to report. `veer install` writes
+/// the plain form; `veer install --verbose` writes the verbose form (which
+/// adds user-visible systemMessage banners to each tool call).
+const hook_command_plain = missing_guard ++ "exit 0; veer check " ++ hook_marker;
+const hook_command_verbose = missing_guard ++ "exit 0; veer check --verbose " ++ hook_marker;
+
+/// Unmarked commands written by veer 0.3.0 and earlier.
+const legacy_command_plain = "veer check";
+const legacy_command_verbose = "veer check --verbose";
 
 fn hookCommandFor(verbose: bool) []const u8 {
     return if (verbose) hook_command_verbose else hook_command_plain;
@@ -43,8 +54,9 @@ const hook_events = [_]HookEvent{
 };
 
 fn isVeerCommandString(cmd: []const u8) bool {
-    return std.mem.eql(u8, cmd, hook_command_plain) or
-        std.mem.eql(u8, cmd, hook_command_verbose);
+    return std.mem.endsWith(u8, std.mem.trimEnd(u8, cmd, " \t"), hook_marker) or
+        std.mem.eql(u8, cmd, legacy_command_plain) or
+        std.mem.eql(u8, cmd, legacy_command_verbose);
 }
 
 pub const Scope = enum { project, local, global };
@@ -820,7 +832,7 @@ test "uninstall removes empty PreToolUse/hooks after veer entry removal" {
     try testing.expect(!fileExistsAbs(std.testing.io, paths.settings));
 }
 
-test "install --verbose writes 'veer check --verbose' into settings.json" {
+test "install --verbose writes the verbose command" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     const tmp_root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
@@ -835,18 +847,7 @@ test "install --verbose writes 'veer check --verbose' into settings.json" {
 
     const content = try readFileAlloc(testing.allocator, std.testing.io, paths.settings);
     defer testing.allocator.free(content);
-    try testing.expect(std.mem.indexOf(u8, content, "veer check --verbose") != null);
-    // And the plain form must not also be present.
-    const plain_count = blk: {
-        var count: usize = 0;
-        var i: usize = 0;
-        while (std.mem.indexOfPos(u8, content, i, "\"veer check\"")) |pos| {
-            count += 1;
-            i = pos + 1;
-        }
-        break :blk count;
-    };
-    try testing.expectEqual(@as(usize, 0), plain_count);
+    try testExpectVeerCommands(content, hook_command_verbose);
 }
 
 test "install then install --verbose replaces the entry (one entry total)" {
@@ -868,28 +869,7 @@ test "install then install --verbose replaces the entry (one entry total)" {
     const content = try readFileAlloc(testing.allocator, std.testing.io, paths.settings);
     defer testing.allocator.free(content);
 
-    // One veer entry per hook event, in verbose form. Use the JSON-quoted form to
-    // avoid accidentally counting the verbose entry twice (it contains both
-    // "veer check" and "veer check --verbose" as substrings).
-    var verbose_count: usize = 0;
-    {
-        var i: usize = 0;
-        while (std.mem.indexOfPos(u8, content, i, "\"veer check --verbose\"")) |pos| {
-            verbose_count += 1;
-            i = pos + 1;
-        }
-    }
-    try testing.expectEqual(@as(usize, 2), verbose_count);
-
-    var plain_count: usize = 0;
-    {
-        var i: usize = 0;
-        while (std.mem.indexOfPos(u8, content, i, "\"veer check\"")) |pos| {
-            plain_count += 1;
-            i = pos + 1;
-        }
-    }
-    try testing.expectEqual(@as(usize, 0), plain_count);
+    try testExpectVeerCommands(content, hook_command_verbose);
 }
 
 test "install --verbose then install (plain) switches back" {
@@ -910,8 +890,7 @@ test "install --verbose then install (plain) switches back" {
 
     const content = try readFileAlloc(testing.allocator, std.testing.io, paths.settings);
     defer testing.allocator.free(content);
-    try testing.expect(std.mem.indexOf(u8, content, "\"veer check\"") != null);
-    try testing.expect(std.mem.indexOf(u8, content, "veer check --verbose") == null);
+    try testExpectVeerCommands(content, hook_command_plain);
 }
 
 test "uninstall removes a verbose-form veer entry" {
@@ -1059,7 +1038,7 @@ test "install registers veer under PreToolUse and Stop" {
     try testing.expectEqual(@as(usize, 1), stop.len);
     try testing.expect(stop[0].object.get("matcher") == null);
     const cmd = stop[0].object.get("hooks").?.array.items[0].object.get("command").?.string;
-    try testing.expectEqualStrings("veer check", cmd);
+    try testing.expectEqualStrings(hook_command_plain, cmd);
 }
 
 test "install preserves an existing non-veer Stop hook and uninstall keeps it" {
@@ -1090,4 +1069,129 @@ test "install preserves an existing non-veer Stop hook and uninstall keeps it" {
     defer testing.allocator.free(content);
     try testing.expect(std.mem.indexOf(u8, content, "notify-done") != null);
     try testing.expect(std.mem.indexOf(u8, content, "veer check") == null);
+}
+
+/// Return hooks[event][entry_idx].hooks[hook_idx].command from settings JSON.
+/// Caller frees with testing.allocator.
+fn testHookCommand(content: []const u8, event: []const u8, entry_idx: usize, hook_idx: usize) ![]u8 {
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, content, .{});
+    defer parsed.deinit();
+    const entries = parsed.value.object.get("hooks").?.object.get(event).?.array.items;
+    const cmd = entries[entry_idx].object.get("hooks").?.array.items[hook_idx].object.get("command").?.string;
+    return testing.allocator.dupe(u8, cmd);
+}
+
+/// Expect PreToolUse and Stop to each hold exactly one hook, with `expected`
+/// as its command.
+fn testExpectVeerCommands(content: []const u8, expected: []const u8) !void {
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, content, .{});
+    defer parsed.deinit();
+    const hooks = parsed.value.object.get("hooks").?.object;
+    for ([_][]const u8{ "PreToolUse", "Stop" }) |event| {
+        const entries = hooks.get(event).?.array.items;
+        try testing.expectEqual(@as(usize, 1), entries.len);
+        const entry_hooks = entries[0].object.get("hooks").?.array.items;
+        try testing.expectEqual(@as(usize, 1), entry_hooks.len);
+        try testing.expectEqualStrings(expected, entry_hooks[0].object.get("command").?.string);
+    }
+}
+
+fn testCountOccurrences(haystack: []const u8, needle: []const u8) usize {
+    var count: usize = 0;
+    var i: usize = 0;
+    while (std.mem.indexOfPos(u8, haystack, i, needle)) |pos| {
+        count += 1;
+        i = pos + 1;
+    }
+    return count;
+}
+
+test "isVeerCommandString recognises marked and legacy commands only" {
+    try testing.expect(isVeerCommandString(hook_command_plain));
+    try testing.expect(isVeerCommandString(hook_command_verbose));
+    try testing.expect(isVeerCommandString("veer check"));
+    try testing.expect(isVeerCommandString("veer check --verbose"));
+    try testing.expect(isVeerCommandString("anything at all # veer-hook  \t"));
+    try testing.expect(!isVeerCommandString("other-tool check"));
+    try testing.expect(!isVeerCommandString("veer check --config x.toml"));
+    try testing.expect(!isVeerCommandString("echo '# veer-hook' && other-tool"));
+}
+
+test "install writes the guarded command" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
+    defer testing.allocator.free(tmp_root);
+    const paths = try testPaths(testing.allocator, tmp_root);
+    defer freeTestPaths(testing.allocator, paths);
+
+    var buf: [4096]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&buf);
+    _ = try install(testing.allocator, std.testing.io, paths, false, &stream);
+
+    const content = try readFileAlloc(testing.allocator, std.testing.io, paths.settings);
+    defer testing.allocator.free(content);
+    const expected = "command -v veer >/dev/null 2>&1 || exit 0; veer check # veer-hook";
+    for ([_][]const u8{ "PreToolUse", "Stop" }) |event| {
+        const cmd = try testHookCommand(content, event, 0, 0);
+        defer testing.allocator.free(cmd);
+        try testing.expectEqualStrings(expected, cmd);
+    }
+}
+
+test "install upgrades a legacy bare command in place" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
+    defer testing.allocator.free(tmp_root);
+    const paths = try testPaths(testing.allocator, tmp_root);
+    defer freeTestPaths(testing.allocator, paths);
+
+    try testWriteFile(std.testing.io, paths.settings,
+        \\{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[
+        \\  {"type":"command","command":"veer check"},
+        \\  {"type":"command","command":"other-tool check"}
+        \\]}]}}
+    );
+
+    var buf: [4096]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&buf);
+    _ = try install(testing.allocator, std.testing.io, paths, false, &stream);
+
+    const content = try readFileAlloc(testing.allocator, std.testing.io, paths.settings);
+    defer testing.allocator.free(content);
+    const first = try testHookCommand(content, "PreToolUse", 0, 0);
+    defer testing.allocator.free(first);
+    const second = try testHookCommand(content, "PreToolUse", 0, 1);
+    defer testing.allocator.free(second);
+    try testing.expectEqualStrings("other-tool check", first);
+    try testing.expectEqualStrings(hook_command_plain, second);
+    try testing.expectEqual(@as(usize, 0), testCountOccurrences(content, "\"veer check\""));
+    try testing.expectEqual(@as(usize, 1), testCountOccurrences(content, "\"PreToolUse\""));
+}
+
+test "install replaces a hand-edited marked command" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
+    defer testing.allocator.free(tmp_root);
+    const paths = try testPaths(testing.allocator, tmp_root);
+    defer freeTestPaths(testing.allocator, paths);
+
+    try testWriteFile(std.testing.io, paths.settings,
+        \\{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[
+        \\  {"type":"command","command":"veer check --config odd.toml # veer-hook"}
+        \\]}]}}
+    );
+
+    var buf: [4096]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&buf);
+    _ = try install(testing.allocator, std.testing.io, paths, false, &stream);
+
+    const content = try readFileAlloc(testing.allocator, std.testing.io, paths.settings);
+    defer testing.allocator.free(content);
+    try testing.expect(std.mem.indexOf(u8, content, "odd.toml") == null);
+    const cmd = try testHookCommand(content, "PreToolUse", 0, 0);
+    defer testing.allocator.free(cmd);
+    try testing.expectEqualStrings(hook_command_plain, cmd);
 }
