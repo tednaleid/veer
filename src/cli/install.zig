@@ -45,13 +45,39 @@ fn hookCommandFor(verbose: bool) []const u8 {
     return if (verbose) hook_command_verbose else hook_command_plain;
 }
 
-/// Hook events veer registers for. PreToolUse entries use matcher "*"; Stop
-/// takes no matcher.
+/// What a person without veer is told, and what their agent is told.
+/// It is embedded in single-quoted shell inside a JSON string, so it must
+/// contain no quote or backslash characters.
+const notice_text = "veer is not installed, so the Claude Code rules in .veer/config.toml are not enforced. " ++
+    "veer steers Claude Code toward project-specific tooling. " ++
+    "Install: brew install tednaleid/veer/veer (https://github.com/tednaleid/veer). " ++
+    "To silence this notice: touch .veer/no-notice";
+
+/// Line in .veer/.gitignore that keeps a person's .veer/no-notice marker out
+/// of git.
+const notice_marker_entry = "no-notice";
+
+/// SessionStart command. Prints the notice as hook JSON unless veer is on the
+/// PATH or the person has created the .veer/no-notice marker. systemMessage
+/// shows it to the person; additionalContext adds it to the agent's context.
+const notice_command = missing_guard ++
+    "[ -e \"$CLAUDE_PROJECT_DIR/.veer/no-notice\" ] || echo '" ++
+    "{\"systemMessage\":\"" ++ notice_text ++ "\"," ++
+    "\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\"," ++
+    "\"additionalContext\":\"" ++ notice_text ++ "\"}}" ++
+    "' " ++ hook_marker;
+
+/// Hook events veer runs `veer check` for. PreToolUse entries use matcher
+/// "*"; Stop takes no matcher.
 const HookEvent = struct { name: []const u8, matcher: ?[]const u8 };
 const hook_events = [_]HookEvent{
     .{ .name = "PreToolUse", .matcher = "*" },
     .{ .name = "Stop", .matcher = null },
 };
+
+/// Event carrying the notice. The "startup" matcher limits it to new
+/// sessions; SessionStart also fires on resume, clear, compact and fork.
+const notice_event: HookEvent = .{ .name = "SessionStart", .matcher = "startup" };
 
 fn isVeerCommandString(cmd: []const u8) bool {
     return std.mem.endsWith(u8, std.mem.trimEnd(u8, cmd, " \t"), hook_marker) or
@@ -65,6 +91,11 @@ pub const Paths = struct {
     settings: []const u8,
     config: []const u8,
     skill: ?[]const u8,
+    /// The .gitignore that receives the no-notice entry. Non-null only for a
+    /// project install, which is also the only scope that registers the
+    /// missing-veer notice: its settings.json is shared with people who may
+    /// not have veer.
+    notice_ignore: ?[]const u8,
 };
 
 /// Resolve absolute paths for the given install scope.
@@ -75,11 +106,13 @@ pub fn resolvePaths(allocator: std.mem.Allocator, environ: std.process.Environ, 
             .settings = ".claude/settings.json",
             .config = ".veer/config.toml",
             .skill = ".claude/skills/veer/SKILL.md",
+            .notice_ignore = ".veer/.gitignore",
         },
         .local => .{
             .settings = ".claude/settings.local.json",
             .config = ".veer/config.local.toml",
             .skill = null,
+            .notice_ignore = null,
         },
         .global => blk: {
             const home = environ.getPosix("HOME") orelse return error.NoHome;
@@ -87,6 +120,7 @@ pub fn resolvePaths(allocator: std.mem.Allocator, environ: std.process.Environ, 
                 .settings = try std.fmt.allocPrint(allocator, "{s}/.claude/settings.json", .{home}),
                 .config = try std.fmt.allocPrint(allocator, "{s}/.config/veer/config.toml", .{home}),
                 .skill = try std.fmt.allocPrint(allocator, "{s}/.claude/skills/veer/SKILL.md", .{home}),
+                .notice_ignore = null,
             };
         },
     };
@@ -101,16 +135,23 @@ pub fn freePaths(allocator: std.mem.Allocator, paths: Paths, scope: Scope) void 
 }
 
 /// Install the veer hook:
-///   1. Merge veer entry into settings.json (never overwrite unrelated hooks).
+///   1. Merge veer entries into settings.json (never overwrite unrelated
+///      hooks). When paths.notice_ignore is set this includes the SessionStart
+///      missing-veer notice.
 ///   2. Create config stub if missing.
-///   3. Write SKILL.md (always overwrite) -- skipped for .local scope.
+///   3. Add the no-notice entry to paths.notice_ignore, when set.
+///   4. Write SKILL.md (always overwrite) -- skipped for .local scope.
 /// When `verbose` is true, the registered command is `veer check --verbose`,
 /// which causes each tool call to emit a user-visible systemMessage banner.
 /// Returns process exit code (0 on success, 1 on user-facing error).
 pub fn install(allocator: std.mem.Allocator, io: std.Io, paths: Paths, verbose: bool, writer: anytype) !u8 {
-    const hook_code = try installHook(allocator, io, paths.settings, verbose, writer);
+    const hook_code = try installHook(allocator, io, paths.settings, verbose, paths.notice_ignore != null, writer);
     if (hook_code != 0) return hook_code;
     try ensureConfigStub(io, paths.config, writer);
+    if (paths.notice_ignore) |ignore| {
+        try ensureParentDir(io, ignore);
+        try appendExcludeEntry(allocator, io, ignore, notice_marker_entry, writer);
+    }
     if (paths.skill) |skill| try writeSkillFile(io, skill, writer);
     return 0;
 }
@@ -129,8 +170,9 @@ pub fn uninstall(allocator: std.mem.Allocator, io: std.Io, paths: Paths, writer:
     if (hook_code != 0) return hook_code;
     try deleteIfExists(io, paths.config, "config", writer);
     if (configDir(paths.config)) |dir| {
-        // .gitignore was written by older versions to exclude veer.db; both
-        // are obsolete now. Delete if present (no-op if not).
+        // .gitignore holds the no-notice entry of a project install, and
+        // the veer.db exclusion of older versions. veer.db itself is a
+        // leftover of those versions. Delete both if present.
         try deleteInDir(io, dir, ".gitignore", writer);
         try deleteInDir(io, dir, "veer.db", writer);
         std.Io.Dir.cwd().deleteDir(io, dir) catch {};
@@ -147,7 +189,7 @@ pub fn uninstall(allocator: std.mem.Allocator, io: std.Io, paths: Paths, writer:
 
 // -- internal helpers --
 
-fn installHook(allocator: std.mem.Allocator, io: std.Io, path: []const u8, verbose: bool, writer: anytype) !u8 {
+fn installHook(allocator: std.mem.Allocator, io: std.Io, path: []const u8, verbose: bool, with_notice: bool, writer: anytype) !u8 {
     // Read existing file or start with {}
     const content = readFileAlloc(allocator, io, path) catch |err| switch (err) {
         error.FileNotFound => try allocator.dupe(u8, "{}"),
@@ -173,8 +215,9 @@ fn installHook(allocator: std.mem.Allocator, io: std.Io, path: []const u8, verbo
 
     const hooks_val = try getOrCreateObject(arena, &parsed.value.object, "hooks");
     for (hook_events) |event| {
-        try addVeerHook(arena, &hooks_val.object, event, verbose);
+        try addVeerHook(arena, &hooks_val.object, event, hookCommandFor(verbose));
     }
+    if (with_notice) try addVeerHook(arena, &hooks_val.object, notice_event, notice_command);
 
     try writeJsonAtomic(allocator, io, path, parsed.value);
     const verb: []const u8 = if (was_present) "updated" else "installed";
@@ -182,10 +225,10 @@ fn installHook(allocator: std.mem.Allocator, io: std.Io, path: []const u8, verbo
     return 0;
 }
 
-/// Append the veer command to the event's entry whose matcher equals
+/// Append `command` to the event's entry whose matcher equals
 /// `event.matcher` (or that has no matcher, when it is null), creating the
 /// entry if none exists.
-fn addVeerHook(arena: std.mem.Allocator, hooks_obj: *std.json.ObjectMap, event: HookEvent, verbose: bool) !void {
+fn addVeerHook(arena: std.mem.Allocator, hooks_obj: *std.json.ObjectMap, event: HookEvent, command: []const u8) !void {
     const event_arr = try getOrCreateArray(arena, hooks_obj, event.name);
 
     const entry: *std.json.Value = blk: {
@@ -210,7 +253,7 @@ fn addVeerHook(arena: std.mem.Allocator, hooks_obj: *std.json.ObjectMap, event: 
     const entry_hooks = try getOrCreateArray(arena, &entry.object, "hooks");
     var hook_obj: std.json.ObjectMap = .empty;
     try hook_obj.put(arena, "type", .{ .string = "command" });
-    try hook_obj.put(arena, "command", .{ .string = hookCommandFor(verbose) });
+    try hook_obj.put(arena, "command", .{ .string = command });
     try entry_hooks.array.append(.{ .object = hook_obj });
 }
 
@@ -260,7 +303,7 @@ fn removeVeerEntries(root: *std.json.ObjectMap) bool {
     if (hooks_val.* != .object) return false;
 
     var removed_any = false;
-    for (hook_events) |event| {
+    for (hook_events ++ [_]HookEvent{notice_event}) |event| {
         if (removeFromEvent(&hooks_val.object, event.name)) removed_any = true;
     }
     if (!removed_any) return false;
@@ -473,6 +516,7 @@ fn testPaths(allocator: std.mem.Allocator, tmp_root: []const u8) !Paths {
         .settings = try std.fmt.allocPrint(allocator, "{s}/.claude/settings.json", .{tmp_root}),
         .config = try std.fmt.allocPrint(allocator, "{s}/.veer/config.toml", .{tmp_root}),
         .skill = try std.fmt.allocPrint(allocator, "{s}/.claude/skills/veer/SKILL.md", .{tmp_root}),
+        .notice_ignore = try std.fmt.allocPrint(allocator, "{s}/.veer/.gitignore", .{tmp_root}),
     };
 }
 
@@ -480,6 +524,7 @@ fn freeTestPaths(allocator: std.mem.Allocator, paths: Paths) void {
     allocator.free(paths.settings);
     allocator.free(paths.config);
     if (paths.skill) |s| allocator.free(s);
+    if (paths.notice_ignore) |s| allocator.free(s);
 }
 
 fn testWriteFile(io: std.Io, path: []const u8, content: []const u8) !void {
@@ -930,6 +975,7 @@ test "install with null skill writes no skill file" {
         .settings = try std.fmt.allocPrint(testing.allocator, "{s}/.claude/settings.local.json", .{tmp_root}),
         .config = try std.fmt.allocPrint(testing.allocator, "{s}/.veer/config.local.toml", .{tmp_root}),
         .skill = null,
+        .notice_ignore = null,
     };
     defer testing.allocator.free(paths.settings);
     defer testing.allocator.free(paths.config);
@@ -1194,4 +1240,199 @@ test "install replaces a hand-edited marked command" {
     const cmd = try testHookCommand(content, "PreToolUse", 0, 0);
     defer testing.allocator.free(cmd);
     try testing.expectEqualStrings(hook_command_plain, cmd);
+}
+
+test "notice_text has no quote or backslash characters" {
+    try testing.expect(std.mem.indexOfAny(u8, notice_text, "'\"\\") == null);
+}
+
+test "notice_command echoes valid JSON carrying the notice in both fields" {
+    const open = "echo '";
+    const start = std.mem.indexOf(u8, notice_command, open).? + open.len;
+    const end = std.mem.lastIndexOfScalar(u8, notice_command, '\'').?;
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, notice_command[start..end], .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try testing.expectEqualStrings(notice_text, root.get("systemMessage").?.string);
+    const hso = root.get("hookSpecificOutput").?.object;
+    try testing.expectEqualStrings("SessionStart", hso.get("hookEventName").?.string);
+    try testing.expectEqualStrings(notice_text, hso.get("additionalContext").?.string);
+    try testing.expect(isVeerCommandString(notice_command));
+}
+
+test "project install registers the SessionStart notice under matcher startup" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
+    defer testing.allocator.free(tmp_root);
+    const paths = try testPaths(testing.allocator, tmp_root);
+    defer freeTestPaths(testing.allocator, paths);
+
+    var buf: [4096]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&buf);
+    _ = try install(testing.allocator, std.testing.io, paths, false, &stream);
+
+    const content = try readFileAlloc(testing.allocator, std.testing.io, paths.settings);
+    defer testing.allocator.free(content);
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, content, .{});
+    defer parsed.deinit();
+    const entries = parsed.value.object.get("hooks").?.object.get("SessionStart").?.array.items;
+    try testing.expectEqual(@as(usize, 1), entries.len);
+    try testing.expectEqualStrings("startup", entries[0].object.get("matcher").?.string);
+    const entry_hooks = entries[0].object.get("hooks").?.array.items;
+    try testing.expectEqual(@as(usize, 1), entry_hooks.len);
+    try testing.expectEqualStrings(notice_command, entry_hooks[0].object.get("command").?.string);
+}
+
+test "install without notice_ignore registers no SessionStart hook and writes no .gitignore" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
+    defer testing.allocator.free(tmp_root);
+    const project = try testPaths(testing.allocator, tmp_root);
+    defer freeTestPaths(testing.allocator, project);
+    const paths: Paths = .{ .settings = project.settings, .config = project.config, .skill = null, .notice_ignore = null };
+
+    var buf: [4096]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&buf);
+    _ = try install(testing.allocator, std.testing.io, paths, false, &stream);
+
+    const content = try readFileAlloc(testing.allocator, std.testing.io, paths.settings);
+    defer testing.allocator.free(content);
+    try testing.expect(std.mem.indexOf(u8, content, "SessionStart") == null);
+    try testExpectVeerCommands(content, hook_command_plain);
+    try testing.expect(!fileExistsAbs(std.testing.io, project.notice_ignore.?));
+}
+
+test "install appends no-notice to .veer/.gitignore once and keeps other lines" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
+    defer testing.allocator.free(tmp_root);
+    const paths = try testPaths(testing.allocator, tmp_root);
+    defer freeTestPaths(testing.allocator, paths);
+
+    try testWriteFile(std.testing.io, paths.notice_ignore.?, "veer.db*\n");
+
+    var buf: [4096]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&buf);
+    _ = try install(testing.allocator, std.testing.io, paths, false, &stream);
+    stream.end = 0;
+    _ = try install(testing.allocator, std.testing.io, paths, false, &stream);
+
+    const content = try readFileAlloc(testing.allocator, std.testing.io, paths.notice_ignore.?);
+    defer testing.allocator.free(content);
+    try testing.expectEqualStrings("veer.db*\nno-notice\n", content);
+}
+
+test "install creates .veer/.gitignore when missing" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
+    defer testing.allocator.free(tmp_root);
+    const paths = try testPaths(testing.allocator, tmp_root);
+    defer freeTestPaths(testing.allocator, paths);
+
+    var buf: [4096]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&buf);
+    _ = try install(testing.allocator, std.testing.io, paths, false, &stream);
+
+    const content = try readFileAlloc(testing.allocator, std.testing.io, paths.notice_ignore.?);
+    defer testing.allocator.free(content);
+    try testing.expectEqualStrings("no-notice\n", content);
+}
+
+test "install and uninstall preserve other tools' SessionStart hooks" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
+    defer testing.allocator.free(tmp_root);
+    const paths = try testPaths(testing.allocator, tmp_root);
+    defer freeTestPaths(testing.allocator, paths);
+
+    try testWriteFile(std.testing.io, paths.settings,
+        \\{"hooks":{"SessionStart":[
+        \\  {"matcher":"startup","hooks":[{"type":"command","command":"other-a"}]},
+        \\  {"hooks":[{"type":"command","command":"other-b"}]}
+        \\]}}
+    );
+
+    var buf: [4096]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&buf);
+    _ = try install(testing.allocator, std.testing.io, paths, false, &stream);
+    {
+        const content = try readFileAlloc(testing.allocator, std.testing.io, paths.settings);
+        defer testing.allocator.free(content);
+        const a = try testHookCommand(content, "SessionStart", 0, 0);
+        defer testing.allocator.free(a);
+        const notice = try testHookCommand(content, "SessionStart", 0, 1);
+        defer testing.allocator.free(notice);
+        const b = try testHookCommand(content, "SessionStart", 1, 0);
+        defer testing.allocator.free(b);
+        try testing.expectEqualStrings("other-a", a);
+        try testing.expectEqualStrings(notice_command, notice);
+        try testing.expectEqualStrings("other-b", b);
+    }
+
+    stream.end = 0;
+    _ = try uninstall(testing.allocator, std.testing.io, paths, &stream);
+    {
+        const content = try readFileAlloc(testing.allocator, std.testing.io, paths.settings);
+        defer testing.allocator.free(content);
+        const a = try testHookCommand(content, "SessionStart", 0, 0);
+        defer testing.allocator.free(a);
+        const b = try testHookCommand(content, "SessionStart", 1, 0);
+        defer testing.allocator.free(b);
+        try testing.expectEqualStrings("other-a", a);
+        try testing.expectEqualStrings("other-b", b);
+        try testing.expect(std.mem.indexOf(u8, content, "veer-hook") == null);
+    }
+}
+
+test "re-install does not duplicate the SessionStart notice" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
+    defer testing.allocator.free(tmp_root);
+    const paths = try testPaths(testing.allocator, tmp_root);
+    defer freeTestPaths(testing.allocator, paths);
+
+    var buf: [4096]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&buf);
+    _ = try install(testing.allocator, std.testing.io, paths, false, &stream);
+    stream.end = 0;
+    _ = try install(testing.allocator, std.testing.io, paths, false, &stream);
+
+    const content = try readFileAlloc(testing.allocator, std.testing.io, paths.settings);
+    defer testing.allocator.free(content);
+    try testing.expectEqual(@as(usize, 1), testCountOccurrences(content, "/.veer/no-notice"));
+}
+
+test "uninstall after a project install removes settings.json and .veer/.gitignore" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
+    defer testing.allocator.free(tmp_root);
+    const paths = try testPaths(testing.allocator, tmp_root);
+    defer freeTestPaths(testing.allocator, paths);
+
+    var buf: [4096]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&buf);
+    _ = try install(testing.allocator, std.testing.io, paths, false, &stream);
+    stream.end = 0;
+    _ = try uninstall(testing.allocator, std.testing.io, paths, &stream);
+
+    try testing.expect(!fileExistsAbs(std.testing.io, paths.settings));
+    try testing.expect(!fileExistsAbs(std.testing.io, paths.notice_ignore.?));
+}
+
+test "resolvePaths sets notice_ignore for project scope only" {
+    const env: std.process.Environ = .{ .block = .{ .slice = &[_:null]?[*:0]const u8{"HOME=/home/tester"} } };
+    const project = try resolvePaths(testing.allocator, env, .project);
+    try testing.expectEqualStrings(".veer/.gitignore", project.notice_ignore.?);
+    const local = try resolvePaths(testing.allocator, env, .local);
+    try testing.expect(local.notice_ignore == null);
+    const global = try resolvePaths(testing.allocator, env, .global);
+    defer freePaths(testing.allocator, global, .global);
+    try testing.expect(global.notice_ignore == null);
 }
