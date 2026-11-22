@@ -63,7 +63,7 @@ brew update && brew upgrade veer
 
 ### From source
 
-Requires Zig 0.16.
+Requires Zig 0.17.
 
 ```
 git clone https://github.com/tednaleid/veer.git
@@ -816,7 +816,7 @@ See [docs/fuzzing.md](docs/fuzzing.md) for details and status.
 To install veer for use, see [Install](#install). This section covers working
 on veer itself.
 
-Requires **Zig 0.16.0**. On macOS:
+Requires **Zig 0.17.0**. On macOS:
 
 ```bash
 brew install zig

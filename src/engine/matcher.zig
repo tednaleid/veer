@@ -292,7 +292,7 @@ fn regexMatchAlloc(allocator: std.mem.Allocator, pattern: []const u8, text: []co
     @memcpy(txt_buf[0..text.len], text);
     txt_buf[text.len] = 0;
 
-    return c.veer_regex_match(&pat_buf, txt_buf.ptr) == 1;
+    return veer_regex_match(pat_buf[0..pattern.len :0], txt_buf[0..text.len :0]) == 1;
 }
 
 /// Simple glob matching supporting *, ?, and {a,b,c} brace expansion.
@@ -356,9 +356,7 @@ fn globMatchSimple(pattern: []const u8, text: []const u8) bool {
     return true;
 }
 
-const c = @cImport({
-    @cInclude("veer_regex.h");
-});
+extern fn veer_regex_match(pattern: [*:0]const u8, text: [*:0]const u8) callconv(.c) c_int;
 
 /// POSIX extended regex matching via vendored C wrapper.
 /// The C wrapper handles regex_t allocation, which is opaque in glibc's @cImport.
@@ -372,7 +370,7 @@ fn regexMatch(pattern: []const u8, text: []const u8) bool {
     @memcpy(txt_buf[0..text.len], text);
     txt_buf[text.len] = 0;
 
-    return c.veer_regex_match(&pat_buf, &txt_buf) == 1;
+    return veer_regex_match(pat_buf[0..pattern.len :0], txt_buf[0..text.len :0]) == 1;
 }
 
 // -- Tests --

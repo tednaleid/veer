@@ -18,12 +18,20 @@ See `Justfile` for all build, test, and smoke test recipes. Key commands:
 Red/green testing: write a failing test before implementing, then make it pass.
 All commits should pass `just check`.
 
-Requires **Zig 0.16.0** (install via `brew install zig`). The stdlib source
+Requires **Zig 0.17.0** (install via `brew install zig`). The stdlib source
 is the best API reference:
-`/opt/homebrew/Cellar/zig/0.16.0/lib/zig/std/`
+`/opt/homebrew/Cellar/zig/0.17.0/lib/zig/std/`
 
-Zig 0.16 has breaking changes from 0.15 -- do not trust code examples from
-earlier versions. Key differences:
+Zig 0.16 and 0.17 both have breaking changes -- do not trust code examples from
+earlier versions. Key differences in 0.17:
+- `@cImport` is gone. Declare C functions with `extern fn`, as `matcher.zig` and
+  `shell.zig` do.
+- Array repetition (`**`) is gone; fill an array with `@splat(value)`.
+- `std.StaticBitSet(n)` is `std.bit_set.Static(n)`, initialized with `.empty`.
+- In `build.zig`, `b.args` and `b.build_root` are gone. Forward `zig build run -- ...`
+  arguments with `run_cmd.addPassthruArgs()`.
+
+Key differences in 0.16:
 - `std.io` is gone; writers are `*std.Io.Writer`. Build one over a buffer with
   `std.Io.Writer.fixed(&buf)`, read back with `stream.buffered()`, and repeat a
   byte with `writer.splatByteAll(c, n)`.
@@ -45,6 +53,25 @@ earlier versions. Key differences:
   `.{ .block = .{ .slice = &[_:null]?[*:0]const u8{"HOME=/home/tester"} } }`.
 - `addExecutable` takes a `root_module` (created via `b.createModule`), and C source
   and include paths attach to that Module, not to the `Compile` step.
+
+## Forked dependencies
+
+`zig-tree-sitter` in `build.zig.zon` points at `tednaleid/zig-tree-sitter`, a fork
+of `tree-sitter/zig-tree-sitter`. The fork's only change is its `build.zig.zon`,
+which pins a tree-sitter core commit that builds with Zig 0.17. Upstream pins
+core 0.27.0, which does not.
+
+When touching dependencies or the Zig version, check whether upstream has caught
+up, and if it has, repoint `build.zig.zon` at upstream and delete the fork:
+
+```
+gh api repos/tree-sitter/zig-tree-sitter/contents/build.zig.zon --jq .content | base64 -d | grep -A2 '\.tree_sitter = '
+```
+
+Upstream has caught up when the pinned core commit declares
+`minimum_zig_version` 0.17.0 or later in its own `build.zig.zon` (core 0.28.0
+and up). `docs/superpowers/specs/2026-10-02-zig-017-migration-status.md` has the
+background.
 
 ## Architecture
 
