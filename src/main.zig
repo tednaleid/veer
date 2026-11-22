@@ -394,11 +394,12 @@ fn runUninstall(allocator: std.mem.Allocator, io: std.Io, environ: std.process.E
         \\
     );
     const uninstall_desc =
-        \\Remove the veer PreToolUse hook and its supporting files.
+        \\Remove the veer hooks and their supporting files.
         \\
         \\By default, removes from the CURRENT directory:
-        \\  - removes the 'veer check' entry from .claude/settings.json (preserves other hooks)
-        \\  - deletes .veer/config.toml
+        \\  - removes veer's PreToolUse, Stop and SessionStart entries from
+        \\    .claude/settings.json (preserves other hooks)
+        \\  - deletes .veer/config.toml and .veer/.gitignore
         \\  - deletes .claude/skills/veer/SKILL.md
         \\
         \\With --local, the hook is removed from .claude/settings.local.json and

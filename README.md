@@ -203,7 +203,7 @@ The local config file (`.veer/config.local.toml`) is kept out of git via the rep
 
 veer works two ways in a repo, and you can use both at once.
 
-**Shared with the team (checked in).** Run `veer install`. It registers the hook in `.claude/settings.json`, seeds `.veer/config.toml`, and writes the SKILL.md. Commit all three. Everyone who clones the repo and has veer on their PATH gets the same rules (contributors without veer are unaffected -- see [fail-open](#when-veer-isnt-installed-fail-open)). Use this for rules the whole team should follow, like redirecting `pytest` to `just test` or blocking `curl | bash`.
+**Shared with the team (checked in).** Run `veer install`. It registers the hook in `.claude/settings.json`, seeds `.veer/config.toml`, writes the SKILL.md, and adds `no-notice` to `.veer/.gitignore`. Commit all four. Everyone who clones the repo and has veer on their PATH gets the same rules (contributors without veer are unaffected -- see [fail-open](#when-veer-isnt-installed-fail-open)). Use this for rules the whole team should follow, like redirecting `pytest` to `just test` or blocking `curl | bash`.
 
 **Private, just for you (not checked in).** Run `veer install --local`. It registers the hook in `.claude/settings.local.json`, seeds `.veer/config.local.toml`, and adds that file to the repo's `.git/info/exclude` (per-repo and uncommitted, so neither file is tracked and nothing leaks to teammates). No project skill file is written; it relies on a global skill, so run `veer install --global` once first. Use this when you want veer in a repo your team does not use, or to layer personal rules on top of a shared `.veer/config.toml`.
 
