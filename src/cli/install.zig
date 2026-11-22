@@ -157,10 +157,11 @@ pub fn install(allocator: std.mem.Allocator, io: std.Io, paths: Paths, verbose: 
 }
 
 /// Uninstall the veer hook:
-///   1. Remove veer entry from settings.json (preserve unrelated hooks).
+///   1. Remove veer entries from settings.json, including the SessionStart
+///      notice (preserve unrelated hooks).
 ///   2. Delete config.toml from config dir.
-///   3. Best-effort delete leftover veer.db from older installs (no-op if
-///      already absent).
+///   3. Best-effort delete .gitignore and a leftover veer.db from the config
+///      dir (no-op if already absent).
 ///   4. Try to remove the config dir if empty.
 ///   5. Delete SKILL.md and parent veer/ skill dir if empty.
 ///      (For a local/private install paths.skill is null, so this step is

@@ -319,6 +319,14 @@ fn runInstall(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Env
         \\  - merges the 'veer check' hook into .claude/settings.json (preserves other hooks)
         \\  - creates .veer/config.toml with a starter rule if it does not already exist
         \\  - writes .claude/skills/veer/SKILL.md (guides Claude on reading and adding veer rules)
+        \\  - registers a SessionStart hook for people who open the repo without veer
+        \\  - adds 'no-notice' to .veer/.gitignore (commit this file)
+        \\
+        \\The hook command exits silently when veer is not on the PATH, so a
+        \\committed .claude/settings.json does not produce hook errors for people
+        \\without veer. The SessionStart hook tells them, once per new session, how
+        \\to install veer. They can silence it with 'touch .veer/no-notice'.
+        \\Installs with --local or --global register no such notice.
         \\
         \\With --local, this is a fully private install: the hook goes into
         \\.claude/settings.local.json, the config stub is written to
@@ -331,7 +339,7 @@ fn runInstall(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Env
         \\  - ~/.config/veer/config.toml (if missing)
         \\  - ~/.claude/skills/veer/SKILL.md
         \\
-        \\With --verbose, the installed hook is 'veer check --verbose'. Each Bash
+        \\With --verbose, the installed hook runs 'veer check --verbose'. Each Bash
         \\command (and its rewrite target, if any) appears as a systemMessage banner
         \\in the transcript. The banner is visible to you but is not added to
         \\Claude's context. Non-Bash tools produce no banner. Re-run without

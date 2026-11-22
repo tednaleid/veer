@@ -171,7 +171,7 @@ veer install --verbose --local      # user-private, gitignored
 veer install --verbose --global     # all projects
 ```
 
-The registered hook becomes `veer check --verbose`, and every Bash tool call produces a `systemMessage` banner that Claude Code renders in the transcript:
+The registered hook runs `veer check --verbose`, and every Bash tool call produces a `systemMessage` banner that Claude Code renders in the transcript:
 
 ```
 Agent tries:  echo "hello"
@@ -593,7 +593,9 @@ Usage: veer check [--config <path>] [--verbose]
 
 ### veer install
 
-Register veer as a Claude Code hook for the `PreToolUse` and `Stop` events, plus a starter `.veer/config.toml` and a SKILL.md to teach the agent about veer. Re-running updates the hook entry to match current flags.
+Register veer as a Claude Code hook for the `PreToolUse` and `Stop` events, plus a starter `.veer/config.toml` and a SKILL.md to teach the agent about veer. Re-running updates the hook entries to match the current version and flags.
+
+A project install (no scope flag) also registers a `SessionStart` hook that tells contributors without veer how to get it, and adds `no-notice` to `.veer/.gitignore`. Commit `.veer/.gitignore` along with `.claude/settings.json`. See [When veer isn't installed](#when-veer-isnt-installed-fail-open).
 
 ```
 Usage: veer install [--local | --global] [--verbose]
@@ -768,9 +770,23 @@ Shell commands are parsed into ASTs using tree-sitter-bash, giving structural un
 
 ### When veer isn't installed (fail-open)
 
-If `veer` is registered as a hook in `settings.json` but the binary isn't on the PATH (uninstalled, not yet built, fresh checkout of an open-source project, etc.), Claude Code treats the missing hook as a **non-blocking** failure: the tool call proceeds normally and the user sees a `PreToolUse:Bash hook error` notification in the UI. The agent itself receives no signal -- from its perspective, the call simply ran.
+If `veer` is registered as a hook in `settings.json` but the binary isn't on the PATH (uninstalled, not yet built, fresh checkout of an open-source project, etc.), the hook command exits without output and the tool call proceeds normally. Each hook command starts with a guard for this:
 
-This is intentional. A `.veer/config.toml` checked into an open-source repo shouldn't block contributors who haven't installed veer. The tradeoff: rules silently stop being enforced if veer goes missing. If you depend on a specific rule for safety (rather than convenience), don't rely on veer alone for it -- pair it with Claude Code's built-in `deniedTools` / permission system, which fails closed.
+```
+command -v veer >/dev/null 2>&1 || exit 0; veer check # veer-hook
+```
+
+The trailing `# veer-hook` comment is how `veer install` and `veer uninstall` recognise their own entries.
+
+In a repo with a project install, a contributor without veer sees one notice at the start of each new session, and their agent receives the same text:
+
+> veer is not installed, so the Claude Code rules in .veer/config.toml are not enforced. veer steers Claude Code toward project-specific tooling. Install: brew install tednaleid/veer/veer (https://github.com/tednaleid/veer). To silence this notice: touch .veer/no-notice
+
+The notice does not repeat on resume, `/clear` or compaction. To silence it for one clone without installing veer, run `touch .veer/no-notice`. The committed `.veer/.gitignore` keeps that file out of git.
+
+Hooks written by veer 0.3.0 or earlier are a bare `veer check`. Without veer they show a `PreToolUse:Bash hook error` on every tool call, until the repo owner re-runs `veer install`.
+
+This is intentional. A `.veer/config.toml` checked into an open-source repo shouldn't block contributors who haven't installed veer. The tradeoff: rules stop being enforced if veer goes missing. If you depend on a specific rule for safety (rather than convenience), don't rely on veer alone for it -- pair it with Claude Code's built-in `deniedTools` / permission system, which fails closed.
 
 ## Performance
 
